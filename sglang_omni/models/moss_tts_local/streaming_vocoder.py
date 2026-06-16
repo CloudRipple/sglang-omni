@@ -15,13 +15,20 @@ requests take the pre-existing ``processor.decode_audio_codes`` path.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
+from sglang_omni.models.moss_tts_local.codec_cuda_graph import (
+    AudioTokenizerDecoderCudaGraph,
+    codec_cuda_graph_supported,
+    ensure_codec_decoder_cuda_graph_surface,
+    set_codec_attention_backend_for_cuda_graph,
+)
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
 from sglang_omni.models.tts_streaming import (
     INITIAL_CODEC_CHUNK_FRAMES_PARAM,
@@ -36,6 +43,41 @@ from sglang_omni.utils.audio_payload import audio_waveform_payload
 logger = logging.getLogger(__name__)
 
 _SOURCE_HINT = "MOSS-TTS Local"
+
+
+def _default_cuda_graph_step_frames(max_step_frames: int) -> tuple[int, ...]:
+    """Mirror SGLang decode CUDA graph's sparse bucket schedule for step T."""
+
+    max_step_frames = int(max_step_frames)
+    if max_step_frames <= 0:
+        return ()
+    capture_frames = [1, 2, 4, 8, 12] + list(range(16, max_step_frames + 1, 8))
+    if max_step_frames not in capture_frames:
+        capture_frames.append(max_step_frames)
+    return tuple(
+        sorted({frame for frame in capture_frames if frame <= max_step_frames})
+    )
+
+
+def _normalize_cuda_graph_step_frames(
+    step_frames: Sequence[int] | None,
+    *,
+    initial_chunk_frames: int,
+    max_step_frames: int,
+    stream_chunk_frames: int,
+) -> tuple[int, ...]:
+    if step_frames is None:
+        values = list(_default_cuda_graph_step_frames(max_step_frames))
+    else:
+        values = [int(frame) for frame in step_frames]
+    values.extend(
+        [int(initial_chunk_frames), int(max_step_frames), int(stream_chunk_frames)]
+    )
+    return tuple(
+        sorted(
+            {int(frame) for frame in values if 0 < int(frame) <= int(max_step_frames)}
+        )
+    )
 
 
 def _resolve_sample_rate(processor: Any) -> int:
@@ -73,7 +115,15 @@ class _CodecStreamSession:
     scheduler loop thread.
     """
 
-    def __init__(self, codec: Any, *, stream_slots: int, offline_slots: int) -> None:
+    def __init__(
+        self,
+        codec: Any,
+        *,
+        stream_slots: int,
+        offline_slots: int,
+        use_cuda_graph: bool = False,
+        cuda_graph_step_frames: Sequence[int] = (),
+    ) -> None:
         self._codec = codec
         self._stream_slots = int(stream_slots)
         self._offline_slots = int(offline_slots)
@@ -82,8 +132,17 @@ class _CodecStreamSession:
         self._free_stream_slots = list(range(self._stream_slots))
         self._exit_stack = contextlib.ExitStack()
         self._closed = False
+        if use_cuda_graph:
+            set_codec_attention_backend_for_cuda_graph(codec)
         with torch.no_grad():
             self._exit_stack.enter_context(codec.streaming(self._batch_size))
+        self._cuda_graph_decoder: AudioTokenizerDecoderCudaGraph | None = None
+        if use_cuda_graph:
+            self._cuda_graph_decoder = AudioTokenizerDecoderCudaGraph(codec)
+        self._cuda_graph_step_frames = tuple(
+            sorted({int(frame) for frame in cuda_graph_step_frames if int(frame) > 0})
+        )
+        self._cuda_graph_warmed = False
 
     def acquire(self) -> int | None:
         if not self._free_stream_slots:
@@ -94,14 +153,93 @@ class _CodecStreamSession:
         if self._closed:
             return
         self._reset_slots([slot])
-        self._free_stream_slots.append(slot)
+        if slot < self._stream_slots:
+            self._free_stream_slots.append(slot)
 
     def close(self) -> None:
         if self._closed:
             return
         with torch.no_grad():
             self._exit_stack.close()
+        if self._cuda_graph_decoder is not None:
+            self._cuda_graph_decoder.close()
+            self._cuda_graph_decoder = None
         self._closed = True
+
+    def warmup_cuda_graphs(
+        self,
+        *,
+        n_vq: int,
+        stream_chunk_frames: int,
+        max_step_frames: int,
+    ) -> None:
+        if self._cuda_graph_decoder is None or self._cuda_graph_warmed:
+            return
+        if self._device.type != "cuda":
+            return
+        n_vq = int(n_vq)
+        graph_specs: list[tuple[int, tuple[int, ...]]] = []
+        if stream_chunk_frames > 0:
+            for n_active in range(1, self._stream_slots + 1):
+                start = self._stream_slots - n_active
+                graph_specs.append(
+                    (
+                        int(stream_chunk_frames),
+                        tuple(range(start, self._stream_slots)),
+                    )
+                )
+        active_offline_slots = tuple(
+            range(self._stream_slots, self._stream_slots + self._offline_slots)
+        )
+        for step_frames in self._cuda_graph_step_frames:
+            if step_frames <= 0 or step_frames > int(max_step_frames):
+                continue
+            graph_specs.append((int(step_frames), active_offline_slots))
+
+        for chunk_size, active_slots in graph_specs:
+            self._warmup_cuda_graph(n_vq, chunk_size, active_slots)
+        self._cuda_graph_warmed = True
+
+    def _warmup_cuda_graph(
+        self, n_vq: int, chunk_size: int, active_slots: tuple[int, ...]
+    ) -> None:
+        assert self._cuda_graph_decoder is not None
+        codes_step = torch.zeros(
+            n_vq,
+            self._batch_size,
+            chunk_size,
+            dtype=torch.long,
+            device=self._device,
+        )
+        codes_lengths = torch.zeros(
+            self._batch_size, dtype=torch.long, device=self._device
+        )
+        exec_mask = torch.zeros(self._batch_size, dtype=torch.bool, device=self._device)
+        for slot in active_slots:
+            codes_lengths[slot] = chunk_size
+            exec_mask[slot] = True
+        with torch.no_grad():
+            self._codec._set_streaming_exec_mask(exec_mask)
+            self._cuda_graph_decoder.decode_frame(
+                codes_step,
+                codes_lengths,
+                chunk_size=chunk_size,
+                advance_frames=chunk_size,
+                active_slots=active_slots,
+            )
+            self._reset_slots(list(active_slots))
+
+    def cuda_graph_bucket(self, step_t: int) -> int | None:
+        if self._cuda_graph_decoder is None:
+            return None
+        index = bisect.bisect_left(self._cuda_graph_step_frames, int(step_t))
+        if index >= len(self._cuda_graph_step_frames):
+            return None
+        return self._cuda_graph_step_frames[index]
+
+    def exact_cuda_graph_bucket(self, step_t: int) -> int | None:
+        bucket = self.cuda_graph_bucket(step_t)
+        return bucket if bucket == int(step_t) else None
 
     def _reset_slots(self, slots: list[int]) -> None:
         reset_mask = torch.zeros(
@@ -117,7 +255,14 @@ class _CodecStreamSession:
         with torch.no_grad():
             self._codec.apply(_reset)
 
-    def step(self, slot_codes: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+    def step(
+        self,
+        slot_codes: dict[int, torch.Tensor],
+        *,
+        use_cuda_graph: bool = True,
+        graph_step_frames: int | None = None,
+        final_step: bool = False,
+    ) -> dict[int, torch.Tensor]:
         """Advance the participating slots by one uniform-length step.
 
         ``slot_codes`` maps slot -> ``[n_vq, T]`` codes with the SAME ``T``
@@ -126,27 +271,47 @@ class _CodecStreamSession:
         """
         if not slot_codes:
             return {}
-        step_lengths = {int(codes.shape[1]) for codes in slot_codes.values()}
-        if len(step_lengths) != 1:
+        step_lengths_by_slot = {
+            int(slot): int(codes.shape[1]) for slot, codes in slot_codes.items()
+        }
+        step_lengths = set(step_lengths_by_slot.values())
+        if len(step_lengths) != 1 and not final_step:
             raise ValueError(
                 f"streaming step requires a uniform length, got {sorted(step_lengths)}"
             )
-        (step_t,) = step_lengths
+        step_t = max(step_lengths)
+        graph_t = int(graph_step_frames) if graph_step_frames is not None else step_t
+        if graph_t < step_t:
+            graph_t = step_t
+        if graph_t > step_t and not final_step:
+            graph_t = step_t
         n_vq = int(next(iter(slot_codes.values())).shape[0])
         codes_step = torch.zeros(
-            n_vq, self._batch_size, step_t, dtype=torch.long, device=self._device
+            n_vq, self._batch_size, graph_t, dtype=torch.long, device=self._device
         )
         codes_lengths = torch.zeros(
             self._batch_size, dtype=torch.long, device=self._device
         )
         exec_mask = torch.zeros(self._batch_size, dtype=torch.bool, device=self._device)
         for slot, codes in slot_codes.items():
-            codes_step[:, slot, :] = codes.to(device=self._device, dtype=torch.long)
-            codes_lengths[slot] = step_t
+            slot_step_t = step_lengths_by_slot[int(slot)]
+            codes_step[:, slot, :slot_step_t] = codes.to(
+                device=self._device, dtype=torch.long
+            )
+            codes_lengths[slot] = slot_step_t
             exec_mask[slot] = True
         with torch.no_grad():
             self._codec._set_streaming_exec_mask(exec_mask)
-            result = self._codec._decode_frame(codes_step, codes_lengths)
+            if self._cuda_graph_decoder is None or not use_cuda_graph:
+                result = self._codec._decode_frame(codes_step, codes_lengths)
+            else:
+                result = self._cuda_graph_decoder.decode_frame(
+                    codes_step,
+                    codes_lengths,
+                    chunk_size=graph_t,
+                    advance_frames=step_t,
+                    active_slots=tuple(sorted(slot_codes)),
+                )
         # One batched D2H per step, active slots only.
         slots = list(slot_codes)
         audio_cpu = result.audio[slots].detach().to("cpu", torch.float32)
@@ -172,6 +337,7 @@ class _CodecStreamSession:
             self._reset_slots(slots)
             cursors = [0] * len(wave)
             chunks: list[list[torch.Tensor]] = [[] for _ in wave]
+            graph_enabled = self._cuda_graph_decoder is not None
             while True:
                 remaining = [
                     int(codes.shape[1]) - cur for codes, cur in zip(wave, cursors)
@@ -179,6 +345,47 @@ class _CodecStreamSession:
                 positive = [r for r in remaining if r > 0]
                 if not positive:
                     break
+                if graph_enabled:
+                    if any(r > max_step_frames for r in positive):
+                        step_t = max_step_frames
+                        plan = {
+                            slots[i]: wave[i][:, cursors[i] : cursors[i] + step_t]
+                            for i, rem in enumerate(remaining)
+                            if rem >= step_t
+                        }
+                        decoded = self.step(
+                            plan,
+                            use_cuda_graph=True,
+                            graph_step_frames=self.exact_cuda_graph_bucket(step_t),
+                        )
+                        for i in range(len(wave)):
+                            if slots[i] in plan:
+                                chunks[i].append(decoded[slots[i]])
+                                cursors[i] += step_t
+                        continue
+
+                    final_groups: dict[int, dict[int, torch.Tensor]] = {}
+                    for i, rem in enumerate(remaining):
+                        if rem <= 0:
+                            continue
+                        bucket = self.cuda_graph_bucket(rem) or rem
+                        final_groups.setdefault(bucket, {})[slots[i]] = wave[i][
+                            :, cursors[i] : cursors[i] + rem
+                        ]
+                    for bucket, plan in sorted(final_groups.items()):
+                        decoded = self.step(
+                            plan,
+                            use_cuda_graph=True,
+                            graph_step_frames=bucket,
+                            final_step=True,
+                        )
+                        for i, rem in enumerate(remaining):
+                            if slots[i] in plan:
+                                chunks[i].append(decoded[slots[i]])
+                                cursors[i] += rem
+                        self._reset_slots(list(plan))
+                    break
+
                 if any(r >= max_step_frames for r in positive):
                     step_t = max_step_frames
                 else:
@@ -188,7 +395,7 @@ class _CodecStreamSession:
                     for i, rem in enumerate(remaining)
                     if rem >= step_t
                 }
-                decoded = self.step(plan)
+                decoded = self.step(plan, use_cuda_graph=False)
                 for i in range(len(wave)):
                     if slots[i] in plan:
                         chunks[i].append(decoded[slots[i]])
@@ -221,6 +428,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         max_step_frames: int = 100,
         max_batch_size: int = 8,
         max_batch_wait_ms: int = 2,
+        use_cuda_graph: bool = True,
+        cuda_graph_step_frames: Sequence[int] | None = None,
     ) -> None:
         if stream_slots < 1:
             raise ValueError(f"stream_slots must be >= 1, got {stream_slots}")
@@ -246,16 +455,39 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             )
         self._processor = processor
         self._codec = codec
+        ensure_codec_decoder_cuda_graph_surface(codec)
         self._stream_slots = int(stream_slots)
         self._stream_chunk_frames = int(stream_chunk_frames)
         self._default_initial_chunk_frames = max(
             0, min(int(initial_chunk_frames), int(stream_chunk_frames))
         )
         self._max_step_frames = int(max_step_frames)
+        self._cuda_graph_step_frames = _normalize_cuda_graph_step_frames(
+            cuda_graph_step_frames,
+            initial_chunk_frames=self._default_initial_chunk_frames,
+            max_step_frames=self._max_step_frames,
+            stream_chunk_frames=self._stream_chunk_frames,
+        )
         self._offline_slots = max(int(max_batch_size), 1)
         self._n_vq = int(processor.model_config.n_vq)
         self._sample_rate = _resolve_sample_rate(processor)
+        self._use_cuda_graph = bool(
+            use_cuda_graph and codec_cuda_graph_supported(codec)
+        )
+        if use_cuda_graph and not self._use_cuda_graph:
+            logger.info(
+                "MOSS-TTS Local audio-tokenizer CUDA graph is disabled: "
+                "codec is not CUDA graph compatible on this device"
+            )
+        elif self._use_cuda_graph:
+            set_codec_attention_backend_for_cuda_graph(codec)
+            logger.info(
+                "MOSS-TTS Local audio-tokenizer CUDA graph is enabled "
+                "(step_frames=%s)",
+                list(self._cuda_graph_step_frames),
+            )
         self._session: _CodecStreamSession | None = None
+        self._offline_session: _CodecStreamSession | None = None
         self._stream_states: dict[str, _LocalStreamState] = {}
         super().__init__(
             self._vocode,
@@ -266,6 +498,13 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
 
     def start(self) -> None:
         try:
+            if self._use_cuda_graph:
+                logger.info(
+                    "MOSS-TTS Local warming audio-tokenizer CUDA graphs before "
+                    "serving requests"
+                )
+                with self._state_lock:
+                    self._ensure_offline_session()
             super().start()
         finally:
             self._close_streaming_session()
@@ -279,6 +518,9 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def _close_streaming_session(self) -> None:
         with self._state_lock:
             self._stream_states.clear()
+            if self._offline_session is not None:
+                self._offline_session.close()
+                self._offline_session = None
             if self._session is not None:
                 self._session.close()
                 self._session = None
@@ -348,7 +590,19 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 step_t = min(len(state.pending), self._max_step_frames)
                 codes = torch.stack(state.pending[:step_t], dim=1)
                 del state.pending[:step_t]
-                audio_parts.append(session.step({state.slot: codes})[state.slot])
+                graph_step_frames = (
+                    session.cuda_graph_bucket(step_t)
+                    if not state.pending
+                    else session.exact_cuda_graph_bucket(step_t)
+                )
+                audio_parts.append(
+                    session.step(
+                        {state.slot: codes},
+                        use_cuda_graph=graph_step_frames is not None,
+                        graph_step_frames=graph_step_frames,
+                        final_step=not state.pending,
+                    )[state.slot]
+                )
             session.release(state.slot)
             state.slot = None
 
@@ -394,12 +648,40 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
 
     def _ensure_session(self) -> _CodecStreamSession:
         if self._session is None:
+            if self._offline_session is not None:
+                self._offline_session.close()
+                self._offline_session = None
             self._session = _CodecStreamSession(
                 self._codec,
                 stream_slots=self._stream_slots,
                 offline_slots=self._offline_slots,
+                use_cuda_graph=self._use_cuda_graph,
+                cuda_graph_step_frames=self._cuda_graph_step_frames,
+            )
+            self._session.warmup_cuda_graphs(
+                n_vq=self._n_vq,
+                stream_chunk_frames=self._stream_chunk_frames,
+                max_step_frames=self._max_step_frames,
             )
         return self._session
+
+    def _ensure_offline_session(self) -> _CodecStreamSession:
+        if self._session is not None:
+            return self._session
+        if self._offline_session is None:
+            self._offline_session = _CodecStreamSession(
+                self._codec,
+                stream_slots=0,
+                offline_slots=self._offline_slots,
+                use_cuda_graph=self._use_cuda_graph,
+                cuda_graph_step_frames=self._cuda_graph_step_frames,
+            )
+            self._offline_session.warmup_cuda_graphs(
+                n_vq=self._n_vq,
+                stream_chunk_frames=0,
+                max_step_frames=self._max_step_frames,
+            )
+        return self._offline_session
 
     def _ensure_slot(self, state: _LocalStreamState) -> None:
         if state.slot is None:
@@ -499,7 +781,14 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             for _, state in participants:
                 plan[state.slot] = torch.stack(state.pending[:step_t], dim=1)
             try:
-                decoded = self._ensure_session().step(plan)
+                graph_step_frames = self._ensure_session().exact_cuda_graph_bucket(
+                    step_t
+                )
+                decoded = self._ensure_session().step(
+                    plan,
+                    use_cuda_graph=graph_step_frames is not None,
+                    graph_step_frames=graph_step_frames,
+                )
             except Exception as exc:
                 logger.exception(
                     "MOSS-TTS Local streaming decode step failed; aborting %d "
@@ -593,7 +882,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
 
     def _decode_codes_rows(self, codes_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """Decode ``[T, >=n_vq]`` row tensors to fp32 CPU waveforms."""
-        if self._session is None:
+        if self._session is None and not self._use_cuda_graph:
             # Processor path opens its own streaming context; illegal once a
             # session is live.
             return [
@@ -606,7 +895,12 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         # abort() resets slots under _state_lock from other threads; serialize
         # every session access on the same lock.
         with self._state_lock:
-            wavs = self._session.decode_offline(
+            session = (
+                self._session
+                if self._session is not None
+                else self._ensure_offline_session()
+            )
+            wavs = session.decode_offline(
                 channels_first, max_step_frames=self._max_step_frames
             )
         return [wav.detach().to("cpu", torch.float32).contiguous() for wav in wavs]

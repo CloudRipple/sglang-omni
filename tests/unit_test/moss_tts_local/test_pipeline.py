@@ -999,6 +999,40 @@ def test_cached_reference_encoder_data_uri_hit_miss(tmp_path):
     assert stats["misses"] == 1
 
 
+def test_cached_reference_encoder_data_uri_uses_cuda_graph_capture_lock(monkeypatch):
+    from sglang_omni.models.moss_tts_local import stages
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    data_uri, _ = _make_wav_data_uri()
+    lock_depth = 0
+    observed_lock_depths: list[int] = []
+
+    class _FakeLock:
+        def __enter__(self):
+            nonlocal lock_depth
+            lock_depth += 1
+
+        def __exit__(self, exc_type, exc, tb):
+            nonlocal lock_depth
+            lock_depth -= 1
+            return False
+
+    class _FakeProc:
+        def encode_audios_from_wav(self, wavs, sample_rate):
+            observed_lock_depths.append(lock_depth)
+            return [torch.full((5, N_VQ), 42, dtype=torch.long)]
+
+    monkeypatch.setattr(stages, "codec_cuda_graph_capture_lock", _FakeLock())
+
+    enc = CachedReferenceEncoder(
+        None, max_items=256, max_bytes=64 << 20  # type: ignore[arg-type]
+    )
+    enc.encode_data_uri(data_uri, processor=_FakeProc())
+
+    assert observed_lock_depths == [1]
+    assert lock_depth == 0
+
+
 def test_cached_reference_encoder_file_bytes_keyspaces_do_not_collide(tmp_path):
     """file: and bytes: keys are independent; same-content file ≠ data-URI in cache."""
     from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder

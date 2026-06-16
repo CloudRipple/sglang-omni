@@ -13,6 +13,7 @@ codes — the property the v2 codec provides by construction.
 
 from __future__ import annotations
 
+import math
 import queue
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -23,7 +24,14 @@ import pytest
 import torch
 from torch import nn
 
-from sglang_omni.models.moss_tts_local import stages
+from sglang_omni.models.moss_tts_local import (
+    codec_cuda_graph,
+    stages,
+    streaming_vocoder,
+)
+from sglang_omni.models.moss_tts_local.codec_cuda_graph import (
+    ensure_codec_decoder_cuda_graph_surface,
+)
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
 from sglang_omni.models.moss_tts_local.request_builders import (
     build_moss_tts_local_stream_metadata,
@@ -138,6 +146,188 @@ class FakeProcessor:
         return wavs
 
 
+class _PatchableDecoder(nn.Module):
+    def forward(self, audio: torch.Tensor, lengths: torch.Tensor):
+        return audio + 1.0, lengths + 2
+
+
+class _PatchableCodec(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.decoder = nn.ModuleList([_PatchableDecoder()])
+
+    def _restore_channels_from_codec(self, audio: torch.Tensor, lengths: torch.Tensor):
+        return audio * 2.0, lengths + 1
+
+
+class _AttentionLeaf(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention_implementation = "flash_attention_2"
+
+    def set_attention_implementation(self, attention_implementation: str) -> None:
+        self.attention_implementation = attention_implementation
+
+
+class _AttentionParent(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention_implementation = "flash_attention_2"
+        self.child = _AttentionLeaf()
+
+    def set_attention_implementation(self, attention_implementation: str) -> None:
+        self.attention_implementation = attention_implementation
+        self.child.set_attention_implementation(attention_implementation)
+
+
+class _AttentionCodec(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention_implementation = "flash_attention_2"
+        self.set_calls: list[str] = []
+        self.dummy = nn.Parameter(torch.zeros(1))
+        self.decoder = nn.ModuleList([_AttentionParent()])
+
+    def set_attention_implementation(self, attention_implementation: str) -> None:
+        self.set_calls.append(attention_implementation)
+        self.attention_implementation = attention_implementation
+        for module in self.decoder:
+            module.set_attention_implementation(attention_implementation)
+
+
+class _TinyRotaryEmbedding(nn.Module):
+    def __init__(self, max_period: float = 10000.0) -> None:
+        super().__init__()
+        self.max_period = max_period
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        offset: torch.Tensor,
+        time_before_heads: bool = False,
+    ):
+        if time_before_heads:
+            batch_size, time_steps, _, head_dim = q.shape
+        else:
+            batch_size, _, time_steps, head_dim = q.shape
+        ds = torch.arange(head_dim // 2, device=q.device, dtype=torch.float32)
+        freqs = torch.exp(ds * (-math.log(self.max_period) * 2 / head_dim))
+        ts = offset.float().view(-1, 1) + torch.arange(
+            time_steps, device=q.device, dtype=torch.float32
+        )
+        if time_before_heads:
+            ts = ts.view(batch_size, -1, 1, 1)
+        else:
+            ts = ts.view(batch_size, 1, -1, 1)
+
+        dims = q.shape[:-1]
+        q = q.view(*dims, head_dim // 2, 2)
+        k = k.view(*dims, head_dim // 2, 2)
+        qr, qi = q[..., 0].float(), q[..., 1].float()
+        kr, ki = k[..., 0].float(), k[..., 1].float()
+        rotr = torch.cos(freqs * ts)
+        roti = torch.sin(freqs * ts)
+        qo = torch.stack(
+            [(qr * rotr - qi * roti).to(q.dtype), (qr * roti + qi * rotr).to(q.dtype)],
+            dim=-1,
+        )
+        ko = torch.stack(
+            [(kr * rotr - ki * roti).to(k.dtype), (kr * roti + ki * rotr).to(k.dtype)],
+            dim=-1,
+        )
+        return qo.view(*dims, head_dim), ko.view(*dims, head_dim)
+
+
+class _RopeAttention(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed_dim = 8
+        self.num_heads = 2
+        self.rope = _TinyRotaryEmbedding()
+
+
+class _RopeCodec(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(1))
+        self.decoder = nn.ModuleList([_RopeAttention()])
+
+
+class _CacheState:
+    def __init__(self) -> None:
+        self.exec_mask = torch.tensor([True, False])
+        self.cached_keys = torch.tensor([[[[1.0], [2.0]]], [[[3.0], [4.0]]]])
+        self.cached_values = self.cached_keys + 10.0
+        self.cached_positions = torch.tensor([[0, 1], [2, 3]])
+
+
+class _CacheAttention(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention_implementation = "sdpa"
+        self.context = 2
+
+    def _update_streaming_cache(
+        self,
+        state,
+        cached_k,
+        cached_v,
+        cached_pos,
+        k_all,
+        v_all,
+        pos_k,
+    ) -> None:
+        exec_mask = state.exec_mask.view(-1, 1, 1, 1)
+        exec_mask_pos = state.exec_mask.view(-1, 1)
+        state.cached_keys = torch.where(exec_mask, k_all[:, :, -2:, :], cached_k)
+        state.cached_values = torch.where(exec_mask, v_all[:, :, -2:, :], cached_v)
+        state.cached_positions = torch.where(exec_mask_pos, pos_k[:, -2:], cached_pos)
+
+
+class _CacheCodec(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.decoder = nn.ModuleList([_CacheAttention()])
+
+
+class _StreamingStateModule(nn.Module):
+    def __init__(self, state: Any) -> None:
+        super().__init__()
+        self._streaming_state = state
+
+
+class _StreamingStateCodec(nn.Module):
+    def __init__(self, state: Any) -> None:
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(1))
+        self.decoder = nn.ModuleList([_StreamingStateModule(state)])
+
+
+class _FakeCudaGraphDecoder:
+    disabled_reason = None
+
+    def __init__(self, codec: FakeCodec) -> None:
+        self._codec = codec
+        self.calls: list[tuple[int, tuple[int, ...] | None]] = []
+
+    def decode_frame(
+        self,
+        codes: torch.Tensor,
+        code_lengths: torch.Tensor,
+        *,
+        chunk_size: int,
+        advance_frames: int | None = None,
+        active_slots: tuple[int, ...] | None = None,
+    ):
+        del advance_frames
+        self.calls.append((chunk_size, active_slots))
+        return self._codec._decode_frame(codes, code_lengths)
+
+    def close(self) -> None:
+        pass
+
+
 def reference_waveform(rows: torch.Tensor) -> torch.Tensor:
     """Stateless offline decode of [T, n_vq] codes rows."""
     codes = rows[:, :N_VQ]
@@ -157,7 +347,7 @@ def _make_scheduler(
     monkeypatch.setattr(
         stages,
         "_load_moss_tts_local_processor",
-        lambda model_path, *, device: processor,
+        lambda model_path, *, device, **_: processor,
     )
     scheduler = stages.create_vocoder_executor("fake-model", device="cpu", **kwargs)
     assert isinstance(scheduler, MossTTSLocalStreamingVocoderScheduler)
@@ -269,6 +459,135 @@ def test_stream_metadata_builder() -> None:
         "n_vq": 12,
         INITIAL_CODEC_CHUNK_FRAMES_PARAM: 3,
     }
+
+
+def test_cuda_graph_surface_patch_splits_decoder_hidden_states() -> None:
+    codec = _PatchableCodec()
+
+    ensure_codec_decoder_cuda_graph_surface(codec)
+
+    hidden = torch.zeros(2, 1, 3)
+    lengths = torch.tensor([3])
+    result = codec._decode_hidden_states(hidden, lengths)
+    torch.testing.assert_close(result.audio, torch.full_like(hidden, 2.0))
+    torch.testing.assert_close(result.audio_lengths, torch.tensor([6]))
+
+
+def test_cuda_graph_decoder_directly_sets_sdpa_attention(monkeypatch) -> None:
+    codec = _AttentionCodec()
+    parent = codec.decoder[0]
+    leaf = parent.child
+    monkeypatch.setattr(codec_cuda_graph, "codec_cuda_graph_supported", lambda _: True)
+
+    graph_decoder = codec_cuda_graph.AudioTokenizerDecoderCudaGraph(codec)
+
+    assert codec.set_calls == ["sdpa"]
+    assert codec.attention_implementation == "sdpa"
+    assert parent.attention_implementation == "sdpa"
+    assert leaf.attention_implementation == "sdpa"
+
+    graph_decoder.close()
+
+    assert codec.attention_implementation == "sdpa"
+    assert parent.attention_implementation == "sdpa"
+    assert leaf.attention_implementation == "sdpa"
+
+
+def test_cuda_graph_decoder_caches_streaming_states(monkeypatch) -> None:
+    initial_state = SimpleNamespace(offset=torch.tensor([0, 0]))
+    replacement_state = SimpleNamespace(offset=torch.tensor([1, 1]))
+    codec = _StreamingStateCodec(initial_state)
+    monkeypatch.setattr(codec_cuda_graph, "codec_cuda_graph_supported", lambda _: True)
+    graph_decoder = codec_cuda_graph.AudioTokenizerDecoderCudaGraph(codec)
+
+    states = graph_decoder._streaming_states()
+    codec.decoder[0]._streaming_state = replacement_state
+
+    assert graph_decoder._streaming_states() is states
+    assert graph_decoder._streaming_states() == [initial_state]
+
+
+def test_cuda_graph_rope_patch_matches_original() -> None:
+    codec = _RopeCodec()
+    rope = codec.decoder[0].rope
+    offset = torch.tensor([0, 3])
+    q = torch.randn(2, 2, 5, 4)
+    k = torch.randn(2, 2, 5, 4)
+    expected_q, expected_k = rope(q, k, offset, time_before_heads=False)
+
+    codec_cuda_graph.patch_codec_rope_for_cuda_graph(codec)
+
+    actual_q, actual_k = rope(q, k, offset, time_before_heads=False)
+    torch.testing.assert_close(actual_q, expected_q)
+    torch.testing.assert_close(actual_k, expected_k)
+    assert hasattr(rope, "_sglang_omni_original_rope_forward")
+
+    q_time_first = q.transpose(1, 2).contiguous()
+    k_time_first = k.transpose(1, 2).contiguous()
+    expected_q, expected_k = rope._sglang_omni_original_rope_forward(
+        q_time_first, k_time_first, offset, time_before_heads=True
+    )
+    actual_q, actual_k = rope(
+        q_time_first, k_time_first, offset, time_before_heads=True
+    )
+    torch.testing.assert_close(actual_q, expected_q)
+    torch.testing.assert_close(actual_k, expected_k)
+
+
+def test_cuda_graph_attention_cache_patch_keeps_storage_stable() -> None:
+    codec = _CacheCodec()
+    attention = codec.decoder[0]
+    state = _CacheState()
+    original_keys = state.cached_keys
+    original_values = state.cached_values
+    original_positions = state.cached_positions
+    cached_k = state.cached_keys.clone()
+    cached_v = state.cached_values.clone()
+    cached_pos = state.cached_positions.clone()
+    k_all = torch.tensor([[[[5.0], [6.0], [7.0]]], [[[8.0], [9.0], [10.0]]]])
+    v_all = k_all + 20.0
+    pos_k = torch.tensor([[4, 5, 6], [7, 8, 9]])
+
+    codec_cuda_graph.patch_codec_attention_cache_for_cuda_graph(codec)
+    attention._update_streaming_cache(
+        state, cached_k, cached_v, cached_pos, k_all, v_all, pos_k
+    )
+
+    assert state.cached_keys is original_keys
+    assert state.cached_values is original_values
+    assert state.cached_positions is original_positions
+    torch.testing.assert_close(
+        state.cached_keys, torch.tensor([[[[6.0], [7.0]]], [[[3.0], [4.0]]]])
+    )
+    torch.testing.assert_close(
+        state.cached_values, torch.tensor([[[[26.0], [27.0]]], [[[13.0], [14.0]]]])
+    )
+    torch.testing.assert_close(state.cached_positions, torch.tensor([[5, 6], [2, 3]]))
+    assert hasattr(attention, "_sglang_omni_original_update_streaming_cache")
+
+
+def test_cuda_graph_offset_correction_uses_real_code_lengths() -> None:
+    graph = object.__new__(codec_cuda_graph.AudioTokenizerDecoderCudaGraph)
+    offset_state = SimpleNamespace(
+        exec_mask=torch.tensor([True, True, False]),
+        offset=torch.tensor([18, 28, 30]),
+    )
+    offsets_state = SimpleNamespace(
+        exec_mask=torch.tensor([True, True, False]),
+        offsets=torch.tensor([108, 208, 300]),
+    )
+    cpu_state = SimpleNamespace(offset_cpu=11)
+    graph._streaming_states = lambda: [offset_state, offsets_state, cpu_state]
+
+    graph._correct_streaming_offsets(
+        torch.tensor([3, 5, 0]),
+        chunk_size=8,
+        fallback_advance_frames=5,
+    )
+
+    torch.testing.assert_close(offset_state.offset, torch.tensor([13, 25, 30]))
+    torch.testing.assert_close(offsets_state.offsets, torch.tensor([103, 205, 300]))
+    assert cpu_state.offset_cpu == 16
 
 
 def test_stream_concatenates_to_offline_decode(monkeypatch) -> None:
@@ -600,6 +919,81 @@ def test_done_without_chunks_decodes_payload_codes(monkeypatch) -> None:
         reference_waveform(rows[:, 1:]).numpy(),
     )
     assert [m.type for m in messages] == ["stream", "result"]
+
+
+def test_non_streaming_cuda_graph_mode_creates_offline_session(monkeypatch) -> None:
+    processor = FakeProcessor()
+    monkeypatch.setattr(streaming_vocoder, "codec_cuda_graph_supported", lambda _: True)
+    monkeypatch.setattr(
+        streaming_vocoder, "AudioTokenizerDecoderCudaGraph", _FakeCudaGraphDecoder
+    )
+    scheduler = _make_scheduler(monkeypatch, processor, max_batch_size=2)
+    rows = _rows(7, seed=51)
+
+    wavs = scheduler._decode_codes_rows([rows[:, 1:]])
+
+    assert scheduler._session is None
+    assert scheduler._offline_session is not None
+    assert processor.decode_calls == 0
+    np.testing.assert_array_equal(wavs[0].numpy(), reference_waveform(rows[:, 1:]))
+
+    _run_stream(scheduler, _rows(5, seed=53))
+    assert scheduler._session is not None
+    assert scheduler._offline_session is None
+    scheduler._close_streaming_session()
+
+
+def test_streaming_cuda_graph_captures_default_initial_chunk(monkeypatch) -> None:
+    processor = FakeProcessor()
+    monkeypatch.setattr(streaming_vocoder, "codec_cuda_graph_supported", lambda _: True)
+    monkeypatch.setattr(
+        streaming_vocoder, "AudioTokenizerDecoderCudaGraph", _FakeCudaGraphDecoder
+    )
+    scheduler = MossTTSLocalStreamingVocoderScheduler(
+        processor,
+        stream_chunk_frames=10,
+        initial_chunk_frames=5,
+        max_step_frames=10,
+        use_cuda_graph=True,
+    )
+
+    messages = _run_stream(scheduler, _rows(5, seed=54))
+
+    decoder = scheduler._session._cuda_graph_decoder
+    assert isinstance(decoder, _FakeCudaGraphDecoder)
+    assert scheduler._cuda_graph_step_frames == (1, 2, 4, 5, 8, 10)
+    assert decoder.calls == [(5, (7,))]
+    assert [m.type for m in messages] == ["stream", "result"]
+    scheduler._close_streaming_session()
+
+
+def test_offline_cuda_graph_pads_final_chunks_to_step_buckets(monkeypatch) -> None:
+    processor = FakeProcessor()
+    monkeypatch.setattr(streaming_vocoder, "codec_cuda_graph_supported", lambda _: True)
+    monkeypatch.setattr(
+        streaming_vocoder, "AudioTokenizerDecoderCudaGraph", _FakeCudaGraphDecoder
+    )
+    scheduler = MossTTSLocalStreamingVocoderScheduler(
+        processor,
+        stream_chunk_frames=5,
+        max_step_frames=5,
+        max_batch_size=2,
+        use_cuda_graph=True,
+    )
+    rows_long = _rows(8, seed=52)
+    rows_short = _rows(4, seed=53)
+
+    wavs = scheduler._decode_codes_rows([rows_long[:, 1:], rows_short[:, 1:]])
+
+    decoder = scheduler._offline_session._cuda_graph_decoder
+    assert isinstance(decoder, _FakeCudaGraphDecoder)
+    assert scheduler._cuda_graph_step_frames == (1, 2, 4, 5)
+    assert decoder.calls == [(5, (0,)), (4, (0, 1))]
+    np.testing.assert_array_equal(wavs[0].numpy(), reference_waveform(rows_long[:, 1:]))
+    np.testing.assert_array_equal(
+        wavs[1].numpy(), reference_waveform(rows_short[:, 1:])
+    )
+    scheduler._close_streaming_session()
 
 
 def test_abort_releases_slot(monkeypatch) -> None:

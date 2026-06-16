@@ -18,6 +18,10 @@ from sglang_omni.models.moss_tts.stages import (
     _moss_transformers_processor_compat,
     _resolve_checkpoint,
 )
+from sglang_omni.models.moss_tts_local.codec_cuda_graph import (
+    codec_cuda_graph_capture_lock,
+    ensure_codec_decoder_cuda_graph_surface,
+)
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
@@ -76,7 +80,11 @@ def _resolve_codec_device(device: str | None, gpu_id: int | None) -> str:
     return "cuda:0"
 
 
-def _load_moss_tts_local_processor(model_path: str, *, device: str) -> Any:
+def _load_moss_tts_local_processor(
+    model_path: str,
+    *,
+    device: str,
+) -> Any:
     checkpoint_dir = _resolve_checkpoint(model_path)
     logger.info(
         "Loading MOSS-TTS Local processor from %s on %s", checkpoint_dir, device
@@ -94,6 +102,7 @@ def _load_moss_tts_local_processor(model_path: str, *, device: str) -> Any:
     _normalize_processor_config(processor)
     audio_tokenizer = getattr(processor, "audio_tokenizer", None)
     if audio_tokenizer is not None:
+        ensure_codec_decoder_cuda_graph_surface(audio_tokenizer)
         if hasattr(audio_tokenizer, "eval"):
             audio_tokenizer.eval()
         if hasattr(audio_tokenizer, "to"):
@@ -179,7 +188,8 @@ class _BatchedReferenceEncoder:
             unique_paths = list(dict.fromkeys(path for path, _ in batch))
             results: dict[str, Any] = {}
             try:
-                encoded = self._processor.encode_audios_from_path(unique_paths)
+                with codec_cuda_graph_capture_lock:
+                    encoded = self._processor.encode_audios_from_path(unique_paths)
                 results = dict(zip(unique_paths, encoded))
             except Exception:
                 logger.exception(
@@ -188,9 +198,10 @@ class _BatchedReferenceEncoder:
                 )
                 for path in unique_paths:
                     try:
-                        results[path] = self._processor.encode_audios_from_path([path])[
-                            0
-                        ]
+                        with codec_cuda_graph_capture_lock:
+                            results[path] = self._processor.encode_audios_from_path(
+                                [path]
+                            )[0]
                     except Exception as exc:
                         results[path] = exc
             for path, future in batch:
@@ -383,7 +394,8 @@ class CachedReferenceEncoder:
                     f"{_BatchedReferenceEncoder.MAX_REFERENCE_SECONDS:.0f}s"
                 )
             wav = torch.from_numpy(audio.T)
-            return processor.encode_audios_from_wav([wav], int(sample_rate))[0]
+            with codec_cuda_graph_capture_lock:
+                return processor.encode_audios_from_wav([wav], int(sample_rate))[0]
 
         return self._cached_encode(key, _encode, desc="data-URI")
 
@@ -576,6 +588,8 @@ def create_vocoder_executor(
     stream_slots: int = 8,
     stream_chunk_frames: int = 25,
     initial_chunk_frames: int = 5,
+    codec_cuda_graph: bool = True,
+    codec_cuda_graph_step_frames: list[int] | tuple[int, ...] | None = None,
 ) -> MossTTSLocalStreamingVocoderScheduler:
     device = _resolve_codec_device(device, gpu_id)
     processor = _load_moss_tts_local_processor(model_path, device=device)
@@ -586,4 +600,6 @@ def create_vocoder_executor(
         initial_chunk_frames=initial_chunk_frames,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
+        use_cuda_graph=codec_cuda_graph,
+        cuda_graph_step_frames=codec_cuda_graph_step_frames,
     )
