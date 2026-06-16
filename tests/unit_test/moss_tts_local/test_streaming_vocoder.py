@@ -254,6 +254,47 @@ class _RopeCodec(nn.Module):
         self.decoder = nn.ModuleList([_RopeAttention()])
 
 
+class _RopeDecodeCodec(_RopeCodec):
+    def _decode_frame(self, codes: torch.Tensor, code_lengths: torch.Tensor):
+        del code_lengths
+        batch = int(codes.shape[1])
+        q = torch.zeros(batch, 2, 1, 4)
+        k = torch.zeros_like(q)
+        offset = torch.zeros(batch, dtype=torch.long)
+        q_out, _ = self.decoder[0].rope(q, k, offset)
+        return SimpleNamespace(
+            audio=q_out.reshape(batch, 1, -1),
+            audio_lengths=torch.full((batch,), q_out[0].numel(), dtype=torch.long),
+        )
+
+
+class _UpsampleModule(nn.Module):
+    def __init__(self, ratio: int) -> None:
+        super().__init__()
+        self.downsample_ratio = int(ratio)
+
+
+class _MossV2ScaleRopeCodec(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(1))
+        self.decoder = nn.ModuleList(
+            [
+                _RopeAttention(),
+                _UpsampleModule(2),
+                _RopeAttention(),
+                _UpsampleModule(2),
+                _RopeAttention(),
+                _UpsampleModule(2),
+                _RopeAttention(),
+                _UpsampleModule(2),
+                _RopeAttention(),
+                _UpsampleModule(2),
+                _RopeAttention(),
+            ]
+        )
+
+
 class _CacheState:
     def __init__(self) -> None:
         self.exec_mask = torch.tensor([True, False])
@@ -307,8 +348,11 @@ class _StreamingStateCodec(nn.Module):
 class _FakeCudaGraphDecoder:
     disabled_reason = None
 
-    def __init__(self, codec: FakeCodec) -> None:
+    def __init__(
+        self, codec: FakeCodec, *, max_audio_frames: int | None = None
+    ) -> None:
         self._codec = codec
+        self.max_audio_frames = max_audio_frames
         self.calls: list[tuple[int, tuple[int, ...] | None]] = []
 
     def decode_frame(
@@ -515,11 +559,11 @@ def test_cuda_graph_rope_patch_matches_original() -> None:
     k = torch.randn(2, 2, 5, 4)
     expected_q, expected_k = rope(q, k, offset, time_before_heads=False)
 
-    codec_cuda_graph.patch_codec_rope_for_cuda_graph(codec)
+    codec_cuda_graph.patch_codec_rope_for_cuda_graph(codec, cache_positions=8)
 
     actual_q, actual_k = rope(q, k, offset, time_before_heads=False)
-    torch.testing.assert_close(actual_q, expected_q)
-    torch.testing.assert_close(actual_k, expected_k)
+    assert torch.equal(actual_q, expected_q)
+    assert torch.equal(actual_k, expected_k)
     assert hasattr(rope, "_sglang_omni_original_rope_forward")
 
     q_time_first = q.transpose(1, 2).contiguous()
@@ -530,8 +574,57 @@ def test_cuda_graph_rope_patch_matches_original() -> None:
     actual_q, actual_k = rope(
         q_time_first, k_time_first, offset, time_before_heads=True
     )
-    torch.testing.assert_close(actual_q, expected_q)
-    torch.testing.assert_close(actual_k, expected_k)
+    assert torch.equal(actual_q, expected_q)
+    assert torch.equal(actual_k, expected_k)
+
+
+def test_cuda_graph_rope_cache_covers_default_moss_v2_decoder_scale(
+    monkeypatch,
+) -> None:
+    codec = _MossV2ScaleRopeCodec()
+    monkeypatch.setattr(codec_cuda_graph, "codec_cuda_graph_supported", lambda _: True)
+    graph_decoder = codec_cuda_graph.AudioTokenizerDecoderCudaGraph(
+        codec, max_audio_frames=4096
+    )
+
+    assert graph_decoder._rope_cache_limit == 131072
+    for decoder_module in (
+        codec.decoder[0],
+        codec.decoder[2],
+        codec.decoder[4],
+        codec.decoder[6],
+        codec.decoder[8],
+        codec.decoder[10],
+    ):
+        rope = decoder_module.rope
+        assert getattr(rope, "_sglang_omni_cuda_graph_rope_cos").shape[0] == 131072
+    graph_decoder.close()
+
+
+def test_cuda_graph_eager_fallback_uses_original_rope(monkeypatch) -> None:
+    codec = _RopeDecodeCodec()
+    monkeypatch.setattr(codec_cuda_graph, "codec_cuda_graph_supported", lambda _: True)
+    graph_decoder = codec_cuda_graph.AudioTokenizerDecoderCudaGraph(codec)
+    rope = codec.decoder[0].rope
+
+    def original_forward(q, k, offset, time_before_heads=False):
+        del offset, time_before_heads
+        return torch.full_like(q, 7.0), torch.full_like(k, 8.0)
+
+    setattr(rope, "_sglang_omni_original_rope_forward", original_forward)
+    graph_decoder._disabled_reason = "capture failed"
+
+    result = graph_decoder.decode_frame(
+        torch.zeros(1, 1, 1, dtype=torch.long),
+        torch.ones(1, dtype=torch.long),
+        chunk_size=1,
+    )
+
+    torch.testing.assert_close(result.audio, torch.full_like(result.audio, 7.0))
+    q = torch.zeros(1, 2, 1, 4)
+    k = torch.zeros_like(q)
+    q_out, _ = rope(q, k, torch.zeros(1, dtype=torch.long))
+    assert torch.equal(q_out, q)
 
 
 def test_cuda_graph_attention_cache_patch_keeps_storage_stable() -> None:
@@ -943,6 +1036,24 @@ def test_non_streaming_cuda_graph_mode_creates_offline_session(monkeypatch) -> N
     scheduler._close_streaming_session()
 
 
+def test_cuda_graph_uses_autoregressive_max_position_embeddings(monkeypatch) -> None:
+    processor = FakeProcessor()
+    processor.model_config.qwen3_config = SimpleNamespace(max_position_embeddings=32768)
+    monkeypatch.setattr(streaming_vocoder, "codec_cuda_graph_supported", lambda _: True)
+    monkeypatch.setattr(
+        streaming_vocoder, "AudioTokenizerDecoderCudaGraph", _FakeCudaGraphDecoder
+    )
+    scheduler = MossTTSLocalStreamingVocoderScheduler(processor, use_cuda_graph=True)
+
+    session = scheduler._ensure_offline_session()
+    decoder = session._cuda_graph_decoder
+
+    assert scheduler._cuda_graph_max_audio_frames == 32768
+    assert isinstance(decoder, _FakeCudaGraphDecoder)
+    assert decoder.max_audio_frames == 32768
+    scheduler._close_streaming_session()
+
+
 def test_streaming_cuda_graph_captures_default_initial_chunk(monkeypatch) -> None:
     processor = FakeProcessor()
     monkeypatch.setattr(streaming_vocoder, "codec_cuda_graph_supported", lambda _: True)
@@ -994,6 +1105,30 @@ def test_offline_cuda_graph_pads_final_chunks_to_step_buckets(monkeypatch) -> No
         wavs[1].numpy(), reference_waveform(rows_short[:, 1:])
     )
     scheduler._close_streaming_session()
+
+
+def test_cuda_graph_rejects_nonterminal_padded_step(monkeypatch) -> None:
+    processor = FakeProcessor()
+    monkeypatch.setattr(
+        streaming_vocoder, "AudioTokenizerDecoderCudaGraph", _FakeCudaGraphDecoder
+    )
+    session = streaming_vocoder._CodecStreamSession(
+        processor.audio_tokenizer,
+        stream_slots=0,
+        offline_slots=1,
+        use_cuda_graph=True,
+        cuda_graph_step_frames=(4,),
+    )
+    try:
+        with pytest.raises(AssertionError, match="terminal steps"):
+            session.step(
+                {0: torch.ones(N_VQ, 2, dtype=torch.long)},
+                use_cuda_graph=True,
+                graph_step_frames=4,
+                final_step=False,
+            )
+    finally:
+        session.close()
 
 
 def test_abort_releases_slot(monkeypatch) -> None:

@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import MethodType, SimpleNamespace
 from typing import Any
 
@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 codec_cuda_graph_capture_lock = threading.RLock()
 
-_ROPE_CACHE_POSITIONS = 65536
 _ROPE_CACHE_KEY_ATTR = "_sglang_omni_cuda_graph_rope_cache_key"
 _ROPE_CACHE_COS_ATTR = "_sglang_omni_cuda_graph_rope_cos"
 _ROPE_CACHE_SIN_ATTR = "_sglang_omni_cuda_graph_rope_sin"
@@ -75,28 +74,60 @@ def _decoder_rope_head_dims(codec: Any) -> dict[int, int]:
     return head_dims
 
 
+def _decoder_rope_position_multiplier(codec: Any) -> int:
+    """Max decoder sequence upsampling factor seen by any RoPE module."""
+
+    multiplier = 1
+    max_multiplier = 1
+    decoder = getattr(codec, "decoder", ())
+    for decoder_module in decoder:
+        modules = decoder_module.modules() if hasattr(decoder_module, "modules") else ()
+        for module in modules:
+            rope = getattr(module, "rope", None)
+            if rope is not None and hasattr(rope, "max_period"):
+                max_multiplier = max(max_multiplier, multiplier)
+        multiplier *= max(int(getattr(decoder_module, "downsample_ratio", 1) or 1), 1)
+    return max_multiplier
+
+
 def _ensure_rope_cache(
     rope: Any,
     *,
     device: torch.device,
     head_dim: int,
-    positions: int = _ROPE_CACHE_POSITIONS,
+    positions: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    cache_key = (str(device), int(head_dim), int(positions), float(rope.max_period))
-    if getattr(rope, _ROPE_CACHE_KEY_ATTR, None) != cache_key:
-        half_dim = int(head_dim) // 2
-        ds = torch.arange(half_dim, device=device, dtype=torch.float32)
-        freqs = torch.exp(ds * (-math.log(float(rope.max_period)) * 2 / int(head_dim)))
-        position_ids_f = torch.arange(positions, device=device, dtype=torch.float32)
-        phase = position_ids_f.view(-1, 1) * freqs.view(1, -1)
-        setattr(rope, _ROPE_CACHE_KEY_ATTR, cache_key)
-        setattr(rope, _ROPE_CACHE_COS_ATTR, torch.cos(phase))
-        setattr(rope, _ROPE_CACHE_SIN_ATTR, torch.sin(phase))
-        setattr(
-            rope,
-            _ROPE_CACHE_POS_ATTR,
-            torch.arange(positions, device=device, dtype=torch.long),
+    requested_positions = max(int(positions or 1), 1)
+    existing_key = getattr(rope, _ROPE_CACHE_KEY_ATTR, None)
+    if (
+        isinstance(existing_key, tuple)
+        and len(existing_key) == 4
+        and existing_key[0] == str(device)
+        and existing_key[1] == int(head_dim)
+        and int(existing_key[2]) >= requested_positions
+        and existing_key[3] == float(rope.max_period)
+    ):
+        return (
+            getattr(rope, _ROPE_CACHE_COS_ATTR),
+            getattr(rope, _ROPE_CACHE_SIN_ATTR),
+            getattr(rope, _ROPE_CACHE_POS_ATTR),
         )
+
+    positions = requested_positions
+    cache_key = (str(device), int(head_dim), int(positions), float(rope.max_period))
+    half_dim = int(head_dim) // 2
+    ds = torch.arange(half_dim, device=device, dtype=torch.float32)
+    freqs = torch.exp(ds * (-math.log(float(rope.max_period)) * 2 / int(head_dim)))
+    position_ids_f = torch.arange(positions, device=device, dtype=torch.float32)
+    phase = position_ids_f.view(-1, 1) * freqs.view(1, -1)
+    setattr(rope, _ROPE_CACHE_KEY_ATTR, cache_key)
+    setattr(rope, _ROPE_CACHE_COS_ATTR, torch.cos(phase))
+    setattr(rope, _ROPE_CACHE_SIN_ATTR, torch.sin(phase))
+    setattr(
+        rope,
+        _ROPE_CACHE_POS_ATTR,
+        torch.arange(positions, device=device, dtype=torch.long),
+    )
     return (
         getattr(rope, _ROPE_CACHE_COS_ATTR),
         getattr(rope, _ROPE_CACHE_SIN_ATTR),
@@ -126,6 +157,7 @@ def _cached_rope_forward(
         self,
         device=q.device,
         head_dim=head_dim,
+        positions=max(time_steps, 1),
     )
     positions = offset.to(device=q.device, dtype=torch.long).view(
         -1, 1
@@ -161,7 +193,9 @@ def _cached_rope_forward(
     return qo.view(*dims, head_dim), ko.view(*dims, head_dim)
 
 
-def patch_codec_rope_for_cuda_graph(codec: Any) -> None:
+def patch_codec_rope_for_cuda_graph(
+    codec: Any, *, cache_positions: int | None = None
+) -> None:
     """Make decoder RoPE graph-capturable by avoiding trig ops in capture."""
 
     try:
@@ -175,7 +209,27 @@ def patch_codec_rope_for_cuda_graph(codec: Any) -> None:
             rope.forward = MethodType(_cached_rope_forward, rope)
         head_dim = head_dims.get(id(rope))
         if head_dim is not None:
-            _ensure_rope_cache(rope, device=device, head_dim=head_dim)
+            _ensure_rope_cache(
+                rope,
+                device=device,
+                head_dim=head_dim,
+                positions=cache_positions,
+            )
+
+
+@contextmanager
+def _use_original_codec_rope(codec: Any):
+    restored: list[tuple[Any, Any]] = []
+    for rope in _decoder_rope_modules(codec):
+        original = getattr(rope, _ROPE_ORIGINAL_FORWARD_ATTR, None)
+        if callable(original):
+            restored.append((rope, rope.forward))
+            rope.forward = original
+    try:
+        yield
+    finally:
+        for rope, current_forward in restored:
+            rope.forward = current_forward
 
 
 def _cuda_graph_update_streaming_cache(
@@ -304,7 +358,7 @@ class AudioTokenizerDecoderCudaGraph:
     length buffers under a CUDA graph keyed by static shape.
     """
 
-    def __init__(self, codec: Any) -> None:
+    def __init__(self, codec: Any, *, max_audio_frames: int | None = None) -> None:
         if not codec_cuda_graph_supported(codec):
             raise RuntimeError(
                 "MOSS-TTS Local codec does not expose a CUDA graph-compatible "
@@ -312,7 +366,17 @@ class AudioTokenizerDecoderCudaGraph:
             )
         self._codec = codec
         set_codec_attention_backend_for_cuda_graph(codec)
-        patch_codec_rope_for_cuda_graph(codec)
+        rope_position_multiplier = _decoder_rope_position_multiplier(codec)
+        try:
+            max_audio_frames = int(max_audio_frames or 0)
+        except (TypeError, ValueError):
+            max_audio_frames = 0
+        self._rope_cache_limit = (
+            max_audio_frames * rope_position_multiplier
+            if max_audio_frames > 0
+            else None
+        )
+        patch_codec_rope_for_cuda_graph(codec, cache_positions=self._rope_cache_limit)
         patch_codec_attention_cache_for_cuda_graph(codec)
         self._cache: dict[
             tuple[Any, ...],
@@ -341,7 +405,7 @@ class AudioTokenizerDecoderCudaGraph:
         active_slots: tuple[int, ...] | None = None,
     ) -> Any:
         if self._disabled_reason is not None or codes.device.type != "cuda":
-            return self._codec._decode_frame(codes, code_lengths)
+            return self._decode_frame_eager(codes, code_lengths)
 
         try:
             return self._decode_frame_graphed(
@@ -363,10 +427,18 @@ class AudioTokenizerDecoderCudaGraph:
                 len(self._cache),
                 exc_info=True,
             )
-            return self._codec._decode_frame(codes, code_lengths)
+            return self._decode_frame_eager(codes, code_lengths)
 
     def close(self) -> None:
         self._cache.clear()
+
+    def _decode_frame_eager(
+        self,
+        codes: torch.Tensor,
+        code_lengths: torch.Tensor,
+    ) -> Any:
+        with _use_original_codec_rope(self._codec):
+            return self._codec._decode_frame(codes, code_lengths)
 
     def _decode_frame_graphed(
         self,

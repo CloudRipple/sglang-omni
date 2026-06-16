@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+from sglang_omni.models.moss_tts.request_builders import MOSS_TTS_DEFAULT_MAX_NEW_TOKENS
 from sglang_omni.models.moss_tts_local.codec_cuda_graph import (
     AudioTokenizerDecoderCudaGraph,
     codec_cuda_graph_supported,
@@ -123,6 +124,7 @@ class _CodecStreamSession:
         offline_slots: int,
         use_cuda_graph: bool = False,
         cuda_graph_step_frames: Sequence[int] = (),
+        cuda_graph_max_audio_frames: int | None = None,
     ) -> None:
         self._codec = codec
         self._stream_slots = int(stream_slots)
@@ -138,7 +140,10 @@ class _CodecStreamSession:
             self._exit_stack.enter_context(codec.streaming(self._batch_size))
         self._cuda_graph_decoder: AudioTokenizerDecoderCudaGraph | None = None
         if use_cuda_graph:
-            self._cuda_graph_decoder = AudioTokenizerDecoderCudaGraph(codec)
+            self._cuda_graph_decoder = AudioTokenizerDecoderCudaGraph(
+                codec,
+                max_audio_frames=cuda_graph_max_audio_frames,
+            )
         self._cuda_graph_step_frames = tuple(
             sorted({int(frame) for frame in cuda_graph_step_frames if int(frame) > 0})
         )
@@ -284,7 +289,10 @@ class _CodecStreamSession:
         if graph_t < step_t:
             graph_t = step_t
         if graph_t > step_t and not final_step:
-            graph_t = step_t
+            raise AssertionError(
+                "CUDA graph bucket padding is only safe for terminal steps; "
+                "the caller must reset padded slots immediately after replay"
+            )
         n_vq = int(next(iter(slot_codes.values())).shape[0])
         codes_step = torch.zeros(
             n_vq, self._batch_size, graph_t, dtype=torch.long, device=self._device
@@ -471,6 +479,22 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         self._offline_slots = max(int(max_batch_size), 1)
         self._n_vq = int(processor.model_config.n_vq)
         self._sample_rate = _resolve_sample_rate(processor)
+        autoregressive_model_config = getattr(
+            processor.model_config,
+            "qwen3_config",
+            getattr(processor.model_config, "language_config", None),
+        )
+        try:
+            max_audio_frames = int(
+                getattr(autoregressive_model_config, "max_position_embeddings", 0)
+            )
+        except (TypeError, ValueError):
+            max_audio_frames = 0
+        self._cuda_graph_max_audio_frames = (
+            max_audio_frames
+            if max_audio_frames > 0
+            else MOSS_TTS_DEFAULT_MAX_NEW_TOKENS
+        )
         self._use_cuda_graph = bool(
             use_cuda_graph and codec_cuda_graph_supported(codec)
         )
@@ -483,8 +507,9 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             set_codec_attention_backend_for_cuda_graph(codec)
             logger.info(
                 "MOSS-TTS Local audio-tokenizer CUDA graph is enabled "
-                "(step_frames=%s)",
+                "(step_frames=%s, max_audio_frames=%s)",
                 list(self._cuda_graph_step_frames),
+                self._cuda_graph_max_audio_frames,
             )
         self._session: _CodecStreamSession | None = None
         self._offline_session: _CodecStreamSession | None = None
@@ -657,6 +682,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 offline_slots=self._offline_slots,
                 use_cuda_graph=self._use_cuda_graph,
                 cuda_graph_step_frames=self._cuda_graph_step_frames,
+                cuda_graph_max_audio_frames=self._cuda_graph_max_audio_frames,
             )
             self._session.warmup_cuda_graphs(
                 n_vq=self._n_vq,
@@ -675,6 +701,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 offline_slots=self._offline_slots,
                 use_cuda_graph=self._use_cuda_graph,
                 cuda_graph_step_frames=self._cuda_graph_step_frames,
+                cuda_graph_max_audio_frames=self._cuda_graph_max_audio_frames,
             )
             self._offline_session.warmup_cuda_graphs(
                 n_vq=self._n_vq,
