@@ -17,6 +17,7 @@ from sglang_omni.models.voxtral_tts.io import VoxtralTTSState
 from sglang_omni.models.voxtral_tts.pipeline.state_io import load_state, store_state
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.generation_batch_policy import (
+    build_generation_batch_defaults,
     build_generation_batch_overrides,
     validate_generation_batch_policy,
 )
@@ -189,7 +190,9 @@ def create_generation_executor(
     from sglang_omni.models.voxtral_tts.request_builders import (
         make_voxtral_scheduler_adapters,
     )
-    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
+    from sglang_omni.scheduling.bootstrap import (
+        create_sglang_infrastructure_defer_cuda_graph,
+    )
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler
     from sglang_omni.scheduling.sglang_backend import (
         SGLangOutputProcessor,
@@ -203,7 +206,7 @@ def create_generation_executor(
 
     overrides = build_generation_batch_overrides(
         {
-            "cuda_graph_max_bs": 16,
+            **build_generation_batch_defaults(16),
             "dtype": "bfloat16",
             "disable_cuda_graph": False,
             "disable_overlap_schedule": True,
@@ -211,9 +214,7 @@ def create_generation_executor(
             "enable_torch_compile": True,
             "mem_fraction_static": 0.85,
             "max_prefill_tokens": 8192,
-            "max_running_requests": 16,
             "sampling_backend": "pytorch",
-            "torch_compile_max_bs": 16,
         },
         server_args_overrides,
     )
@@ -227,11 +228,7 @@ def create_generation_executor(
     if getattr(server_args, "enable_torch_compile", False):
         _enable_inductor_gemm_autotune()
 
-    want_cuda_graph = not bool(getattr(server_args, "disable_cuda_graph", False))
-    if want_cuda_graph:
-        server_args.disable_cuda_graph = True
-
-    (
+    want_cuda_graph, (
         model_worker,
         tree_cache,
         req_to_token_pool,
@@ -239,10 +236,7 @@ def create_generation_executor(
         prefill_mgr,
         decode_mgr,
         model_config,
-    ) = create_sglang_infrastructure(server_args, gpu_id)
-
-    if want_cuda_graph:
-        server_args.disable_cuda_graph = False
+    ) = create_sglang_infrastructure_defer_cuda_graph(server_args, gpu_id)
 
     validate_generation_batch_policy(
         model_name="Voxtral TTS",

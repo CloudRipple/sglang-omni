@@ -22,6 +22,34 @@ def build_default_cuda_graph_bs(max_bs: int) -> list[int]:
     return values
 
 
+def build_generation_batch_defaults(
+    max_running_requests: int,
+    *,
+    cuda_graph_max_bs: int | None = None,
+    torch_compile_max_bs: int | None = None,
+) -> dict[str, int]:
+    max_running_requests = int(max_running_requests)
+    if max_running_requests < 1:
+        raise ValueError("max_running_requests must be >= 1")
+    cuda_graph_max_bs = (
+        max_running_requests if cuda_graph_max_bs is None else int(cuda_graph_max_bs)
+    )
+    torch_compile_max_bs = (
+        max_running_requests
+        if torch_compile_max_bs is None
+        else int(torch_compile_max_bs)
+    )
+    if cuda_graph_max_bs < 1:
+        raise ValueError("cuda_graph_max_bs must be >= 1")
+    if torch_compile_max_bs < 1:
+        raise ValueError("torch_compile_max_bs must be >= 1")
+    return {
+        "max_running_requests": max_running_requests,
+        "cuda_graph_max_bs": cuda_graph_max_bs,
+        "torch_compile_max_bs": torch_compile_max_bs,
+    }
+
+
 def build_generation_batch_overrides(
     defaults: Mapping[str, Any],
     server_args_overrides: Mapping[str, Any] | None = None,

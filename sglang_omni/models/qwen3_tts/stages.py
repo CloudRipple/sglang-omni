@@ -21,6 +21,7 @@ from sglang_omni.models.qwen3_tts.request_builders import (
 )
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.generation_batch_policy import (
+    build_generation_batch_defaults,
     build_generation_batch_overrides,
     validate_generation_batch_policy,
 )
@@ -182,7 +183,9 @@ def create_sglang_tts_engine_executor(
     from transformers import AutoProcessor
 
     from sglang_omni.models.qwen3_tts.model_runner import Qwen3TTSModelRunner
-    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
+    from sglang_omni.scheduling.bootstrap import (
+        create_sglang_infrastructure_defer_cuda_graph,
+    )
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler
     from sglang_omni.scheduling.sglang_backend import (
         SGLangOutputProcessor,
@@ -197,16 +200,14 @@ def create_sglang_tts_engine_executor(
 
     overrides = build_generation_batch_overrides(
         {
-            "cuda_graph_max_bs": 16,
+            **build_generation_batch_defaults(16),
             "dtype": dtype,
             "disable_cuda_graph": False,
             "disable_overlap_schedule": True,
             "enable_torch_compile": True,
             "mem_fraction_static": 0.85,
             "max_prefill_tokens": 8192,
-            "max_running_requests": 16,
             "sampling_backend": "pytorch",
-            "torch_compile_max_bs": 16,
             "trust_remote_code": True,
         },
         server_args_overrides,
@@ -218,11 +219,7 @@ def create_sglang_tts_engine_executor(
         **overrides,
     )
 
-    want_cuda_graph = not bool(getattr(server_args, "disable_cuda_graph", False))
-    if want_cuda_graph:
-        server_args.disable_cuda_graph = True
-
-    (
+    want_cuda_graph, (
         model_worker,
         tree_cache,
         req_to_token_pool,
@@ -230,14 +227,11 @@ def create_sglang_tts_engine_executor(
         prefill_mgr,
         decode_mgr,
         model_config,
-    ) = create_sglang_infrastructure(
+    ) = create_sglang_infrastructure_defer_cuda_graph(
         server_args,
         gpu_id,
         model_arch_override="Qwen3TTSTalker",
     )
-
-    if want_cuda_graph:
-        server_args.disable_cuda_graph = False
 
     validate_generation_batch_policy(
         model_name="Qwen3-TTS",

@@ -9,6 +9,7 @@ import pytest
 
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_cuda_graph_bs,
+    build_generation_batch_defaults,
     build_generation_batch_overrides,
     validate_generation_batch_policy,
 )
@@ -45,6 +46,35 @@ def test_default_cuda_graph_bs_matches_sglang_normal_buckets() -> None:
         56,
         64,
     ]
+
+
+def test_generation_batch_defaults_tie_batch_knobs() -> None:
+    assert build_generation_batch_defaults(16) == {
+        "max_running_requests": 16,
+        "cuda_graph_max_bs": 16,
+        "torch_compile_max_bs": 16,
+    }
+
+
+def test_generation_batch_defaults_allow_explicit_graph_and_compile_caps() -> None:
+    assert build_generation_batch_defaults(
+        16,
+        cuda_graph_max_bs=32,
+        torch_compile_max_bs=8,
+    ) == {
+        "max_running_requests": 16,
+        "cuda_graph_max_bs": 32,
+        "torch_compile_max_bs": 8,
+    }
+
+
+def test_generation_batch_defaults_reject_non_positive_values() -> None:
+    with pytest.raises(ValueError, match="max_running_requests"):
+        build_generation_batch_defaults(0)
+    with pytest.raises(ValueError, match="cuda_graph_max_bs"):
+        build_generation_batch_defaults(1, cuda_graph_max_bs=0)
+    with pytest.raises(ValueError, match="torch_compile_max_bs"):
+        build_generation_batch_defaults(1, torch_compile_max_bs=0)
 
 
 def test_validate_generation_batch_policy_accepts_explicit_full_policy() -> None:

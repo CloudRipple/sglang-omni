@@ -22,7 +22,12 @@ def create_sglang_whisper_asr_executor(
     from sglang_omni.models.whisper_asr.request_builders import (
         make_whisper_scheduler_adapters,
     )
-    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
+    from sglang_omni.scheduling.bootstrap import (
+        create_sglang_infrastructure_defer_cuda_graph,
+    )
+    from sglang_omni.scheduling.generation_batch_policy import (
+        build_generation_batch_defaults,
+    )
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler
     from sglang_omni.scheduling.sglang_backend import (
         SGLangOutputProcessor,
@@ -39,10 +44,8 @@ def create_sglang_whisper_asr_executor(
         "disable_cuda_graph": False,
         "disable_overlap_schedule": True,
         "enable_torch_compile": True,
-        "torch_compile_max_bs": max_running_requests,
-        "cuda_graph_max_bs": max_running_requests,
+        **build_generation_batch_defaults(max_running_requests),
         "mem_fraction_static": mem_fraction_static,
-        "max_running_requests": max_running_requests,
         "max_prefill_tokens": 4096,
         "chunked_prefill_size": 4096,
         "sampling_backend": "pytorch",
@@ -57,11 +60,7 @@ def create_sglang_whisper_asr_executor(
         **overrides,
     )
 
-    want_cuda_graph = not bool(getattr(server_args, "disable_cuda_graph", False))
-    if want_cuda_graph:
-        server_args.disable_cuda_graph = True
-
-    (
+    want_cuda_graph, (
         model_worker,
         tree_cache,
         req_to_token_pool,
@@ -69,14 +68,13 @@ def create_sglang_whisper_asr_executor(
         prefill_mgr,
         decode_mgr,
         model_config,
-    ) = create_sglang_infrastructure(
+    ) = create_sglang_infrastructure_defer_cuda_graph(
         server_args,
         gpu_id,
         model_arch_override="WhisperForConditionalGeneration",
     )
 
     if want_cuda_graph:
-        server_args.disable_cuda_graph = False
         model_worker.model_runner.init_device_graphs()
 
     output_proc = SGLangOutputProcessor(

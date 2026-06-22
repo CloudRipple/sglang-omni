@@ -82,3 +82,20 @@ def create_sglang_infrastructure(
         decode_mgr,
         model_worker.model_config,
     )
+
+
+def create_sglang_infrastructure_defer_cuda_graph(
+    server_args: Any,
+    gpu_id: int,
+    **kwargs: Any,
+):
+    """Create infrastructure without initial graph capture; return whether to capture later."""
+    want_cuda_graph = not bool(getattr(server_args, "disable_cuda_graph", False))
+    if want_cuda_graph:
+        server_args.disable_cuda_graph = True
+    try:
+        infrastructure = create_sglang_infrastructure(server_args, gpu_id, **kwargs)
+    finally:
+        if want_cuda_graph:
+            server_args.disable_cuda_graph = False
+    return want_cuda_graph, infrastructure

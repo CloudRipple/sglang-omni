@@ -30,6 +30,7 @@ from sglang_omni.models.qwen3_omni.request_builders import (
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.generation_batch_policy import (
+    build_generation_batch_defaults,
     build_generation_batch_overrides,
     validate_generation_batch_policy,
 )
@@ -1072,11 +1073,9 @@ def create_talker_ar_executor_from_config(
     # trigger degenerate AR loops (see #408). Revert once upstream lands.
     overrides = build_generation_batch_overrides(
         {
-            "cuda_graph_max_bs": 16,
+            **build_generation_batch_defaults(16),
             "disable_cuda_graph": False,
-            "max_running_requests": 16,
             "sampling_backend": "pytorch",
-            "torch_compile_max_bs": 16,
         },
         server_args_overrides,
     )

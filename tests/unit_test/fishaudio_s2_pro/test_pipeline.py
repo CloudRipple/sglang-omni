@@ -372,6 +372,22 @@ def _run_s2pro_engine_with_fake_buffers(
         fake_create_sglang_infrastructure
     )
 
+    def fake_create_sglang_infrastructure_defer_cuda_graph(
+        server_args: SimpleNamespace,
+        gpu_id: int,
+    ) -> tuple[bool, tuple[object, object, object, object, object, object, object]]:
+        want_cuda_graph = not bool(server_args.disable_cuda_graph)
+        if want_cuda_graph:
+            server_args.disable_cuda_graph = True
+        infrastructure = fake_create_sglang_infrastructure(server_args, gpu_id)
+        if want_cuda_graph:
+            server_args.disable_cuda_graph = False
+        return want_cuda_graph, infrastructure
+
+    fake_scheduler_bootstrap.create_sglang_infrastructure_defer_cuda_graph = (
+        fake_create_sglang_infrastructure_defer_cuda_graph
+    )
+
     fake_sglang_backend = ModuleType("sglang_omni.scheduling.sglang_backend")
     fake_sglang_backend.build_sglang_server_args = fake_build_sglang_server_args
     fake_sglang_backend.SGLangOutputProcessor = lambda **kwargs: SimpleNamespace(
