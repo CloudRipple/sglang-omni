@@ -19,6 +19,8 @@ tests/
     │   ├── fish_fakes.py
     │   ├── pipeline_fakes.py
     │   └── qwen_fakes.py
+    ├── utils/
+    │   └── test_audio.py
     ├── pipeline/
     │   ├── helpers.py
     │   ├── test_compile.py
@@ -273,6 +275,9 @@ that happened to contain an older version of the test.
   - scheduler callable contracts, including sync wrappers and callable objects
     that return awaitables.
 - `unit_test/benchmarks/`: Benchmark dataset/loading regression tests.
+- `unit_test/utils/`: Shared utility tests:
+  - audio loading helpers for data URIs, file URIs, HTTP URLs, timeout fallback,
+    and mono/channel preservation.
 - `unit_test/qwen3_asr/`: Qwen3-ASR unit tests:
   - pipeline config and stage factory concurrency defaults
   - single-source audio token length formula used by both processor and

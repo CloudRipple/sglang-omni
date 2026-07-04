@@ -21,12 +21,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
-from sglang_omni.utils.audio import (
-    audio_fingerprint,
-    audio_fingerprint_int,
-    decode_token_ids,
-    load_audio,
-)
+from sglang_omni.utils.audio import audio_fingerprint, audio_fingerprint_int, load_audio
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +107,19 @@ def _load_audio(source: Any) -> np.ndarray:
         source_name="MOSS-Transcribe-Diarize",
         target_sample_rate=_SAMPLE_RATE,
     )
+
+
+def _decode_token_ids(
+    tokenizer: Any, token_ids: list[int], skip_special_tokens: bool
+) -> str:
+    try:
+        return tokenizer.decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=False,
+        )
+    except TypeError:
+        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
 
 def postprocess_moss_transcribe_diarize_text(text: str) -> str:
@@ -284,7 +292,7 @@ def make_moss_transcribe_diarize_scheduler_adapters(
     def result_adapter(data: MossTranscribeDiarizeRequestData) -> StagePayload:
         payload = data.stage_payload
         output_ids = list(data.output_ids or [])
-        raw_text = decode_token_ids(
+        raw_text = _decode_token_ids(
             tokenizer,
             output_ids,
             skip_special_tokens=False,

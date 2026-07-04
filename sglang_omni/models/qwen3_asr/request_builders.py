@@ -31,12 +31,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
-from sglang_omni.utils.audio import (
-    audio_fingerprint,
-    audio_fingerprint_int,
-    decode_token_ids,
-    load_audio,
-)
+from sglang_omni.utils.audio import audio_fingerprint, audio_fingerprint_int, load_audio
 
 from .audio_lengths import qwen3_asr_num_audio_tokens
 
@@ -79,6 +74,19 @@ def _load_audio(source: Any) -> np.ndarray:
         source_name="Qwen3-ASR",
         target_sample_rate=_SAMPLE_RATE,
     )
+
+
+def _decode_token_ids(
+    tokenizer: Any, token_ids: list[int], skip_special_tokens: bool
+) -> str:
+    try:
+        return tokenizer.decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=False,
+        )
+    except TypeError:
+        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
 
 def _find_subsequence(values: list[int], pattern: list[int]) -> int | None:
@@ -257,7 +265,7 @@ def make_qwen3_asr_scheduler_adapters(
         output_ids = list(data.output_ids or [])
         # Keep the marker handling at token level. Byte-level BPE decode->encode
         # is not an identity transform for all whitespace/Unicode transcripts.
-        raw = decode_token_ids(tokenizer, output_ids, skip_special_tokens=False)
+        raw = _decode_token_ids(tokenizer, output_ids, skip_special_tokens=False)
         logger.debug(
             f"[qwen3-asr] n_out={len(output_ids)} ids={output_ids[:40]} raw={raw!r}"
         )
@@ -267,7 +275,7 @@ def make_qwen3_asr_scheduler_adapters(
             if asr_text_idx is not None
             else output_ids
         )
-        text = decode_token_ids(tokenizer, transcript_ids, skip_special_tokens=True)
+        text = _decode_token_ids(tokenizer, transcript_ids, skip_special_tokens=True)
         engine_time_s = (
             time.perf_counter() - data.engine_start_s if data.engine_start_s else 0.0
         )

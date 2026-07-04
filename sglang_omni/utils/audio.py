@@ -89,16 +89,3 @@ def audio_fingerprint(audio: np.ndarray) -> str:
 
 def audio_fingerprint_int(fingerprint: str) -> int:
     return int(fingerprint[:16], 16)
-
-
-def decode_token_ids(
-    tokenizer: Any, token_ids: list[int], skip_special_tokens: bool
-) -> str:
-    try:
-        return tokenizer.decode(
-            token_ids,
-            skip_special_tokens=skip_special_tokens,
-            clean_up_tokenization_spaces=False,
-        )
-    except TypeError:
-        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
