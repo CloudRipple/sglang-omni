@@ -163,9 +163,7 @@ def test_moss_transcribe_diarize_movies800_multi_speaker(
     results_path = tmp_path / "moss_transcribe_diarize_results.json"
     artifact_payload = dict(results)
     artifact_payload["router_ready_s"] = moss_td_router_server.router_ready_s
-    results_path.write_text(
-        json.dumps(artifact_payload, indent=2, ensure_ascii=False)
-    )
+    results_path.write_text(json.dumps(artifact_payload, indent=2, ensure_ascii=False))
 
     total = summary["total_samples"]
     evaluated = summary["evaluated"]

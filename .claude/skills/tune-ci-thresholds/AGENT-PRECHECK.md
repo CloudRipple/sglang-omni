@@ -27,9 +27,10 @@ Read `handoff:` in the active host profile and confirm with the user if unclear.
 
 | Scope | `--model` | Stages | Repeats | Order |
 |-------|-----------|--------|---------|-------|
-| TTS CI | `tts` | `ALL` | 5 | Runs Qwen3-ASR plus every configured TTS `calibration_preset`; do not use CI random pick |
+| ASR CI | `qwen3-asr-v1` | `ALL` | 5 | Stage 1 MOSS-TD multi-speaker, then stage 2 Qwen3-ASR SeedTTS |
+| TTS CI | `tts` | `ALL` | 5 | Runs every configured TTS `calibration_preset`; do not use CI random pick |
 | Qwen3-Omni CI | `qwen3-omni-v1` | `ALL` | 5 | — |
-| Full CI | both | each `ALL` | 5 each | **TTS first**, then Qwen3-Omni |
+| Full CI | `qwen3-asr-v1`, `tts`, `qwen3-omni-v1` | each `ALL` | 5 each | **ASR first**, then TTS, then Qwen3-Omni |
 
 Run precheck for **every** model you will calibrate before `tune.py run`.
 For `--model tts`, the `tts` alias expands to every TTS model preset declared
@@ -203,13 +204,18 @@ Authoritative check: **`tune.py precheck`** (Gate 8). Quick sanity listing:
 
 ```bash
 HF=/root/.cache/huggingface   # or physical.hf_hub from host profile
-ls "$HF/hub" 2>/dev/null | rg -i 'qwen3|higgs|seed-tts|video|mmmu|mmsu|marksverdhei' | head -20
+ls "$HF/hub" 2>/dev/null | rg -i 'qwen3|higgs|moss|movies800|seed-tts|video|mmmu|mmsu|marksverdhei' | head -20
 ```
 
 Expected repos by model (precheck validates each):
 
+**`qwen3-asr-v1`:** models `OpenMOSS-Team/MOSS-Transcribe-Diarize`,
+`Qwen/Qwen3-ASR-1.7B`; datasets `zhaochenyang20/movies800`,
+`zhaochenyang20/seed-tts-eval-arrow`.
+
 **`tts`:** models `boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999`,
-`Qwen/Qwen3-ASR-1.7B`; dataset `zhaochenyang20/seed-tts-eval-arrow`.
+`OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5`, `Qwen/Qwen3-ASR-1.7B`;
+dataset `zhaochenyang20/seed-tts-eval-arrow`.
 
 **`qwen3-omni-v1` (adds):** models `Qwen/Qwen3-Omni-30B-A3B-Instruct`,
 `marksverdhei/Qwen3-Omni-30B-A3B-FP8`; datasets `zhaochenyang20/mmsu-ci-2000`,
@@ -224,6 +230,8 @@ Expected repos by model (precheck validates each):
 ---
 
 ## Gate 6 — Speaker similarity assets
+
+Required for TTS or Qwen3-Omni calibration. Skip for ASR-only calibration.
 
 Directory: `physical.speaker_sim` (default `/root/.cache/huggingface/speaker_sim`).
 
@@ -267,7 +275,7 @@ HF_ENDPOINT=https://huggingface.co $VENV -c \
 
 ## Gate 7 — `CAP_SYS_PTRACE` (Full CI / Qwen3 stage 11 only)
 
-Skip for TTS-only calibration.
+Skip for ASR-only or TTS-only calibration.
 
 ```bash
 # /proc/self/status lists capabilities as hex bitmasks — never grep for
@@ -289,6 +297,9 @@ Run for **each** model in Gate 0 scope:
 ```bash
 cd /data/sglang-omni
 export TUNE_HOST=sglang-h100-ci   # if Gate 1 autodetect failed
+
+python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 precheck \
+  --output-dir /tmp/precheck_asr
 
 python .claude/skills/tune-ci-thresholds/tune.py --model tts precheck \
   --output-dir /tmp/precheck_tts

@@ -54,8 +54,8 @@ current `HEAD` commit.** Resume is for **interruptions only**, never for
   user explicitly asked to resume that same session.
 - Saying “calibration complete” while any stage artifact lacks `git_sha` or
   records a different commit (`strict-audit` → `GIT PROVENANCE: FAIL`).
-- Mixing fresh Qwen3-ASR reruns with stale Moss artifacts from an earlier
-  commit in one apply.
+- Mixing fresh ASR reruns with stale TTS or Qwen3-Omni artifacts from an
+  earlier commit in one apply.
 
 ### New run directory (mandatory naming)
 
@@ -135,12 +135,13 @@ Strict ✓ requires **both**:
 Always use **`tune.py strict-audit`** — not hand-rolled scripts that only
 check `ok == total`.
 
-**TTS sample scopes** (from test constants, written to `stages.yaml` by
+**ASR / TTS sample scopes** (from test constants, written to `stages.yaml` by
 `discover`):
 
 | Stage group | Constant |
 |-------------|----------|
-| Qwen3 ASR | `SEEDTTS_ASR_CORRECTNESS_SAMPLES` |
+| ASR multi-speaker MOSS-TD | `MOSS_TD_CI_SAMPLES` |
+| ASR SeedTTS Qwen3-ASR | `SEEDTTS_ASR_CORRECTNESS_SAMPLES` |
 | TTS non-stream WER / speed / UTMOS; stream WER / speed | `SEEDTTS_EN_FULLSET_SAMPLES` (or full set when `STREAMING_BENCHMARK_MAX_SAMPLES` is `None`) |
 | TTS similarity | `TTS_SIMILARITY_MAX_SAMPLES` |
 
@@ -282,10 +283,11 @@ torchinductor slice paths are used (once per fresh container filesystem).
 
 ### Speaker Similarity — checked in precheck
 
-When a host profile is active (or model is `tts` / `qwen3-omni-v1`),
-`precheck` verifies `physical.speaker_sim`: `.complete`,
-`wavlm_large.pt`, `wavlm_large_finetune.pth`. Bootstrap once if ✗ — see
-`speaker_similarity_bootstrap` in the host YAML.
+For models that need speaker similarity (currently `tts` and
+`qwen3-omni-v1`), `precheck` verifies `physical.speaker_sim`: `.complete`,
+`wavlm_large.pt`, `wavlm_large_finetune.pth`. ASR-only calibration does not
+require these assets. Bootstrap once if ✗ — see `speaker_similarity_bootstrap`
+in the host YAML.
 
 ### UTMOS asset — NOT covered by precheck (warm before TTS)
 
@@ -474,7 +476,7 @@ python .claude/skills/tune-ci-thresholds/tune.py strict-audit --run-dir <run-dir
 Example output:
 
 ```
-qwen3_asr_wer: ✓✓✓✓✓ (5/5 strict, expected=<N>)
+seedtts_wer: ✓✓✓✓✓ (5/5 strict, expected=<N>)
 tts_moss_stream_speed: ✓✓✓✓✓ (5/5 strict, expected=<N>)
 STRICT READY: 8/8 stages (5 repeats each)
 ```
@@ -565,20 +567,17 @@ explicitly asks you to fix a named gap (e.g. speaker sim warm-cache).
 
 ### Stage-specific shortcuts (still check-first)
 
-- **Qwen3-ASR (TTS CI stage 1 / `--model tts`)**: uses `omni`, **2 GPU / router DP=2**.
-  Stage 1 uses the same ASR transcribe fan-out as other WER stages
-  (`QWEN3_ASR_WER_CONCURRENCY` = **32** at DP=2).
-  Included in `--model tts --stages ALL`; calibrate alone with
-  `--stages qwen3_asr`. Venv only needs to pass precheck for torch/sglang pins
-  and cached assets. Do **not** use `--skip-precheck`. Source
-  `.github/scripts/ci_env.sh` before pytest/calibration.
+- **ASR CI (`--model qwen3-asr-v1`)**: uses `omni`, **2 GPU / router DP=2**.
+  `ALL` covers ASR stage 1 MOSS-Transcribe-Diarize multi-speaker
+  (`multi_speaker_*`) and ASR stage 2 Qwen3-ASR SeedTTS (`seedtts_*`).
+  Calibrate a subset with `--stages multi_speaker` or `--stages seedtts`.
+  Do **not** use `--skip-precheck`. Source `.github/scripts/ci_env.sh`
+  before pytest/calibration.
 - **TTS random-pick CI (`--model tts`)**: CI randomly selects one configured
   TTS model preset per commit, but calibration must **never** randomly select.
   `models/tts/config.yaml` expands every `calibration_preset` into its own
   stages. `--stages tts` / `ALL` therefore runs Higgs and MOSS independently
   and produces per-preset worst-of-N rows.
-- **Qwen3-ASR (standalone `--model qwen3-asr-v1`)**: same runtime as above;
-  use only for isolated ASR calibration — **TTS PRs should use `--model tts`**.
 - **Qwen3 MoE stages**: `flashinfer-python` (cu13) JIT-compiles its MoE/cutlass
   kernels into `${OMNI_CI_HOME}/.cache/flashinfer` on each cold start. A healthy
   cu13 env compiles fast — **router/worker up in < ~60s; > 60s means the JIT path
@@ -664,56 +663,59 @@ fragments:
   fragmentation (issue #765). tune.py sets this from `extra_env`, but the
   container must still have been **started** with `--cap-add=SYS_PTRACE`.
 
+Common ASR preset:
+```
+# Full ASR CI pipeline: MOSS-TD multi-speaker, then Qwen3-ASR SeedTTS.
+python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 run \
+  --stages ALL --repeats 5 --output-dir .tune-runs/<timestamp>_asr_all_r5
+
+# ASR stage 1 only (MOSS-Transcribe-Diarize on movies800):
+python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 run \
+  --stages multi_speaker --repeats 5 --output-dir .tune-runs/<timestamp>_asr_multi_speaker_r5
+
+# ASR stage 2 only (Qwen3-ASR on the full SeedTTS EN set):
+python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 run \
+  --stages seedtts --repeats 5 --output-dir .tune-runs/<timestamp>_asr_seedtts_r5
+```
+
 Common TTS preset:
 ```
-# Full TTS CI pipeline: Qwen3-ASR + every configured TTS model preset, 5 repeats.
+# Full TTS CI pipeline: every configured TTS model preset, 5 repeats.
 # As of this branch, `tts` expands to Higgs and MOSS; it is not a random pick.
 python .claude/skills/tune-ci-thresholds/tune.py --model tts run \
   --stages ALL --repeats 5 --output-dir .tune-runs/<timestamp>_tts_all_r5
 
-# Only model-dependent TTS stages, all configured presets:
-python .claude/skills/tune-ci-thresholds/tune.py --model tts run \
-  --stages tts --repeats 5 --output-dir .tune-runs/<timestamp>_tts_models_r5
-
 # One preset only, for debugging or a targeted rerun after a failed repeat:
 python .claude/skills/tune-ci-thresholds/tune.py --model tts run \
   --stages tts_moss --repeats 5 --output-dir .tune-runs/<timestamp>_tts_moss_r5
-
-# Stage 1 only (Qwen3-ASR on the full SeedTTS EN set):
-python .claude/skills/tune-ci-thresholds/tune.py --model tts run \
-  --stages qwen3_asr --repeats 5 --output-dir .tune-runs/<timestamp>_tts_qwen3_asr_r5
 ```
 
-### TTS CI stage 1 — Qwen3-ASR (mandatory in full TTS calibration)
+### ASR CI stages
 
-`test-tts-ci.yaml` DAG: **`stage-1-qwen3-asr` is independent**; `stage-2-non-streaming`
-and `stage-3-streaming` run in parallel; `stage-4-consistency` `needs`
-[stage-2, stage-3]. So `test_asr_ci.py` runs in parallel with the Higgs
-stages. Full `--model tts --stages ALL` calibration
-**must** include the Qwen3-ASR stages — never calibrate Higgs thresholds alone
-while leaving Qwen3-ASR on stale literals.
+`test-asr-ci.yaml` DAG: **`stage-1-multi-speaker` → `stage-2-seedtts`**.
+Calibration mirrors this with `--model qwen3-asr-v1`. Full ASR calibration
+uses `--stages ALL`; targeted reruns use `multi_speaker` or `seedtts`.
 
 | Stage key | Group | What gets written | Test constant(s) |
 |-----------|-------|-------------------|------------------|
-| `qwen3_asr_wer` | wer | corpus + per-sample WER ref | `SEEDTTS_ASR_CORPUS_WER_MAX`, `SEEDTTS_ASR_SAMPLE_WER_MAX` |
-| `qwen3_asr_speed` | speed | throughput + latency + RTF P95 refs | `QWEN3_ASR_THROUGHPUT_MIN`, `QWEN3_ASR_LATENCY_*`, `QWEN3_ASR_RTF_*` |
+| `multi_speaker_diarization` | diarization | CER / cpCER / valid sample refs | `MOSS_TD_CER_*`, `MOSS_TD_CP_CER_*`, `MOSS_TD_DELTA_CER_*` |
+| `multi_speaker_speed` | speed | throughput + latency + RTF P95 refs | `MOSS_TD_THROUGHPUT_QPS_MIN`, `MOSS_TD_LATENCY_*`, `MOSS_TD_RTF_*` |
+| `seedtts_wer` | wer | corpus + per-sample WER ref | `SEEDTTS_ASR_CORPUS_WER_MAX`, `SEEDTTS_ASR_SAMPLE_WER_MAX` |
+| `seedtts_speed` | speed | throughput + latency + RTF P95 refs | `QWEN3_ASR_THROUGHPUT_MIN`, `QWEN3_ASR_LATENCY_*`, `QWEN3_ASR_RTF_*` |
 
 Notes:
-- Uses **`Qwen/Qwen3-ASR-1.7B`** via `hf_model_ids_by_test` (not the Higgs
-  checkpoint). Same **`omni`** venv and 2-GPU router DP=2 as TTS stages.
-  Stage 1 imports **`QWEN3_ASR_WER_CONCURRENCY`** from `tests.utils` (32),
-  matching TTS WER and talker WER transcribe fan-out.
-- Sample count for strict audit: **`SEEDTTS_ASR_CORRECTNESS_SAMPLES`**
-  (via `expected_samples` in `stages.yaml`), JSON `summary.evaluated` /
-  `summary.total_samples`.
+- Stage 1 uses **`OpenMOSS-Team/MOSS-Transcribe-Diarize`** and dataset
+  **`zhaochenyang20/movies800`**. Strict audit expects
+  **`MOSS_TD_CI_SAMPLES`** samples; CER/cpCER metrics are already percentages
+  in the JSON, so display scale is **1**, not 100.
+- Stage 2 uses **`Qwen/Qwen3-ASR-1.7B`** and dataset
+  **`zhaochenyang20/seed-tts-eval-arrow`**. Strict audit expects
+  **`SEEDTTS_ASR_CORRECTNESS_SAMPLES`** samples.
+- Both stages use the **`omni`** venv and 2-GPU router DP=2.
 - **CI slack:** tune.py writes P95 reference constants only; assertions use
-  derived `*_THRESHOLD` values with **10% slack** (`THRESHOLD_SLACK_HIGHER=0.9`,
-  `THRESHOLD_SLACK_LOWER=1.1` via `apply_wer_slack()` for WER). Do **not**
+  derived threshold values where the tests define slack helpers. Do **not**
   bake slack into calibrated literals.
-- Shortcuts: `qwen3_asr`, `@wer`, `@speed`.
-- Standalone model **`qwen3-asr-v1`** remains for isolated ASR runs;
-  **TTS pipeline calibration uses `--model tts`** so Qwen3-ASR plus every
-  configured TTS model preset share one run directory and provenance.
+- Shortcuts: `multi_speaker`, `seedtts`, `@diarization`, `@wer`, `@speed`.
 
 ### TTS random-pick CI vs calibration coverage
 
@@ -749,9 +751,9 @@ The generated stage aliases reflect this:
 | `tts_higgs` | all Higgs TTS stages |
 | `tts_moss` | all MOSS TTS stages |
 | `tts_higgs_nonstream` / `tts_moss_stream` | one preset and one mode |
-| `@speed`, `@wer`, `@similarity`, `@utmos` | metric group across presets; `@speed` and `@wer` also include Qwen3-ASR when `--model tts` is selected |
+| `@speed`, `@wer`, `@similarity`, `@utmos` | metric group across TTS presets |
 
-### TTS model calibration targets (stages 2–4)
+### TTS model calibration targets (stages 1–3)
 
 **Fixed sample presets in `test_tts_ci.py` — never apply, never worst-of-N write:**
 `SEEDTTS_EN_FULLSET_SAMPLES`, `TTS_SIMILARITY_MAX_SAMPLES`,
@@ -800,11 +802,11 @@ Notes:
   stage titles alone.
 - **Stage 4 (consistency)** is a separate CI job that runs
   `tests/test_model/test_tts_consistency_artifacts.py` (not `test_tts_ci.py`),
-  comparing the stage-2/stage-3 speed artifacts with `TTS_CONSISTENCY_CONCURRENCY=16`.
+  comparing the stage-1/stage-2 speed artifacts with `TTS_CONSISTENCY_CONCURRENCY=16`.
   It is pass/fail only — no numeric threshold tune.py calibrates, and it is not
   one of the `test_tts_ci.py` variant stage keys. tune.py's TTS stages cover
-  stage 1 (Qwen3-ASR) and the stage-2/3 voice-clone metrics; the consistency job
-  is verified by re-running CI, not calibrated.
+  stage 1/2 voice-clone metrics; the consistency job is verified by re-running
+  CI, not calibrated.
 
 Shortcuts: `@speed`, `@wer`, `@similarity`, `@utmos`, `ALL`, or `tts` /
 `tts_nonstream` / `tts_stream`.
@@ -991,16 +993,16 @@ All CI workflows, calibration models, and WER sweeps use the same venv name
 
 | Workload | CI workflow | venv | `OMNI_CI_HOME` (calibration host) | Source env script |
 |----------|-------------|------|-----------------------------------|-------------------|
-| All benchmarks (unit, Qwen3, TTS, Qwen3-ASR) | `omni-ci.yaml`: `preflight → setup → pr-test (test.yaml) → tts-ci (test-tts-ci.yaml) → qwen3-omni-ci (test-qwen3-omni-ci.yaml) → cleanup` | **`omni`** | `/github/home/calibration` | `source .github/scripts/ci_env.sh` |
+| All benchmarks (unit, ASR, TTS, Qwen3-Omni) | `omni-ci.yaml`: `preflight → setup → pr-test (test.yaml) → asr-ci (test-asr-ci.yaml) → tts-ci (test-tts-ci.yaml) → qwen3-omni-ci (test-qwen3-omni-ci.yaml) → cleanup` | **`omni`** | `/github/home/calibration` | `source .github/scripts/ci_env.sh` |
 
-**Omni CI suite order (DAG):** `preflight → setup → pr-test → tts-ci →
-qwen3-omni-ci → cleanup`. After the gated `preflight` and the shared `setup`
+**Omni CI suite order (DAG):** `preflight → setup → pr-test → asr-ci →
+tts-ci → qwen3-omni-ci → cleanup`. After the gated `preflight` and the shared `setup`
 job, **unit / non-benchmark tests (`test.yaml`, "PR Test") run FIRST**, then
-`test-tts-ci.yaml`, then `test-qwen3-omni-ci.yaml`. Each benchmark suite `needs`
-the previous (`tts-ci needs [setup, pr-test]`, `qwen3-omni-ci needs [setup,
-tts-ci]`) but is `if: always() && !cancelled() && setup == success`, so a failure
-in PR Test or TTS does **not** skip the later suites. Only a failed `setup` (or
-`preflight` gate) blocks the chain.
+`test-asr-ci.yaml`, then `test-tts-ci.yaml`, then `test-qwen3-omni-ci.yaml`.
+Each benchmark suite `needs` the previous but is
+`if: always() && !cancelled() && setup == success`, so a failure in PR Test, ASR,
+or TTS does **not** skip the later suites. Only a failed `setup` (or `preflight`
+gate) blocks the chain.
 
 **Forbidden shortcuts (observed 2026-05-30):**
 
@@ -1030,8 +1032,8 @@ Aligned env → Qwen3 colocated router CUDA graph capture ~5–10 s on warm
 `${OMNI_CI_HOME}/.torchinductor`. Cold or wrong slice → multi-minute startup;
 do **not** treat that as a threshold or code regression.
 
-**WER CI with Qwen3-ASR router (DP=2):** still uses the **parent model’s**
-venv/slice for the benchmark fixture (Qwen3 → qwen3 env; TTS → tts env; standalone ASR → tts env).
+**WER CI with Qwen3-ASR router (DP=2):** uses the shared **omni** venv/slice
+for the benchmark fixture.
 Qwen3-Omni/TTS generation concurrency is **16** where the test has a
 `CONCURRENCY` knob; Qwen3-ASR WER router/transcribe fan-out is **32**.
 Only the Qwen3-ASR router stage needs 2 free GPUs after `delete_gpu_process.sh`.
@@ -1327,8 +1329,9 @@ weights checklist for agents).
 
    Use AskUserQuestion to ask exactly once which **apply mode** to use:
      - `report` — only the report, no test files touched
-     - `smart` — auto-apply accuracy, WER, similarity, and UTMOS worst-of-N;
-       auto-tighten speed thresholds; ask only for speed metrics that would loosen
+     - `smart` — auto-apply accuracy, WER, diarization, similarity, and UTMOS
+       worst-of-N; auto-tighten speed thresholds; ask only for speed metrics
+       that would loosen
      - `full` — write worst-of-N for every metric, no further prompts
    If the user picks `report`, stop without touching any file.
 
@@ -1349,6 +1352,9 @@ weights checklist for agents).
        exactly into `*_MIN_ACCURACY`, `*_SIMILARITY_*_MIN`, or
        `*_UTMOS_*_REFERENCE`. Report percentages use 2 decimal places for
        readability only; similarity and UTMOS use raw scores (not %).
+     - **`diarization`:** use `write_value` from apply-plan. MOSS-TD CER/cpCER
+       values are already JSON percentages, so never multiply by `scale`; valid
+       sample metrics are raw counts.
      - **`speed`:** use `write_value` from apply-plan (rounded unless that
        would tighten beyond `worst_raw`). Never re-round or multiply by
        `scale`.
@@ -1363,8 +1369,9 @@ weights checklist for agents).
    test file using the rules in (b) below, no questions asked.
 
    **Mode `smart`**: classify each metric:
-     - **auto-apply** iff `stage_group` in (`accuracy`, `wer`, `similarity`, `utmos`),
-       OR (`stage_group == "speed"` AND `direction == "tightens"`).
+     - **auto-apply** iff `stage_group` in (`accuracy`, `wer`, `diarization`,
+       `similarity`, `utmos`), OR (`stage_group == "speed"` AND
+       `direction == "tightens"`).
        Edit using rules in (b).
      - **auto-skip** iff `direction == "equal"` (nothing to do).
      - **interactive** otherwise — i.e. any `speed` metric that would
@@ -1521,11 +1528,11 @@ weights checklist for agents).
     ├── qwen3-omni-v1/                   # v1 pipeline (qwen3-omni)
     │   ├── config.yaml
     │   └── stages.yaml
-    ├── tts/                             # TTS CI pipeline (stage 1 Qwen3-ASR + Higgs/MOSS)
-    │   ├── config.yaml                  #   per-preset constant_filter for discover/apply
+    ├── qwen3-asr-v1/                    # ASR CI pipeline (MOSS-TD + Qwen3-ASR SeedTTS)
+    │   ├── config.yaml
     │   └── stages.yaml
-    └── qwen3-asr-v1/                    # Isolated Qwen3-ASR only
-        ├── config.yaml
+    └── tts/                             # TTS CI pipeline (Higgs/MOSS)
+        ├── config.yaml                  #   per-preset constant_filter for discover/apply
         └── stages.yaml
 ```
 
