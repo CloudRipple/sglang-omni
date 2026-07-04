@@ -20,26 +20,14 @@ if [ ! -x "${PYTHON}" ]; then
   exit 1
 fi
 
-PROBE_LOG="$(mktemp)"
-trap 'rm -f "${PROBE_LOG}"' EXIT
-
-if ! "${PYTHON}" - <<'PY' >"${PROBE_LOG}" 2>&1; then
-import importlib
-import sys
-
-print(f"python={sys.executable}")
-print(f"prefix={sys.prefix}")
-
-for module_name in ("av", "torch", "transformers", "sglang"):
-    importlib.import_module(module_name)
-
-normalizers = importlib.import_module("whisper.normalizers")
-getattr(normalizers, "EnglishTextNormalizer")
-PY
+if ! "${PYTHON}" -c "
+import av
+import torch
+import transformers
+import sglang
+from whisper.normalizers import EnglishTextNormalizer
+" 2>/dev/null; then
   echo "::error::${VENV_NAME} import probe failed at ${OMNI_CI_HOME}/${VENV_NAME}" >&2
-  echo "----- import probe output -----" >&2
-  cat "${PROBE_LOG}" >&2
-  echo "----- end import probe output -----" >&2
   exit 1
 fi
 

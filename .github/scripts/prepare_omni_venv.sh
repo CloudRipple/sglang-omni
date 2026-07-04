@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Full rebuild of OMNI_CI_HOME (never reuses an existing tree).
 set -euo pipefail
-umask 000
 
 if [ "$#" -ne 1 ]; then
   echo "usage: $0 <venv-name>" >&2
@@ -22,9 +21,8 @@ DEPS_HASH_FILE="${OMNI_CI_HOME}/.deps-hash"
 source "${SCRIPT_DIR}/omni_ci_deps_hash.sh"
 DEPS_HASH="$(omni_ci_deps_hash)"
 
-LOCK_DIR="${UV_CACHE_DIR:-/github/home/uv-cache}"
+LOCK_DIR="${UV_CACHE_DIR:-/github/home/.cache/uv}"
 mkdir -p "${LOCK_DIR}"
-chmod -R 777 "${LOCK_DIR}" 2>/dev/null || true
 LOCK_FILE="${LOCK_DIR}/omni-venv-prepare-$(echo -n "${OMNI_CI_HOME}" | sha256sum | awk '{print $1}').lock"
 
 exec 200>"${LOCK_FILE}"
@@ -37,7 +35,6 @@ echo "Preparing fresh ${HOST} (full rebuild)"
 rm -f "${OMNI_CI_HOME}/.omni-env-complete"
 rm -rf "${OMNI_CI_HOME}"
 mkdir -p "${OMNI_CI_HOME}"
-chmod -R 777 "${OMNI_CI_HOME}" 2>/dev/null || true
 uv venv "${HOST}" -p 3.11
 
 rm -rf "./${VENV_NAME}"

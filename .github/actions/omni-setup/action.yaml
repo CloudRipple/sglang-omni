@@ -20,39 +20,22 @@ runs:
     - name: Align CI cache home
       shell: bash
       run: |
-        umask 000
-        # uv cache lives outside /github/home/.cache: Docker root-owns the .cache
-        # parent of the huggingface bind-mount, so a shared cache under it keeps
-        # hitting Permission denied for rootless (uid 1004). Keep it shared, just
-        # off the mounted tree. chmod only the dirs we own — never recurse into
-        # /github/home/.cache (that would recurse the large huggingface mount).
-        mkdir -p "${OMNI_CI_HOME}/.cache" "${OMNI_CI_HOME}/.torchinductor" \
-                 "/github/home/uv-cache" "/github/home/uv-python" \
-                 "/github/home/.cache/modelscope" 2>/dev/null || true
-        chmod -R 777 "${OMNI_CI_HOME}" "/github/home/uv-cache" "/github/home/uv-python" \
-                 "/github/home/.cache/modelscope" 2>/dev/null || true
-        echo "HOME=${OMNI_CI_HOME}" >> "${GITHUB_ENV}"
-        echo "USER=sglang-omni" >> "${GITHUB_ENV}"
-        echo "LOGNAME=sglang-omni" >> "${GITHUB_ENV}"
+        echo "HOME=/github/home" >> "${GITHUB_ENV}"
         echo "HF_HOME=/github/home/.cache/huggingface" >> "${GITHUB_ENV}"
         echo "MODELSCOPE_CACHE=/github/home/.cache/modelscope" >> "${GITHUB_ENV}"
         echo "XDG_CACHE_HOME=${OMNI_CI_HOME}/.cache" >> "${GITHUB_ENV}"
-        echo "CUDA_CACHE_PATH=${OMNI_CI_HOME}/.nv/ComputeCache" >> "${GITHUB_ENV}"
-        echo "TORCHINDUCTOR_CACHE_DIR=${OMNI_CI_HOME}/.torchinductor" >> "${GITHUB_ENV}"
         echo "HF_HUB_DISABLE_XET=1" >> "${GITHUB_ENV}"
         echo "HF_HUB_ENABLE_HF_TRANSFER=0" >> "${GITHUB_ENV}"
         echo "HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}" >> "${GITHUB_ENV}"
         # PyPI mirror + shared wheel cache (HF mirror does not accelerate pip/uv).
         echo "UV_INDEX_URL=${UV_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}" >> "${GITHUB_ENV}"
-        echo "UV_CACHE_DIR=/github/home/uv-cache" >> "${GITHUB_ENV}"
-        echo "UV_PYTHON_INSTALL_DIR=/github/home/uv-python" >> "${GITHUB_ENV}"
+        echo "UV_CACHE_DIR=/github/home/.cache/uv" >> "${GITHUB_ENV}"
 
     - name: Restore cache
       shell: bash
       env:
         VENV_NAME: ${{ inputs.venv-name }}
       run: |
-        umask 000
         HOST="${OMNI_CI_HOME}/${VENV_NAME}"
         if [ -d "${HOST}" ] && [ -n "$(ls -A "${HOST}/")" ]; then
           rm -rf "./${VENV_NAME}"
@@ -72,7 +55,6 @@ runs:
       env:
         VENV_NAME: ${{ inputs.venv-name }}
       run: |
-        umask 000
         if bash .github/scripts/validate_omni_env_reusable.sh "${VENV_NAME}"; then
           echo "Prepared ${VENV_NAME} environment is reusable under ${OMNI_CI_HOME}."
           exit 0
@@ -90,7 +72,6 @@ runs:
     - name: Remove stale flashinfer JIT artifacts
       shell: bash
       run: |
-        umask 000
         # Note:(Chenchen Hong) On the hongccc/sglang-omni:dev (CUDA 13) image the
         # flashinfer-python 0.6.11.post1 wheel JIT-compiles its kernels against the
         # base image's matching cu13 toolkit. We no longer preinstall a
@@ -103,5 +84,4 @@ runs:
     - name: Kill GPU processes
       shell: bash
       run: |
-        umask 000
         bash .github/scripts/delete_gpu_process.sh
