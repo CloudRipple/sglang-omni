@@ -27,8 +27,9 @@ runs:
         # off the mounted tree. chmod only the dirs we own — never recurse into
         # /github/home/.cache (that would recurse the large huggingface mount).
         mkdir -p "${OMNI_CI_HOME}/.cache" "${OMNI_CI_HOME}/.torchinductor" \
-                 "/github/home/uv-cache" "/github/home/.cache/modelscope" 2>/dev/null || true
-        chmod -R 777 "${OMNI_CI_HOME}" "/github/home/uv-cache" \
+                 "/github/home/uv-cache" "/github/home/uv-python" \
+                 "/github/home/.cache/modelscope" 2>/dev/null || true
+        chmod -R 777 "${OMNI_CI_HOME}" "/github/home/uv-cache" "/github/home/uv-python" \
                  "/github/home/.cache/modelscope" 2>/dev/null || true
         echo "HOME=${OMNI_CI_HOME}" >> "${GITHUB_ENV}"
         echo "USER=sglang-omni" >> "${GITHUB_ENV}"
@@ -44,6 +45,7 @@ runs:
         # PyPI mirror + shared wheel cache (HF mirror does not accelerate pip/uv).
         echo "UV_INDEX_URL=${UV_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}" >> "${GITHUB_ENV}"
         echo "UV_CACHE_DIR=/github/home/uv-cache" >> "${GITHUB_ENV}"
+        echo "UV_PYTHON_INSTALL_DIR=/github/home/uv-python" >> "${GITHUB_ENV}"
 
     - name: Restore cache
       shell: bash
