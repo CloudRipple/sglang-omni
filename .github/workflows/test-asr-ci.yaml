@@ -31,6 +31,17 @@ jobs:
     name: stage 1 - MOSS-TD multi-speaker
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
+    env:
+      HOME: >-
+        ${{ inputs.omni_ci_home != ''
+            && inputs.omni_ci_home
+            || format('/github/home/run-{0}', github.run_id) }}
+      USER: sglang-omni
+      LOGNAME: sglang-omni
+      TORCHINDUCTOR_CACHE_DIR: >-
+        ${{ inputs.omni_ci_home != ''
+            && format('{0}/.torchinductor', inputs.omni_ci_home)
+            || format('/github/home/run-{0}/.torchinductor', github.run_id) }}
     container:
       image: crpi-n6adu6llixz83q37.cn-hangzhou.personal.cr.aliyuncs.com/hongccc/sglang-omni:dev
       options: >-
@@ -63,7 +74,6 @@ jobs:
           HF_HUB_ENABLE_HF_TRANSFER: "0"
           HF_TOKEN: ${{ secrets.BOSON_HF_TOKEN }}
           MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH: ${{ env.MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH }}
-          TORCHINDUCTOR_CACHE_DIR: ${{ env.OMNI_CI_HOME }}/.torchinductor
 
       - name: Post-stage cleanup
         if: always()
@@ -82,6 +92,17 @@ jobs:
     if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
+    env:
+      HOME: >-
+        ${{ inputs.omni_ci_home != ''
+            && inputs.omni_ci_home
+            || format('/github/home/run-{0}', github.run_id) }}
+      USER: sglang-omni
+      LOGNAME: sglang-omni
+      TORCHINDUCTOR_CACHE_DIR: >-
+        ${{ inputs.omni_ci_home != ''
+            && format('{0}/.torchinductor', inputs.omni_ci_home)
+            || format('/github/home/run-{0}/.torchinductor', github.run_id) }}
     container:
       image: crpi-n6adu6llixz83q37.cn-hangzhou.personal.cr.aliyuncs.com/hongccc/sglang-omni:dev
       options: >-
@@ -114,7 +135,6 @@ jobs:
           HF_HUB_ENABLE_HF_TRANSFER: "0"
           HF_TOKEN: ${{ secrets.BOSON_HF_TOKEN }}
           QWEN3_ASR_MODEL_PATH: ${{ env.QWEN3_ASR_MODEL_PATH }}
-          TORCHINDUCTOR_CACHE_DIR: ${{ env.OMNI_CI_HOME }}/.torchinductor
 
       - name: Post-stage cleanup
         if: always()
