@@ -4,7 +4,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-
 EVAL_SCRIPT_PATH = (
     Path(__file__).resolve().parents[3] / "benchmarks/eval/eval_transcribe_diarize.py"
 )
