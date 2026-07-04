@@ -21,10 +21,13 @@ runs:
       shell: bash
       run: |
         echo "HOME=${OMNI_CI_HOME}" >> "${GITHUB_ENV}"
+        echo "USER=sglang-omni" >> "${GITHUB_ENV}"
+        echo "LOGNAME=sglang-omni" >> "${GITHUB_ENV}"
         echo "HF_HOME=/github/home/.cache/huggingface" >> "${GITHUB_ENV}"
         echo "MODELSCOPE_CACHE=/github/home/.cache/modelscope" >> "${GITHUB_ENV}"
         echo "XDG_CACHE_HOME=${OMNI_CI_HOME}/.cache" >> "${GITHUB_ENV}"
         echo "CUDA_CACHE_PATH=${OMNI_CI_HOME}/.nv/ComputeCache" >> "${GITHUB_ENV}"
+        echo "TORCHINDUCTOR_CACHE_DIR=${OMNI_CI_HOME}/.torchinductor" >> "${GITHUB_ENV}"
         echo "HF_HUB_DISABLE_XET=1" >> "${GITHUB_ENV}"
         echo "HF_HUB_ENABLE_HF_TRANSFER=0" >> "${GITHUB_ENV}"
         echo "HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}" >> "${GITHUB_ENV}"

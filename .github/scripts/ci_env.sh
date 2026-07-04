@@ -3,6 +3,8 @@
 set -a
 export OMNI_CI_HOME="${OMNI_CI_HOME:-/github/home/calibration}"
 export HOME="${OMNI_CI_HOME}"
+export USER="${USER:-sglang-omni}"
+export LOGNAME="${LOGNAME:-sglang-omni}"
 export HF_HOME=/github/home/.cache/huggingface
 export MODELSCOPE_CACHE=/github/home/.cache/modelscope
 export XDG_CACHE_HOME="${OMNI_CI_HOME}/.cache"
