@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -uo pipefail
+umask 000
 
 max_attempts="${OMNI_CI_MAX_ATTEMPTS:-3}"
 retry_delay_seconds="${OMNI_CI_RETRY_DELAY_SECONDS:-10}"
@@ -32,6 +33,7 @@ fi
 
 log_root="${RUNNER_TEMP:-/tmp}/omni-ci-retry"
 mkdir -p "${log_root}"
+chmod -R 777 "${log_root}" 2>/dev/null || true
 
 should_retry() {
   local status="$1"

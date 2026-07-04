@@ -3,6 +3,7 @@
 #
 # Always exits 0 only when validate_omni_env_reusable passes.
 set -euo pipefail
+umask 000
 
 if [ "$#" -ne 1 ]; then
   echo "usage: $0 <venv-name>" >&2

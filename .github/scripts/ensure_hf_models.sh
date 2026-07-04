@@ -13,6 +13,7 @@
 # code paths (snapshot_download(repo_id), server --model-path repo id) work
 # without modification.
 set -euo pipefail
+umask 000
 
 if [ "$#" -lt 2 ]; then
   echo "usage: $0 <venv-name> <hf-repo-id> [<hf-repo-id> ...]" >&2
@@ -29,6 +30,9 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
 export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-/github/home/.cache/modelscope}"
+
+mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${MODELSCOPE_CACHE}" 2>/dev/null || true
+chmod -R 777 "${XDG_CACHE_HOME}" "${HF_HOME}" "${MODELSCOPE_CACHE}" 2>/dev/null || true
 
 source "${VENV_NAME}/bin/activate"
 

@@ -1,5 +1,6 @@
 # Source CI-aligned env for all Omni benchmark tests (unit, Qwen3, TTS, Qwen3-ASR).
 # Matches GitHub Actions omni-setup + tune-ci-thresholds auto_env.
+umask 000
 set -a
 export OMNI_CI_HOME="${OMNI_CI_HOME:-/github/home/calibration}"
 export HOME="${OMNI_CI_HOME}"

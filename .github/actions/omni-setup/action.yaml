@@ -20,6 +20,10 @@ runs:
     - name: Align CI cache home
       shell: bash
       run: |
+        umask 000
+        mkdir -p "${OMNI_CI_HOME}/.cache" "${OMNI_CI_HOME}/.torchinductor" \
+                 "/github/home/.cache/uv" "/github/home/.cache/modelscope" 2>/dev/null || true
+        chmod -R 777 "${OMNI_CI_HOME}" "/github/home/.cache" 2>/dev/null || true
         echo "HOME=${OMNI_CI_HOME}" >> "${GITHUB_ENV}"
         echo "USER=sglang-omni" >> "${GITHUB_ENV}"
         echo "LOGNAME=sglang-omni" >> "${GITHUB_ENV}"
@@ -40,6 +44,7 @@ runs:
       env:
         VENV_NAME: ${{ inputs.venv-name }}
       run: |
+        umask 000
         HOST="${OMNI_CI_HOME}/${VENV_NAME}"
         if [ -d "${HOST}" ] && [ -n "$(ls -A "${HOST}/")" ]; then
           rm -rf "./${VENV_NAME}"
@@ -59,6 +64,7 @@ runs:
       env:
         VENV_NAME: ${{ inputs.venv-name }}
       run: |
+        umask 000
         if bash .github/scripts/validate_omni_env_reusable.sh "${VENV_NAME}"; then
           echo "Prepared ${VENV_NAME} environment is reusable under ${OMNI_CI_HOME}."
           exit 0
@@ -76,6 +82,7 @@ runs:
     - name: Remove stale flashinfer JIT artifacts
       shell: bash
       run: |
+        umask 000
         # Note:(Chenchen Hong) On the hongccc/sglang-omni:dev (CUDA 13) image the
         # flashinfer-python 0.6.11.post1 wheel JIT-compiles its kernels against the
         # base image's matching cu13 toolkit. We no longer preinstall a
@@ -88,4 +95,5 @@ runs:
     - name: Kill GPU processes
       shell: bash
       run: |
+        umask 000
         bash .github/scripts/delete_gpu_process.sh
