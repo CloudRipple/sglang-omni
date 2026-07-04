@@ -29,8 +29,8 @@ Read `handoff:` in the active host profile and confirm with the user if unclear.
 |-------|-----------|--------|---------|-------|
 | ASR CI | `asr` | `ALL` | 5 | Stage 1 MOSS-TD multi-speaker, then stage 2 Qwen3-ASR SeedTTS |
 | TTS CI | `tts` | `ALL` | 5 | Runs every configured TTS `calibration_preset`; do not use CI random pick |
-| Qwen3-Omni CI | `qwen3-omni-v1` | `ALL` | 5 | — |
-| Full CI | `asr`, `tts`, `qwen3-omni-v1` | each `ALL` | 5 each | **ASR first**, then TTS, then Qwen3-Omni |
+| Qwen3-Omni CI | `omni` | `ALL` | 5 | — |
+| Full CI | `asr`, `tts`, `omni` | each `ALL` | 5 each | **ASR first**, then TTS, then Qwen3-Omni |
 
 Run precheck for **every** model you will calibrate before `tune.py run`.
 For `--model tts`, the `tts` alias expands to every TTS model preset declared
@@ -217,14 +217,14 @@ Expected repos by model (precheck validates each):
 `OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5`, `Qwen/Qwen3-ASR-1.7B`;
 dataset `zhaochenyang20/seed-tts-eval-arrow`.
 
-**`qwen3-omni-v1` (adds):** models `Qwen/Qwen3-Omni-30B-A3B-Instruct`,
+**`omni` (adds):** models `Qwen/Qwen3-Omni-30B-A3B-Instruct`,
 `marksverdhei/Qwen3-Omni-30B-A3B-FP8`; datasets `zhaochenyang20/mmsu-ci-2000`,
 `zhaochenyang20/mmmu-ci-50`, `zhaochenyang20/seed-tts-eval-50-arrow`,
 `zhaochenyang20/Video_MME_ci`, `zhaochenyang20/Video_AMME_ci`.
 
 **Fail → report** missing repos. If precheck prints ✗ with
 `huggingface-cli download …`, run **only** those lines (one repo at a time,
-`HF_ENDPOINT=https://hf-mirror.com`). For private repos, verify `HF_TOKEN`
+`HF_ENDPOINT=https://huggingface.co`). For private repos, verify `HF_TOKEN`
 (`source ~/.zshrc` or env) before download; if token missing, report first.
 
 ---
@@ -243,8 +243,8 @@ for f in wavlm_large.pt wavlm_large_finetune.pth .complete; do
   test -f "$SIM/$f" && echo PASS "$f" || echo FAIL "$f"
 done
 
-# hf-mirror.com is the China default, but the H100 host is overseas and fails it
-# with LocalEntryNotFoundError — use huggingface.co for the warm-cache download.
+# Use the same official endpoint as CI. Private/gated model repo probes require
+# a valid HF_TOKEN and may fail through mirrors.
 export HF_ENDPOINT=https://huggingface.co HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
 export SEEDTTS_SIM_CACHE_DIR="$SIM"
 cd /data/sglang-omni
@@ -261,9 +261,9 @@ host profile. Do not re-download when `.complete` exists and warm-cache HITs.
 metric downloads `balacoon/utmos` → `utmos.jit` on demand via
 `benchmarks.metrics.utmos.ensure_utmos_assets`, into
 `/github/home/.cache/sglang-omni/utmos`. precheck does **not** verify it, so on an
-overseas host (e.g. H100) `tts_utmos` fails **mid-run** because `hf-mirror.com`
-can't serve the file. Warm it before TTS calibration with the same overseas
-endpoint (`ensure_utmos_assets()` — a raw `huggingface-cli download` won't satisfy
+host `tts_utmos` can fail **mid-run** if the endpoint cannot serve the asset.
+Warm it before TTS calibration with the CI endpoint (`ensure_utmos_assets()` —
+a raw `huggingface-cli download` won't satisfy
 its `.utmos_cache.json` marker):
 
 ```bash
@@ -304,8 +304,8 @@ python .claude/skills/tune-ci-thresholds/tune.py --model asr precheck \
 python .claude/skills/tune-ci-thresholds/tune.py --model tts precheck \
   --output-dir /tmp/precheck_tts
 
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-omni-v1 precheck \
-  --output-dir /tmp/precheck_qwen3
+python .claude/skills/tune-ci-thresholds/tune.py --model omni precheck \
+  --output-dir /tmp/precheck_omni
 ```
 
 Add `--host sglang-h100-ci` if autodetect failed in Gate 1.

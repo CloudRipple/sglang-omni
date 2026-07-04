@@ -16,7 +16,7 @@ __version__ = "0.6.0"
 SKILL_DIR = Path(__file__).resolve().parent
 MODELS_DIR = SKILL_DIR / "models"
 HOSTS_DIR = SKILL_DIR / "hosts"
-DEFAULT_MODEL = "qwen3-omni-v1"
+DEFAULT_MODEL = "omni"
 _SPEAKER_SIM_MIN_BYTES = 100 * 1024 * 1024
 REPO_ROOT = Path("/sgl-workspace/sglang-omni")
 if not REPO_ROOT.exists():
@@ -1018,17 +1018,17 @@ def precheck(py, src, out, skip_ver, cfg, datasets_override=None,
             print(f"    {mark} dataset: {ds}")
     if missing:
         lines = [f"{len(missing)} asset(s) not cached locally. "
-                 "Run these to download via the HF mirror:"]
+                 "Run these to download from Hugging Face:"]
         for repo_id, kind in missing:
             flag = " --repo-type dataset" if kind == "dataset" else ""
             lines.append(
-                "  HF_ENDPOINT=https://hf-mirror.com "
+                "  HF_ENDPOINT=https://huggingface.co "
                 f"huggingface-cli download {repo_id}{flag}"
             )
         errs.append("\n".join(lines))
     sim_dir = cfg["auto_env"].get("SEEDTTS_SIM_CACHE_DIR")
     needs_speaker_sim = bool(
-        cfg.get("requires_speaker_sim", cfg["name"] in ("tts", "qwen3-omni-v1"))
+        cfg.get("requires_speaker_sim", cfg["name"] in ("tts", "omni"))
     )
     if sim_dir and needs_speaker_sim:
         sim_ok, sim_detail = _speaker_sim_assets_ok(Path(sim_dir))

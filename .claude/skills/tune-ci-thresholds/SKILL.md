@@ -1,6 +1,6 @@
 ---
 name: tune-ci-thresholds
-description: Run CI tests N times per stage on the H100 CI-reproduction host, produce a per-metric strict worst-of-N observation report (every stage must have N full-sample repeats), and (on user confirmation) write the worst-of-N values back into the test files as new baselines. Each new user calibration request MUST use a fresh UTC-timestamp --output-dir on current HEAD; --resume only when explicitly continuing the same interrupted session on the same commit. Reports must include the full calibration commit SHA. Host-specific repo/venv/cache paths live in hosts/*.yaml (CI doc paths are reference only). Currently supports qwen3-omni-v1, asr, and tts; extensible via models/<name>/config.yaml.
+description: Run CI tests N times per stage on the H100 CI-reproduction host, produce a per-metric strict worst-of-N observation report (every stage must have N full-sample repeats), and (on user confirmation) write the worst-of-N values back into the test files as new baselines. Each new user calibration request MUST use a fresh UTC-timestamp --output-dir on current HEAD; --resume only when explicitly continuing the same interrupted session on the same commit. Reports must include the full calibration commit SHA. Host-specific repo/venv/cache paths live in hosts/*.yaml (CI doc paths are reference only). Currently supports omni, asr, and tts; extensible via models/<name>/config.yaml.
 ---
 
 # tune-ci-thresholds
@@ -283,8 +283,8 @@ torchinductor slice paths are used (once per fresh container filesystem).
 
 ### Speaker Similarity — checked in precheck
 
-For models that need speaker similarity (currently `tts` and
-`qwen3-omni-v1`), `precheck` verifies `physical.speaker_sim`: `.complete`,
+For models that need speaker similarity (currently `tts` and `omni`),
+`precheck` verifies `physical.speaker_sim`: `.complete`,
 `wavlm_large.pt`, `wavlm_large_finetune.pth`. ASR-only calibration does not
 require these assets. Bootstrap once if ✗ — see `speaker_similarity_bootstrap`
 in the host YAML.
@@ -293,9 +293,9 @@ in the host YAML.
 
 The TTS `tts_utmos` metric downloads `balacoon/utmos` → `utmos.jit` **on demand**
 via `benchmarks.metrics.utmos.ensure_utmos_assets`, into
-`/github/home/.cache/sglang-omni/utmos`. `precheck` does **not** verify it, so on
-an overseas host (e.g. H100) `tts_utmos` fails **mid-run** — `hf-mirror.com` can't
-serve the file. Warm it **before** TTS calibration with
+`/github/home/.cache/sglang-omni/utmos`. `precheck` does **not** verify it, so
+`tts_utmos` can fail **mid-run** when the configured endpoint cannot serve the
+asset. Warm it **before** TTS calibration with
 `HF_ENDPOINT=https://huggingface.co` by calling `ensure_utmos_assets()` (a raw
 `huggingface-cli download` won't satisfy its `.utmos_cache.json` marker):
 
@@ -515,7 +515,7 @@ List what's configured:
 ```
 python .claude/skills/tune-ci-thresholds/tune.py models-list
 ```
-Today: `qwen3-omni-v1`, `asr`, `tts`. To add another model,
+Today: `omni`, `asr`, `tts`. To add another model,
 drop in a new `models/<name>/config.yaml` and run `tune.py discover
 --model <name>`. No Python code changes needed unless the new model
 emits metrics with a
@@ -552,7 +552,7 @@ explicitly asks you to fix a named gap (e.g. speaker sim warm-cache).
    `source <venv>/bin/activate && uv pip install -e .`
    Do **not** run `prepare_omni_venv.sh` for this.
 3. **Fix one gap at a time** — use the exact command precheck prints (e.g.
-   `HF_ENDPOINT=https://hf-mirror.com huggingface-cli download …` for one
+   `HF_ENDPOINT=https://huggingface.co huggingface-cli download …` for one
    missing checkpoint). Do not batch unrelated installs “just in case”.
 4. **Re-run precheck** after each fix until all selected assets are `✓`,
    then start `tune.py run`.
@@ -610,19 +610,16 @@ Prefer repairing the single reported gap over rebuilding.
   `run`, precheck lists each selected stage's required assets as `✓` /
   `✗`; standalone `precheck` checks all configured assets. On any miss,
   it prints the exact
-  `HF_ENDPOINT=https://hf-mirror.com huggingface-cli download …` commands
+  `HF_ENDPOINT=https://huggingface.co huggingface-cli download …` commands
   to run — run **only those**.
 - Env vars under `auto_env` in the model's config.yaml are set
   automatically at tune.py startup. The user does NOT need to `export`
   them. Proxy env vars (`http_proxy` etc.) are left alone — the tests'
   own `disable_proxy()` helper strips them for loopback calls, matching
   real CI.
-- `HF_ENDPOINT` defaults to `https://hf-mirror.com` (the China mirror, matches CI
-  omni-setup). The **H100 host is overseas**, where `hf-mirror.com` fails with
-  `LocalEntryNotFoundError`; warm-cache downloads on that host (speaker-sim WavLM
-  and the UTMOS asset — see below) must use `HF_ENDPOINT=https://huggingface.co`.
-  Otherwise use `https://huggingface.co` only if a mirror download fails and
-  precheck prints an alternate command.
+- `HF_ENDPOINT` defaults to `https://huggingface.co`, matching current GitHub CI.
+  Private or gated repos must use this official endpoint with `HF_TOKEN`; mirrors
+  can return 401/404 for repo tree probes even when the token is valid.
 - No GPU processes holding memory at **precheck** time. If all GPUs are
   busy, precheck fails with the busy PID list and the user must free them.
   **During `tune.py run`**, the tool runs `delete_gpu_process.sh` and
@@ -636,20 +633,20 @@ when precheck already shows `✓` for venv pins and assets.
 
 ## Invocation
 - `/tune-ci-thresholds` — default model, all stages, 5 repeats
-- `/tune-ci-thresholds --model qwen3-omni-v1 --stages mmsu_accuracy --repeats 3`
+- `/tune-ci-thresholds --model omni --stages mmsu_accuracy --repeats 3`
 - `/tune-ci-thresholds --resume <run-dir>` — continue an interrupted run
 
-Common Qwen3-Omni V1 presets:
+Common Omni presets:
 ```
 # All Qwen3-Omni threshold stages (every base from stages-list).
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-omni-v1 run \
+python .claude/skills/tune-ci-thresholds/tune.py --model omni run \
   --stages mmmu,mmmu_talker,mmsu,mmsu_talker,tts,videoamme,videoamme_talker,videoamme_talker_tp2,videomme,videomme_talker \
-  --repeats 5 --output-dir .tune-runs/<timestamp>_qwen3-omni-v1_r5
+  --repeats 5 --output-dir .tune-runs/<timestamp>_omni_r5
 
 # FP8 CI stage 11.
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-omni-v1 run \
+python .claude/skills/tune-ci-thresholds/tune.py --model omni run \
   --stages videoamme_talker_tp2 \
-  --repeats 5 --output-dir .tune-runs/<timestamp>_qwen3-omni-v1_fp8_stage_11_r5
+  --repeats 5 --output-dir .tune-runs/<timestamp>_omni_fp8_stage_11_r5
 ```
 
 **FP8 Thinker TP=2 (stage 11) container requirements.** CI runs this stage
@@ -871,7 +868,7 @@ export OMNI_CI_HOME=/github/home/calibration
 export HOME=/github/home
 export HF_HOME=/github/home/.cache/huggingface
 export MODELSCOPE_CACHE=/github/home/.cache/modelscope
-export HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
+export HF_ENDPOINT=https://huggingface.co HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
 export UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 export UV_CACHE_DIR=/github/home/.cache/uv
 export XDG_CACHE_HOME=${OMNI_CI_HOME}/.cache
@@ -896,13 +893,13 @@ precheck proves the venv path is missing or corrupt.
 
 - `HOME=/github/home`
 - `OMNI_CI_HOME`, `XDG_CACHE_HOME`, `TORCHINDUCTOR_CACHE_DIR` — per-slice paths above
-- `HF_HOME`, `MODELSCOPE_CACHE`, `HF_ENDPOINT=https://hf-mirror.com`, `HF_HUB_DISABLE_XET=1`, `HF_HUB_ENABLE_HF_TRANSFER=0`
+- `HF_HOME`, `MODELSCOPE_CACHE`, `HF_ENDPOINT=https://huggingface.co`, `HF_HUB_DISABLE_XET=1`, `HF_HUB_ENABLE_HF_TRANSFER=0`
 - `UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple`, `UV_CACHE_DIR=/github/home/.cache/uv`
 - `FLASHINFER_DISABLE_VERSION_CHECK=1`
 - `CUDA_VISIBLE_DEVICES` — `ci_env.sh` defaults to `0,1`; during `tune.py run` the tool overrides it per stage to the free GPUs it picks
 
 For missing model/dataset assets only, run the precheck-printed download
-command (often with `HF_ENDPOINT=https://hf-mirror.com`).
+command (often with `HF_ENDPOINT=https://huggingface.co`).
 
 If HF cache lives on a non-default path, add a host profile with
 `physical.hf_hub` — do not rely on symlinks; `tune.py` sets `HF_HOME` directly.
@@ -932,7 +929,7 @@ PY
 source /github/home/calibration/omni/bin/activate
 export GITHUB_ACTIONS=true RUNNER_TEMP=/tmp PYTHONPATH=$PWD
 export HOME=/github/home OMNI_CI_HOME=/github/home/calibration
-export HF_HOME=/github/home/.cache/huggingface HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
+export HF_HOME=/github/home/.cache/huggingface HF_ENDPOINT=https://huggingface.co HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
 export SEEDTTS_SIM_CACHE_DIR=/github/home/seedtts-wavlm-sim
 export XDG_CACHE_HOME=${OMNI_CI_HOME}/.cache
 export TORCHINDUCTOR_CACHE_DIR=${OMNI_CI_HOME}/.torchinductor
@@ -1025,7 +1022,7 @@ cd /sgl-workspace/sglang-omni
 source omni/bin/activate
 source .github/scripts/ci_env.sh
 python -c "import os; assert os.environ['TORCHINDUCTOR_CACHE_DIR'].startswith(os.environ['OMNI_CI_HOME'])"
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-omni-v1 precheck   # or asr / tts
+python .claude/skills/tune-ci-thresholds/tune.py --model omni precheck   # or asr / tts
 ```
 
 Aligned env → Qwen3 colocated router CUDA graph capture ~5–10 s on warm
@@ -1153,7 +1150,7 @@ Only the Qwen3-ASR router stage needs 2 free GPUs after `delete_gpu_process.sh`.
   calibration).
 - **`status` subcommand:** machine-readable snapshot for agent polling.
 - **`report` gate:** refuses to write `report.md` unless **every**
-  stage × repeat has complete metrics (`125/125` for full qwen3 ALL×5,
+  stage × repeat has complete metrics (`125/125` for full omni ALL×5,
   etc.) — this is tune.py's extraction gate, **not** strict worst-of-N.
   You must still run the **strict audit** before trusting the report
   for apply.
@@ -1248,7 +1245,7 @@ weights checklist for agents).
 3. Run `python tune.py --model <M> precheck --output-dir <run-dir>`.
    On failure, relay the message verbatim; fix **only** the reported gap(s)
    per **Environment policy — check first** (typically `uv pip install -e .`
-   and/or one `HF_ENDPOINT=https://hf-mirror.com huggingface-cli download …`),
+   and/or one `HF_ENDPOINT=https://huggingface.co huggingface-cli download …`),
    re-run precheck until `✓`, then
    continue. Do **not** run `prepare_omni_venv.sh` or bulk downloads when
    precheck already passes.
@@ -1317,7 +1314,7 @@ weights checklist for agents).
    `tune.py run` has exited with exit code 0,
    `tune.py status --run-dir <run-dir>` shows `"complete": true`,
    **strict audit shows every stage N/N ✓** (full-sample repeats —
-   e.g. 25/25 stages × 5 for full qwen3 ALL),
+   e.g. 25/25 stages × 5 for full omni ALL),
    `report.md` has been written, every `{{CONTEXT:...}}` placeholder in
    step 7 has been resolved, and step 8 has shown the user the report
    path. Never ask between stages, between repeats, on partial failure,
@@ -1525,7 +1522,7 @@ weights checklist for agents).
 ├── hosts/                               # per-machine repo/venv/cache layouts
 │   └── sglang-h100-ci.yaml              # in-container repo/venv/cache layout for the H100 CI host
 └── models/
-    ├── qwen3-omni-v1/                   # v1 pipeline (qwen3-omni)
+    ├── omni/                            # Qwen3-Omni CI pipeline
     │   ├── config.yaml
     │   └── stages.yaml
     ├── asr/                             # ASR CI pipeline (MOSS-TD + Qwen3-ASR SeedTTS)
@@ -1589,7 +1586,7 @@ not yet in config. It also validates existing config entries against
 the inferred values.
 
 ## Adding a new model
-1. Create `models/<new-name>/config.yaml` mirroring `qwen3-omni-v1/config.yaml`.
+1. Create `models/<new-name>/config.yaml` mirroring `omni/config.yaml`.
    For `tmp_path`-based tests (MMMU, MMSU, VideoMME, VideoAMME + talker
    variants), `metric_sources` entries are auto-inferred by discover — you
    can omit them. For TTS tests (`tmp_path_factory`-based), add
