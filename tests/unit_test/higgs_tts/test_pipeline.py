@@ -102,14 +102,9 @@ def test_higgs_tts_engine_enables_cuda_graph_by_default(monkeypatch) -> None:
     monkeypatch.setattr(stages, "make_higgs_scheduler_adapters", fake_make_adapters)
     monkeypatch.setattr(stages, "OmniScheduler", FakeScheduler)
 
-    stages.create_sglang_tts_engine_executor(
-        "boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999"
-    )
+    stages.create_sglang_tts_engine_executor("bosonai/higgs-tts-3-4b")
 
-    assert (
-        captured["checkpoint_dir"]
-        == "boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999"
-    )
+    assert captured["checkpoint_dir"] == "bosonai/higgs-tts-3-4b"
     assert captured["context_length"] == 4096
     assert captured["gpu_id"] == 0
     assert captured["overrides"]["disable_cuda_graph"] is False

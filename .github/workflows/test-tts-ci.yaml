@@ -61,7 +61,7 @@ jobs:
             pytest tests/test_model/test_tts_ci.py -v -s -x --concurrency 16 --tts-stage tts-stage-1-nonstream
         env:
           HF_ENDPOINT: https://huggingface.co
-          HF_TOKEN: ${{ secrets.BOSON_HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SEEDTTS_SIM_CACHE_DIR: /github/home/seedtts-wavlm-sim
           TTS_CI_MODEL: ${{ inputs.tts_ci_model }}
           TTS_STAGE_OUTPUT_ROOT: ${{ env.OMNI_CI_HOME }}/tts-stage-results/nonstream
@@ -118,7 +118,7 @@ jobs:
             pytest tests/test_model/test_tts_ci.py -v -s -x --concurrency 16 --tts-stage tts-stage-2-stream
         env:
           HF_ENDPOINT: https://huggingface.co
-          HF_TOKEN: ${{ secrets.BOSON_HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TTS_CI_MODEL: ${{ inputs.tts_ci_model }}
           TTS_STAGE_OUTPUT_ROOT: ${{ env.OMNI_CI_HOME }}/tts-stage-results/stream
           TORCHINDUCTOR_CACHE_DIR: ${{ env.OMNI_CI_HOME }}/.torchinductor

@@ -34,10 +34,10 @@
 #   weights are already present in the configured HF cache.
 name: tts
 description: "TTS CI (Higgs/MOSS SeedTTS EN)"
-hf_model_id: "boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999"
+hf_model_id: "bosonai/higgs-tts-3-4b"
 hf_model_ids_by_test:
   test_tts_ci.py:
-    - "boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999"
+    - "bosonai/higgs-tts-3-4b"
     - "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5"
     - "Qwen/Qwen3-ASR-1.7B"
 hf_datasets:
@@ -85,7 +85,7 @@ metric_sources:
         # discover: only Higgs HIGGS_VC_* constants (never MOSS_VC_*)
         constant_filter: "^HIGGS_VC_"
         hf_model_ids:
-          - "boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999"
+          - "bosonai/higgs-tts-3-4b"
           - "Qwen/Qwen3-ASR-1.7B"
       moss:
         extra_env:

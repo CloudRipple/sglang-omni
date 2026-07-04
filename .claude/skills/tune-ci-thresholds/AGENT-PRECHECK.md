@@ -213,7 +213,7 @@ Expected repos by model (precheck validates each):
 `Qwen/Qwen3-ASR-1.7B`; datasets `zhaochenyang20/movies800`,
 `zhaochenyang20/seed-tts-eval-arrow`.
 
-**`tts`:** models `boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999`,
+**`tts`:** models `bosonai/higgs-tts-3-4b`,
 `OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5`, `Qwen/Qwen3-ASR-1.7B`;
 dataset `zhaochenyang20/seed-tts-eval-arrow`.
 

@@ -41,7 +41,7 @@ env:
     ${{ github.event_name == 'pull_request'
         && format('/github/home/pr-{0}', github.event.pull_request.number)
         || format('/github/home/run-{0}', github.run_id) }}
-  TTS_MODEL_PATH: boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999
+  TTS_MODEL_PATH: bosonai/higgs-tts-3-4b
   MOSS_TTS_MODEL_PATH: OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5
   QWEN3_ASR_MODEL_PATH: Qwen/Qwen3-ASR-1.7B
   MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH: OpenMOSS-Team/MOSS-Transcribe-Diarize
@@ -148,11 +148,25 @@ jobs:
         with:
           venv-name: omni
 
+      - name: Verify HF token can access all CI models
+        shell: bash
+        env:
+          HF_ENDPOINT: https://huggingface.co
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash .github/scripts/check_hf_model_access.sh omni \
+            Qwen/Qwen3-Omni-30B-A3B-Instruct \
+            marksverdhei/Qwen3-Omni-30B-A3B-FP8 \
+            "${QWEN3_ASR_MODEL_PATH}" \
+            "${MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH}" \
+            "${TTS_MODEL_PATH}" \
+            "${MOSS_TTS_MODEL_PATH}"
+
       - name: Ensure CI model weights
         shell: bash
         env:
           HF_ENDPOINT: https://huggingface.co
-          HF_TOKEN: ${{ secrets.BOSON_HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash .github/scripts/ensure_hf_models.sh omni \
             Qwen/Qwen3-Omni-30B-A3B-Instruct \
