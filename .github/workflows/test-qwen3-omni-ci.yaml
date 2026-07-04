@@ -21,8 +21,12 @@ env:
         || format('/github/home/run-{0}', github.run_id) }}
   PYTORCH_ALLOC_CONF: expandable_segments:True
 
-# Invoked by omni-ci.yaml after TTS CI (last benchmark suite in the omni-ci
-# sequence: PR Test → TTS → Qwen3-Omni). Restores omni only.
+# Invoked by omni-ci.yaml after TTS CI. Restores omni only.
+# DAG:
+#   stage-1-thinker -> stage-2-tts -> stage-3-mmmu -> stage-4-mmmu-talker
+#     -> stage-5-mmsu -> stage-6-mmsu-talker -> stage-7-videomme
+#     -> stage-8-videomme-talker -> stage-9-videoamme
+#     -> stage-10-videoamme-talker-tp2
 
 jobs:
   stage-1-thinker:
@@ -66,6 +70,8 @@ jobs:
 
   stage-2-tts:
     name: stage 2 - TTS speed + WER + SIM
+    needs: stage-1-thinker
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 25
     container:
@@ -122,6 +128,8 @@ jobs:
 
   stage-3-mmmu:
     name: stage 3 - MMMU accuracy + speed
+    needs: stage-2-tts
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 20
     container:
@@ -165,6 +173,8 @@ jobs:
 
   stage-4-mmmu-talker:
     name: stage 4 - MMMU Talker
+    needs: stage-3-mmmu
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 15
     container:
@@ -208,6 +218,8 @@ jobs:
 
   stage-5-mmsu:
     name: stage 5 - MMSU accuracy + speed
+    needs: stage-4-mmmu-talker
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 20
     container:
@@ -252,6 +264,8 @@ jobs:
 
   stage-6-mmsu-talker:
     name: stage 6 - MMSU Talker
+    needs: stage-5-mmsu
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 15
     container:
@@ -295,6 +309,8 @@ jobs:
 
   stage-7-videomme:
     name: stage 7 - Video-MME accuracy + speed
+    needs: stage-6-mmsu-talker
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
@@ -338,6 +354,8 @@ jobs:
 
   stage-8-videomme-talker:
     name: stage 8 - Video-MME Talker
+    needs: stage-7-videomme
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
@@ -381,6 +399,8 @@ jobs:
 
   stage-9-videoamme:
     name: stage 9 - Video-AMME accuracy + speed
+    needs: stage-8-videomme-talker
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
@@ -424,6 +444,8 @@ jobs:
 
   stage-10-videoamme-talker-tp2:
     name: stage 10 - FP8 Thinker TP=2 (Video-AMME Talker)
+    needs: stage-9-videoamme
+    if: always() && !cancelled()
     runs-on: [self-hosted, h100]
     timeout-minutes: 35
     container:

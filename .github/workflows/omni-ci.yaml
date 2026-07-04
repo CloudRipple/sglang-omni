@@ -1,9 +1,13 @@
 name: Omni CI
 
 # DAG:
-#   preflight ──► setup ──► pr-test ──► tts-ci ──► qwen3-omni-ci
-#                    │           │          │              │
-#                    └───────────┴──────────┴──────────────┴──► cleanup (dispatch only)
+#   preflight -> setup -> pr-test -> asr-ci -> tts-ci -> qwen3-omni-ci
+#                  |         |          |         |              |
+#                  +---------+----------+---------+--------------+-> cleanup (dispatch only)
+#
+# Benchmark suites wait for the previous suite to finish but use always() so a
+# failed unit/benchmark suite does not skip later suites. Only setup blocks all
+# downstream model CI.
 #
 # PR-scoped homes (/github/home/pr-<N>) persist on the runner for reuse across
 # pushes (runner TTL, e.g. 3 days). reconcile_omni_ci_env.sh validates fingerprint,
@@ -40,6 +44,7 @@ env:
   TTS_MODEL_PATH: boson-sglang/higgs-audio-v3-TTS-4B-grpo05200410999
   MOSS_TTS_MODEL_PATH: OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5
   QWEN3_ASR_MODEL_PATH: Qwen/Qwen3-ASR-1.7B
+  MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH: OpenMOSS-Team/MOSS-Transcribe-Diarize
 
 
 jobs:
@@ -154,6 +159,7 @@ jobs:
             Qwen/Qwen3-Omni-30B-A3B-Instruct \
             marksverdhei/Qwen3-Omni-30B-A3B-FP8 \
             "${QWEN3_ASR_MODEL_PATH}" \
+            "${MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH}" \
             "${TTS_MODEL_PATH}" \
             "${MOSS_TTS_MODEL_PATH}"
 
@@ -214,9 +220,23 @@ jobs:
           echo "Selected TTS CI model: ${selected}"
           echo "tts_ci_model=${selected}" >> "$GITHUB_OUTPUT"
 
+  asr-ci:
+    name: ASR CI
+    needs: [setup, pr-test]
+    if: >-
+      always() && !cancelled() &&
+      needs.setup.result == 'success'
+    uses: ./.github/workflows/test-asr-ci.yaml
+    with:
+      omni_ci_home: >-
+        ${{ github.event_name == 'pull_request'
+            && format('/github/home/pr-{0}', github.event.pull_request.number)
+            || format('/github/home/run-{0}', github.run_id) }}
+    secrets: inherit
+
   tts-ci:
     name: TTS CI
-    needs: [setup, pr-test, pick-tts-model]
+    needs: [setup, pr-test, asr-ci, pick-tts-model]
     if: >-
       always() && !cancelled() &&
       needs.setup.result == 'success' &&
@@ -232,7 +252,7 @@ jobs:
 
   qwen3-omni-ci:
     name: Qwen3-Omni CI
-    needs: [setup, tts-ci]
+    needs: [setup, pr-test, asr-ci, tts-ci]
     if: >-
       always() && !cancelled() &&
       needs.setup.result == 'success'
@@ -259,7 +279,7 @@ jobs:
 
   cleanup:
     name: cleanup - reclaim ephemeral run home
-    needs: [setup, tts-ci, qwen3-omni-ci, pr-test]
+    needs: [setup, pr-test, asr-ci, tts-ci, qwen3-omni-ci]
     if: >-
       always() && !cancelled() &&
       needs.setup.result == 'success' &&
