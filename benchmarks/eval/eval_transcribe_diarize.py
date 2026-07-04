@@ -1,4 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+"""MOSS-Transcribe-Diarize eval on movies800.
+
+Usage:
+
+    python -m benchmarks.eval.eval_transcribe_diarize \
+        --max-concurrency 16 \
+        --output-dir results/moss_transcribe_diarize_movies800
+"""
 
 from __future__ import annotations
 
@@ -21,7 +29,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from benchmarks.benchmarker.data import RequestResult
 from benchmarks.benchmarker.runner import BenchmarkRunner, RunConfig, SendFn
-from benchmarks.benchmarker.utils import managed_omni_server, save_json_results
+from benchmarks.benchmarker.utils import (
+    managed_omni_server,
+    save_json_results,
+    wait_for_service,
+)
 from benchmarks.metrics._format import SPEED_LABEL_WIDTH, SPEED_LINE_WIDTH
 from benchmarks.tasks.transcribe_diarize import (
     MOVIES800_REPO_ID,
@@ -35,6 +47,7 @@ from benchmarks.tasks.transcribe_diarize import (
 MODEL_PATH: Final[str] = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
 RESULTS_FILE: Final[str] = "transcribe_diarize_results.json"
 DEFAULT_OUTPUT_DIR: Final[str] = "results/moss_transcribe_diarize_movies800"
+DEFAULT_SERVER_MEM_FRACTION_STATIC: Final[float] = 0.80
 SUMMARY_ORDER: Final[tuple[str, ...]] = (
     "total_samples",
     "evaluated",
@@ -135,26 +148,28 @@ def make_send_fn(api_url: str, model_path: str, language: str | None) -> SendFn:
 async def run_eval(
     samples: list[Movies800Sample],
     *,
-    host: str,
-    port: int,
+    base_url: str,
     model_path: str,
     language: str | None,
     concurrency: int,
     warmup: int,
+    request_rate: float,
+    disable_tqdm: bool,
     request_timeout_s: int,
 ) -> tuple[list[RequestResult], float]:
     runner = BenchmarkRunner(
         RunConfig(
             max_concurrency=concurrency,
+            request_rate=request_rate,
             warmup=warmup,
-            disable_tqdm=False,
+            disable_tqdm=disable_tqdm,
             timeout_s=request_timeout_s,
         )
     )
     outputs = await runner.run(
         samples,
         make_send_fn(
-            api_url=f"http://{host}:{port}/v1/audio/transcriptions",
+            api_url=f"{base_url}/v1/audio/transcriptions",
             model_path=model_path,
             language=language,
         ),
@@ -171,16 +186,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-column", default="audio")
     parser.add_argument("--expected-column", default="transcription")
     parser.add_argument("--model-path", default=MODEL_PATH)
+    parser.add_argument("--base-url", default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--language")
-    parser.add_argument("--concurrency", type=int, default=16)
+    parser.add_argument(
+        "--concurrency",
+        "--max-concurrency",
+        dest="concurrency",
+        type=int,
+        default=16,
+        help="Maximum concurrent requests.",
+    )
     parser.add_argument("--warmup", type=int, default=0)
+    parser.add_argument(
+        "--request-rate",
+        type=float,
+        default=float("inf"),
+        help="Requests per second (inf = send all at once).",
+    )
     parser.add_argument("--request-timeout-s", type=int, default=300)
     parser.add_argument("--server-timeout-s", type=int, default=600)
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--use-existing-server", action="store_true")
+    parser.add_argument("--disable-tqdm", action="store_true")
+    parser.add_argument(
+        "--max-running-requests",
+        type=int,
+        default=None,
+        help=(
+            "SGLang generation stage max_running_requests for the managed "
+            "server. Defaults to --concurrency."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-graph-max-bs",
+        type=int,
+        default=None,
+        help=(
+            "SGLang generation stage cuda_graph_max_bs for the managed server. "
+            "Defaults to --max-running-requests."
+        ),
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=_mem_fraction_static,
+        default=DEFAULT_SERVER_MEM_FRACTION_STATIC,
+        help=(
+            "SGLang static KV-cache memory fraction for the managed server. "
+            "MOSS-Transcribe-Diarize keeps headroom for the audio encoder by "
+            f"default ({DEFAULT_SERVER_MEM_FRACTION_STATIC})."
+        ),
+    )
+    parser.add_argument(
+        "--skip-gpu-cleanup",
+        action="store_true",
+        help="Do not run the shared GPU cleanup step after a managed server exits.",
+    )
     return parser.parse_args()
 
 
@@ -215,6 +278,12 @@ def main() -> int:
             DIARIZATION_METRICS_PERCENT_ORDER,
         )
     )
+    failed_requests = int(payload["speed"].get("failed_requests", 0) or 0)
+    if failed_requests:
+        print(
+            f"Evaluation failed: {failed_requests} request(s) failed.", file=sys.stderr
+        )
+        return 1
     return 0
 
 
@@ -222,16 +291,19 @@ def _run_with_or_without_server(
     args: argparse.Namespace,
     samples: list[Movies800Sample],
 ) -> tuple[EvaluationPayload, str]:
+    base_url = _base_url(args)
     if args.use_existing_server:
+        wait_for_service(base_url, timeout=args.server_timeout_s)
         outputs, wall_clock_s = asyncio.run(
             run_eval(
                 samples,
-                host=args.host,
-                port=args.port,
+                base_url=base_url,
                 model_path=args.model_path,
                 language=args.language,
                 concurrency=args.concurrency,
                 warmup=args.warmup,
+                request_rate=args.request_rate,
+                disable_tqdm=args.disable_tqdm,
                 request_timeout_s=args.request_timeout_s,
             )
         )
@@ -248,17 +320,22 @@ def _run_with_or_without_server(
         port=args.port,
         host=args.host,
         log_file=log_file,
+        max_running_requests=_server_max_running_requests(args),
+        cuda_graph_max_bs=_server_cuda_graph_max_bs(args),
+        mem_fraction_static=args.mem_fraction_static,
         timeout=args.server_timeout_s,
+        wait_for_gpu_release=not args.skip_gpu_cleanup,
     ):
         outputs, wall_clock_s = asyncio.run(
             run_eval(
                 samples,
-                host=args.host,
-                port=args.port,
+                base_url=base_url,
                 model_path=args.model_path,
                 language=args.language,
                 concurrency=args.concurrency,
                 warmup=args.warmup,
+                request_rate=args.request_rate,
+                disable_tqdm=args.disable_tqdm,
                 request_timeout_s=args.request_timeout_s,
             )
         )
@@ -269,6 +346,36 @@ def _run_with_or_without_server(
             RESULTS_FILE,
         )
         return payload, output_path
+
+
+def _base_url(args: argparse.Namespace) -> str:
+    return (args.base_url or f"http://{args.host}:{args.port}").rstrip("/")
+
+
+def _server_max_running_requests(args: argparse.Namespace) -> int:
+    if args.max_running_requests is not None:
+        return args.max_running_requests
+    return args.concurrency
+
+
+def _server_cuda_graph_max_bs(args: argparse.Namespace) -> int:
+    if args.cuda_graph_max_bs is not None:
+        return args.cuda_graph_max_bs
+    return _server_max_running_requests(args)
+
+
+def _mem_fraction_static(value: str) -> float:
+    try:
+        fraction = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "mem_fraction_static must be a float in (0, 1)"
+        ) from exc
+    if not 0.0 < fraction < 1.0:
+        raise argparse.ArgumentTypeError(
+            "mem_fraction_static must be a float in (0, 1)"
+        )
+    return fraction
 
 
 def _build_payload(

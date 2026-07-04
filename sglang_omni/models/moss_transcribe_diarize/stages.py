@@ -55,7 +55,7 @@ def create_sglang_moss_transcribe_diarize_executor(
     max_running_requests: int = 16,
     max_new_tokens: int | None = None,
     context_length: int | None = None,
-    mem_fraction_static: float | None = None,
+    mem_fraction_static: float | None = 0.80,
     mm_embedding_cache_size_bytes: int = 0,
     enable_torch_compile: bool = False,
     request_build_max_workers: int = 2,
