@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Remove PR CI home
         shell: bash
