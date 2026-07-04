@@ -27,10 +27,10 @@ Read `handoff:` in the active host profile and confirm with the user if unclear.
 
 | Scope | `--model` | Stages | Repeats | Order |
 |-------|-----------|--------|---------|-------|
-| ASR CI | `qwen3-asr-v1` | `ALL` | 5 | Stage 1 MOSS-TD multi-speaker, then stage 2 Qwen3-ASR SeedTTS |
+| ASR CI | `asr` | `ALL` | 5 | Stage 1 MOSS-TD multi-speaker, then stage 2 Qwen3-ASR SeedTTS |
 | TTS CI | `tts` | `ALL` | 5 | Runs every configured TTS `calibration_preset`; do not use CI random pick |
 | Qwen3-Omni CI | `qwen3-omni-v1` | `ALL` | 5 | — |
-| Full CI | `qwen3-asr-v1`, `tts`, `qwen3-omni-v1` | each `ALL` | 5 each | **ASR first**, then TTS, then Qwen3-Omni |
+| Full CI | `asr`, `tts`, `qwen3-omni-v1` | each `ALL` | 5 each | **ASR first**, then TTS, then Qwen3-Omni |
 
 Run precheck for **every** model you will calibrate before `tune.py run`.
 For `--model tts`, the `tts` alias expands to every TTS model preset declared
@@ -209,7 +209,7 @@ ls "$HF/hub" 2>/dev/null | rg -i 'qwen3|higgs|moss|movies800|seed-tts|video|mmmu
 
 Expected repos by model (precheck validates each):
 
-**`qwen3-asr-v1`:** models `OpenMOSS-Team/MOSS-Transcribe-Diarize`,
+**`asr`:** models `OpenMOSS-Team/MOSS-Transcribe-Diarize`,
 `Qwen/Qwen3-ASR-1.7B`; datasets `zhaochenyang20/movies800`,
 `zhaochenyang20/seed-tts-eval-arrow`.
 
@@ -298,7 +298,7 @@ Run for **each** model in Gate 0 scope:
 cd /data/sglang-omni
 export TUNE_HOST=sglang-h100-ci   # if Gate 1 autodetect failed
 
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 precheck \
+python .claude/skills/tune-ci-thresholds/tune.py --model asr precheck \
   --output-dir /tmp/precheck_asr
 
 python .claude/skills/tune-ci-thresholds/tune.py --model tts precheck \

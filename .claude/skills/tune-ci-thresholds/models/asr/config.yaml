@@ -7,7 +7,7 @@
 # Both stages use the managed router with 2 single-GPU workers (DP=2).
 # Qwen3-ASR SeedTTS uses the ASR transcribe fan-out from tests.utils
 # (QWEN3_ASR_WER_CONCURRENCY = 32).
-name: qwen3-asr-v1
+name: asr
 description: "ASR CI (MOSS-TD multi-speaker + Qwen3-ASR SeedTTS)"
 hf_model_id: "OpenMOSS-Team/MOSS-Transcribe-Diarize"
 hf_model_ids_by_test:

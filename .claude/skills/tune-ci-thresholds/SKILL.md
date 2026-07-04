@@ -1,6 +1,6 @@
 ---
 name: tune-ci-thresholds
-description: Run CI tests N times per stage on the H100 CI-reproduction host, produce a per-metric strict worst-of-N observation report (every stage must have N full-sample repeats), and (on user confirmation) write the worst-of-N values back into the test files as new baselines. Each new user calibration request MUST use a fresh UTC-timestamp --output-dir on current HEAD; --resume only when explicitly continuing the same interrupted session on the same commit. Reports must include the full calibration commit SHA. Host-specific repo/venv/cache paths live in hosts/*.yaml (CI doc paths are reference only). Currently supports qwen3-omni-v1, qwen3-asr-v1, and tts; extensible via models/<name>/config.yaml.
+description: Run CI tests N times per stage on the H100 CI-reproduction host, produce a per-metric strict worst-of-N observation report (every stage must have N full-sample repeats), and (on user confirmation) write the worst-of-N values back into the test files as new baselines. Each new user calibration request MUST use a fresh UTC-timestamp --output-dir on current HEAD; --resume only when explicitly continuing the same interrupted session on the same commit. Reports must include the full calibration commit SHA. Host-specific repo/venv/cache paths live in hosts/*.yaml (CI doc paths are reference only). Currently supports qwen3-omni-v1, asr, and tts; extensible via models/<name>/config.yaml.
 ---
 
 # tune-ci-thresholds
@@ -515,7 +515,7 @@ List what's configured:
 ```
 python .claude/skills/tune-ci-thresholds/tune.py models-list
 ```
-Today: `qwen3-omni-v1`, `qwen3-asr-v1`, `tts`. To add another model,
+Today: `qwen3-omni-v1`, `asr`, `tts`. To add another model,
 drop in a new `models/<name>/config.yaml` and run `tune.py discover
 --model <name>`. No Python code changes needed unless the new model
 emits metrics with a
@@ -567,7 +567,7 @@ explicitly asks you to fix a named gap (e.g. speaker sim warm-cache).
 
 ### Stage-specific shortcuts (still check-first)
 
-- **ASR CI (`--model qwen3-asr-v1`)**: uses `omni`, **2 GPU / router DP=2**.
+- **ASR CI (`--model asr`)**: uses `omni`, **2 GPU / router DP=2**.
   `ALL` covers ASR stage 1 MOSS-Transcribe-Diarize multi-speaker
   (`multi_speaker_*`) and ASR stage 2 Qwen3-ASR SeedTTS (`seedtts_*`).
   Calibrate a subset with `--stages multi_speaker` or `--stages seedtts`.
@@ -666,15 +666,15 @@ fragments:
 Common ASR preset:
 ```
 # Full ASR CI pipeline: MOSS-TD multi-speaker, then Qwen3-ASR SeedTTS.
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 run \
+python .claude/skills/tune-ci-thresholds/tune.py --model asr run \
   --stages ALL --repeats 5 --output-dir .tune-runs/<timestamp>_asr_all_r5
 
 # ASR stage 1 only (MOSS-Transcribe-Diarize on movies800):
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 run \
+python .claude/skills/tune-ci-thresholds/tune.py --model asr run \
   --stages multi_speaker --repeats 5 --output-dir .tune-runs/<timestamp>_asr_multi_speaker_r5
 
 # ASR stage 2 only (Qwen3-ASR on the full SeedTTS EN set):
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-asr-v1 run \
+python .claude/skills/tune-ci-thresholds/tune.py --model asr run \
   --stages seedtts --repeats 5 --output-dir .tune-runs/<timestamp>_asr_seedtts_r5
 ```
 
@@ -693,7 +693,7 @@ python .claude/skills/tune-ci-thresholds/tune.py --model tts run \
 ### ASR CI stages
 
 `test-asr-ci.yaml` DAG: **`stage-1-multi-speaker` → `stage-2-seedtts`**.
-Calibration mirrors this with `--model qwen3-asr-v1`. Full ASR calibration
+Calibration mirrors this with `--model asr`. Full ASR calibration
 uses `--stages ALL`; targeted reruns use `multi_speaker` or `seedtts`.
 
 | Stage key | Group | What gets written | Test constant(s) |
@@ -1025,7 +1025,7 @@ cd /sgl-workspace/sglang-omni
 source omni/bin/activate
 source .github/scripts/ci_env.sh
 python -c "import os; assert os.environ['TORCHINDUCTOR_CACHE_DIR'].startswith(os.environ['OMNI_CI_HOME'])"
-python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-omni-v1 precheck   # or qwen3-asr-v1 / tts
+python .claude/skills/tune-ci-thresholds/tune.py --model qwen3-omni-v1 precheck   # or asr / tts
 ```
 
 Aligned env → Qwen3 colocated router CUDA graph capture ~5–10 s on warm
@@ -1528,7 +1528,7 @@ weights checklist for agents).
     ├── qwen3-omni-v1/                   # v1 pipeline (qwen3-omni)
     │   ├── config.yaml
     │   └── stages.yaml
-    ├── qwen3-asr-v1/                    # ASR CI pipeline (MOSS-TD + Qwen3-ASR SeedTTS)
+    ├── asr/                             # ASR CI pipeline (MOSS-TD + Qwen3-ASR SeedTTS)
     │   ├── config.yaml
     │   └── stages.yaml
     └── tts/                             # TTS CI pipeline (Higgs/MOSS)

@@ -6,8 +6,8 @@ multi_speaker_diarization:
   extra_env: {}
   context_vars:
     - MOSS_TD_CI_SAMPLES
-  test_file_sha256: 39e0833783de6fd26b09aa6a47bbf027bc3ee575c1a6fc75167cfe27225e7ea9
-  last_discovered_at: 2026-07-04T18:44:28Z
+  test_file_sha256: a0124647e6ac9b4920ae417497e4bec6bdd2ced9b6e4675190b21c33d200768d
+  last_discovered_at: 2026-07-04T18:48:47Z
   expected_samples: 800
   sample_counts:
     total:
@@ -94,8 +94,8 @@ multi_speaker_speed:
   extra_env: {}
   context_vars:
     - MOSS_TD_CI_SAMPLES
-  test_file_sha256: 39e0833783de6fd26b09aa6a47bbf027bc3ee575c1a6fc75167cfe27225e7ea9
-  last_discovered_at: 2026-07-04T18:44:28Z
+  test_file_sha256: a0124647e6ac9b4920ae417497e4bec6bdd2ced9b6e4675190b21c33d200768d
+  last_discovered_at: 2026-07-04T18:48:47Z
   expected_samples: 800
   sample_counts:
     total:
@@ -163,7 +163,7 @@ seedtts_wer:
   context_vars:
     - SEEDTTS_ASR_CORRECTNESS_SAMPLES
   test_file_sha256: 9d7a0850681964214b398493b2c4bbafcdad2750ec98f31817426bb216857823
-  last_discovered_at: 2026-07-04T18:44:28Z
+  last_discovered_at: 2026-07-04T18:48:47Z
   expected_samples: 1088
   sample_counts:
     total:
@@ -201,7 +201,7 @@ seedtts_speed:
   context_vars:
     - SEEDTTS_ASR_CORRECTNESS_SAMPLES
   test_file_sha256: 9d7a0850681964214b398493b2c4bbafcdad2750ec98f31817426bb216857823
-  last_discovered_at: 2026-07-04T18:44:28Z
+  last_discovered_at: 2026-07-04T18:48:47Z
   expected_samples: 1088
   sample_counts:
     total:

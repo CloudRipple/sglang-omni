@@ -204,8 +204,8 @@ def test_tune_ci_threshold_configs_use_arrow_seedtts_datasets() -> None:
 
 
 def test_tune_ci_threshold_asr_config_tracks_current_asr_ci_stages() -> None:
-    config = yaml.safe_load((_MODELS_DIR / "qwen3-asr-v1/config.yaml").read_text())
-    stages = yaml.safe_load((_MODELS_DIR / "qwen3-asr-v1/stages.yaml").read_text())
+    config = yaml.safe_load((_MODELS_DIR / "asr/config.yaml").read_text())
+    stages = yaml.safe_load((_MODELS_DIR / "asr/stages.yaml").read_text())
 
     assert config["test_globs"] == [
         "tests/test_model/test_asr_ci_multi_speaker.py",

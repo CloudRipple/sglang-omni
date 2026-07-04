@@ -1,7 +1,7 @@
 # Model-specific config for the TTS CI threshold skill.
 #
 # Notes:
-# - ASR CI is calibrated separately via `--model qwen3-asr-v1`.
+# - ASR CI is calibrated separately via `--model asr`.
 #   This TTS model owns only `test_tts_ci.py` thresholds.
 # - test_tts_ci.py runs the model-dependent TTS stages (nonstream / stream)
 #   controlled by --tts-stage in CI. Calibration does not use CI's random
