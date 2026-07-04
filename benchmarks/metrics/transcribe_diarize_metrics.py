@@ -16,11 +16,6 @@ TIMESTAMP_RE = re.compile(r"\[\d+(?:\.\d+)?\]")
 SPEAKER_TAG_RE = re.compile(r"\[S0*(\d+)\]", re.IGNORECASE)
 SPEAKER_TAG_CANON_RE = re.compile(r"\[S\d+\]", re.IGNORECASE)
 BRACKET_EVENT_RE = re.compile(r"\[(?!S\d+\])[^]]+\]", re.IGNORECASE)
-EVENT_WORDS_EN = re.compile(
-    r"\b(?:laugh|laughter|laughs|applause|music|noise|silence|sil|breath|cough|coughing|sigh|multi|inaudible|unk|background)\b",
-    re.IGNORECASE,
-)
-EVENT_WORDS_ZH = re.compile(r"笑声|尖叫声|枪声|掌声|咳嗽|喘息|音乐|噪声|静音|沉默|笑")
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,9 +324,7 @@ def _preclean(text: str) -> str:
     cleaned = re.sub(r"【[^】]*】", " ", cleaned)
     cleaned = re.sub(r"<[^>]*>", " ", cleaned)
     cleaned = re.sub(r"&[^&]{0,40}&", " ", cleaned)
-    cleaned = BRACKET_EVENT_RE.sub(" ", cleaned)
-    cleaned = EVENT_WORDS_EN.sub(" ", cleaned)
-    return EVENT_WORDS_ZH.sub(" ", cleaned)
+    return BRACKET_EVENT_RE.sub(" ", cleaned)
 
 
 def _remove_punct_and_space(text: str) -> str:

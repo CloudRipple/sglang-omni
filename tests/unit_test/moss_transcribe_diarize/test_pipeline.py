@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import inspect
 
+import httpx
+import pytest
+from huggingface_hub.errors import RepositoryNotFoundError
+
 from sglang_omni.models.moss_transcribe_diarize.config import (
     MossTranscribeDiarizePipelineConfig,
 )
 from sglang_omni.models.moss_transcribe_diarize.stages import (
+    _missing_additional_chat_templates_compat,
     create_sglang_moss_transcribe_diarize_executor,
 )
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
@@ -51,3 +56,45 @@ def test_moss_transcribe_diarize_stage_reserves_encoder_headroom() -> None:
     assert signature.parameters["request_build_max_workers"].default == 2
     assert signature.parameters["request_build_max_pending"].default == 16
     assert signature.parameters["mm_embedding_cache_size_bytes"].default == 0
+
+
+def _repo_not_found(url: str) -> RepositoryNotFoundError:
+    response = httpx.Response(404, request=httpx.Request("GET", url))
+    return RepositoryNotFoundError(f"missing: {url}", response=response)
+
+
+def test_processor_compat_ignores_missing_additional_chat_templates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import transformers.processing_utils as processing_utils
+    import transformers.utils.hub as hub_utils
+
+    def missing_templates(*_args: object, **_kwargs: object) -> list[str]:
+        raise _repo_not_found(
+            "https://huggingface.co/api/models/repo/tree/main/"
+            "additional_chat_templates"
+        )
+
+    monkeypatch.setattr(processing_utils, "list_repo_templates", missing_templates)
+    monkeypatch.setattr(hub_utils, "list_repo_templates", missing_templates)
+
+    with _missing_additional_chat_templates_compat():
+        assert (
+            processing_utils.list_repo_templates("repo", local_files_only=False) == []
+        )
+        assert hub_utils.list_repo_templates("repo", local_files_only=False) == []
+
+
+def test_processor_compat_preserves_non_template_repo_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import transformers.processing_utils as processing_utils
+
+    def missing_repo(*_args: object, **_kwargs: object) -> list[str]:
+        raise _repo_not_found("https://huggingface.co/api/models/missing-repo")
+
+    monkeypatch.setattr(processing_utils, "list_repo_templates", missing_repo)
+
+    with _missing_additional_chat_templates_compat():
+        with pytest.raises(RepositoryNotFoundError, match="missing-repo"):
+            processing_utils.list_repo_templates("missing-repo", local_files_only=False)

@@ -171,8 +171,8 @@ Relevant model CI ownership:
 - `test_asr_ci_multi_speaker.py`: MOSS-Transcribe-Diarize multi-speaker
   ASR/diarization correctness + speed via the managed router at DP=2. It
   reuses the movies800 benchmark path, writes
-  `moss_transcribe_diarize_results.json`, and leaves calibrated accuracy/speed
-  thresholds as explicit TODO values.
+  `moss_transcribe_diarize_results.json`, and enforces calibrated
+  accuracy/speed thresholds generated from `tune-ci-thresholds`.
 - `test_asr_ci_seedtts.py`: Qwen3-ASR correctness + speed via SGLang Omni
   router (`/v1/audio/transcriptions`). Uses the full 1088-sample English
   SeedTTS set; writes `qwen3_asr_results.json` for threshold calibration

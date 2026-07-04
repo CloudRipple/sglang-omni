@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from sglang.srt.managers.mm_utils import init_mm_embedding_cache
@@ -30,6 +32,40 @@ from sglang_omni.scheduling.sglang_backend import (
 
 # Note (yichi): Budget for long-form input and let the checkpoint window cap it.
 _LONG_FORM_PROMPT_TOKENS = 72000
+
+
+@contextmanager
+def _missing_additional_chat_templates_compat() -> Iterator[None]:
+    """Treat a missing optional chat-template directory as no extra templates."""
+    import transformers.processing_utils as processing_utils
+    import transformers.utils.hub as hub_utils
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    patched: list[tuple[Any, Any]] = []
+
+    def patch_list_repo_templates(module: Any) -> None:
+        original = getattr(module, "list_repo_templates", None)
+        if original is None:
+            return
+
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return original(*args, **kwargs)
+            except RepositoryNotFoundError as exc:
+                if "additional_chat_templates" in str(exc):
+                    return []
+                raise
+
+        setattr(module, "list_repo_templates", wrapped)
+        patched.append((module, original))
+
+    try:
+        patch_list_repo_templates(processing_utils)
+        patch_list_repo_templates(hub_utils)
+        yield
+    finally:
+        for module, original in reversed(patched):
+            setattr(module, "list_repo_templates", original)
 
 
 def _default_context_length(model_path: str, max_new_tokens: int) -> int:
@@ -64,7 +100,8 @@ def create_sglang_moss_transcribe_diarize_executor(
 ):
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    with _missing_additional_chat_templates_compat():
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     tokenizer = processor.tokenizer
 
     resolved_max_new_tokens = (
