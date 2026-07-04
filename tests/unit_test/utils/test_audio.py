@@ -91,3 +91,20 @@ def test_load_audio_accepts_http_url(monkeypatch) -> None:
         }
     ]
     assert response.raise_checked
+
+
+def test_load_audio_uses_default_timeout_for_invalid_env(monkeypatch) -> None:
+    response = _FakeHTTPResponse(_wav_bytes())
+    calls = []
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool):
+        calls.append(timeout)
+        return response
+
+    monkeypatch.setenv("REQUEST_TIMEOUT", "abc")
+    monkeypatch.setattr(audio.httpx, "get", fake_get)
+
+    samples = load_audio("https://example.test/audio.wav")
+
+    assert samples.shape == (1600,)
+    assert calls == [audio._DEFAULT_REQUEST_TIMEOUT]

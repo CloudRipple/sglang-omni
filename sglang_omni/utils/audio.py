@@ -15,6 +15,8 @@ import pybase64
 import torch
 import torchaudio
 
+_DEFAULT_REQUEST_TIMEOUT = 5
+
 
 def decode_audio_data_uri(value: str) -> bytes | None:
     if not value.startswith("data:"):
@@ -43,7 +45,14 @@ def load_audio(
         if decoded is not None:
             source = decoded
         elif source.startswith(("http://", "https://")):
-            timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
+            try:
+                timeout = int(
+                    os.getenv("REQUEST_TIMEOUT", str(_DEFAULT_REQUEST_TIMEOUT))
+                )
+                if timeout <= 0:
+                    timeout = _DEFAULT_REQUEST_TIMEOUT
+            except ValueError:
+                timeout = _DEFAULT_REQUEST_TIMEOUT
             response = httpx.get(source, timeout=timeout, follow_redirects=True)
             response.raise_for_status()
             source = response.content
