@@ -3,9 +3,6 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import io
 import logging
 import re
 import time
@@ -14,7 +11,6 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
-import torchaudio
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -25,6 +21,12 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
+from sglang_omni.utils.audio import (
+    audio_fingerprint,
+    audio_fingerprint_int,
+    decode_token_ids,
+    load_audio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,19 +99,7 @@ def _has_metadata_audio_source(payload: StagePayload) -> bool:
     )
 
 
-def _decode_data_uri(value: str) -> bytes | None:
-    if not value.startswith("data:"):
-        return None
-    _, _, payload = value.partition(",")
-    if not payload:
-        return None
-    try:
-        return base64.b64decode(payload)
-    except Exception as exc:
-        raise ValueError("Invalid base64 audio data URI") from exc
-
-
-def load_audio(source: Any) -> np.ndarray:
+def _load_audio(source: Any) -> np.ndarray:
     if isinstance(source, dict):
         if source.get("data") is not None:
             source = source["data"]
@@ -117,70 +107,11 @@ def load_audio(source: Any) -> np.ndarray:
             source = source["path"]
         elif source.get("url") is not None:
             source = source["url"]
-
-    if isinstance(source, memoryview):
-        source = source.tobytes()
-    if isinstance(source, bytearray):
-        source = bytes(source)
-    if isinstance(source, str):
-        decoded = _decode_data_uri(source)
-        if decoded is not None:
-            source = decoded
-    if isinstance(source, (list, tuple)):
-        try:
-            source = np.asarray(source, dtype=np.float32)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "MOSS-Transcribe-Diarize audio_data must be a single numeric waveform"
-            ) from exc
-
-    if isinstance(source, bytes):
-        audio, sample_rate = torchaudio.load(io.BytesIO(source))
-    elif isinstance(source, str):
-        audio, sample_rate = torchaudio.load(source)
-    elif isinstance(source, np.ndarray):
-        if source.size == 0:
-            raise ValueError("MOSS-Transcribe-Diarize audio input is empty")
-        audio = torch.from_numpy(source)
-        sample_rate = _SAMPLE_RATE
-    elif torch.is_tensor(source):
-        audio = source
-        sample_rate = _SAMPLE_RATE
-    else:
-        raise ValueError(
-            f"Unsupported MOSS-Transcribe-Diarize audio input: {type(source).__name__}"
-        )
-
-    if audio.ndim == 1:
-        audio = audio.unsqueeze(0)
-    if audio.ndim == 2 and audio.shape[0] > 1:
-        audio = audio.mean(dim=0, keepdim=True)
-    audio = audio.squeeze(0).to(torch.float32)
-    if sample_rate != _SAMPLE_RATE:
-        audio = torchaudio.functional.resample(audio, sample_rate, _SAMPLE_RATE)
-    return audio.cpu().numpy()
-
-
-def _audio_fingerprint(audio: np.ndarray) -> str:
-    contiguous = np.ascontiguousarray(audio, dtype=np.float32)
-    return hashlib.blake2b(contiguous.tobytes(), digest_size=16).hexdigest()
-
-
-def _audio_fingerprint_int(fingerprint: str) -> int:
-    return int(fingerprint[:16], 16)
-
-
-def _decode_token_ids(
-    tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool
-) -> str:
-    try:
-        return tokenizer.decode(
-            token_ids,
-            skip_special_tokens=skip_special_tokens,
-            clean_up_tokenization_spaces=False,
-        )
-    except TypeError:
-        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+    return load_audio(
+        source,
+        source_name="MOSS-Transcribe-Diarize",
+        target_sample_rate=_SAMPLE_RATE,
+    )
 
 
 def postprocess_moss_transcribe_diarize_text(text: str) -> str:
@@ -264,9 +195,9 @@ def make_moss_transcribe_diarize_scheduler_adapters(
 
     def request_builder(payload: StagePayload) -> MossTranscribeDiarizeRequestData:
         params = payload.request.params or {}
-        audio = load_audio(_audio_source_from_payload(payload))
+        audio = _load_audio(_audio_source_from_payload(payload))
         audio_duration_s = float(len(audio) / _SAMPLE_RATE)
-        fingerprint = _audio_fingerprint(audio)
+        fingerprint = audio_fingerprint(audio)
         prompt = _prompt_from_payload(payload, processor)
 
         encoded = processor(
@@ -286,7 +217,7 @@ def make_moss_transcribe_diarize_scheduler_adapters(
 
         audio_item = MultimodalDataItem(
             modality=Modality.AUDIO,
-            hash=_audio_fingerprint_int(fingerprint),
+            hash=audio_fingerprint_int(fingerprint),
             feature=features,
             model_specific_data={
                 "audio_feature_lengths": audio_feature_lengths,
@@ -353,7 +284,7 @@ def make_moss_transcribe_diarize_scheduler_adapters(
     def result_adapter(data: MossTranscribeDiarizeRequestData) -> StagePayload:
         payload = data.stage_payload
         output_ids = list(data.output_ids or [])
-        raw_text = _decode_token_ids(
+        raw_text = decode_token_ids(
             tokenizer,
             output_ids,
             skip_special_tokens=False,

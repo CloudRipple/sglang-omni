@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import wave
+
 import numpy as np
 import pytest
 import torch
@@ -12,6 +15,16 @@ from sglang_omni.models.moss_transcribe_diarize.request_builders import (
     make_moss_transcribe_diarize_scheduler_adapters,
 )
 from sglang_omni.proto import OmniRequest, StagePayload
+
+
+def _wav_bytes(num_samples: int = 1600, sample_rate: int = 16000) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * num_samples)
+    return buffer.getvalue()
 
 
 class FakeTokenizer:
@@ -65,7 +78,7 @@ def _payload(prompt: str | None = None) -> StagePayload:
     return StagePayload(
         request_id="req-1",
         request=OmniRequest(
-            inputs={"audio_data": np.zeros(1600, dtype=np.float32)},
+            inputs={"audio_bytes": _wav_bytes()},
             params=params,
             metadata={"model": "moss-transcribe-diarize"},
         ),
@@ -125,21 +138,17 @@ def test_request_builder_uses_default_prompt_for_empty_transcription_prompt() ->
     )
 
 
-def test_request_builder_preserves_audio_data_sample_list_as_one_waveform() -> None:
+def test_request_builder_rejects_direct_waveform_list() -> None:
     request_builder = _request_builder()
 
-    data = request_builder(_payload_with_inputs({"audio_data": [0.0, 0.1, -0.1, 0.0]}))
-
-    assert data.audio_duration_s == 4 / 16000
-    assert len(data.req.multimodal_inputs.mm_items) == 1
+    with pytest.raises(ValueError, match="Unsupported MOSS-Transcribe-Diarize"):
+        request_builder(_payload_with_inputs({"audio_data": [0.0, 0.1, -0.1, 0.0]}))
 
 
 def test_request_builder_accepts_single_audio_from_audios_list() -> None:
     request_builder = _request_builder()
 
-    data = request_builder(
-        _payload_with_inputs({"audios": [np.zeros(1600, dtype=np.float32)]})
-    )
+    data = request_builder(_payload_with_inputs({"audios": [_wav_bytes()]}))
 
     assert data.audio_duration_s == 0.1
     assert len(data.req.multimodal_inputs.mm_items) == 1
@@ -149,11 +158,7 @@ def test_request_builder_rejects_multiple_audios() -> None:
     request_builder = _request_builder()
 
     with pytest.raises(ValueError, match="exactly one audio"):
-        request_builder(
-            _payload_with_inputs(
-                {"audios": [np.zeros(1600, dtype=np.float32), np.zeros(1600)]}
-            )
-        )
+        request_builder(_payload_with_inputs({"audios": [_wav_bytes(), _wav_bytes()]}))
 
 
 def test_request_builder_uses_default_prompt_for_bare_string_audio_source(
@@ -163,7 +168,7 @@ def test_request_builder_uses_default_prompt_for_bare_string_audio_source(
     request_builder = _request_builder(processor)
     monkeypatch.setattr(
         request_builders,
-        "load_audio",
+        "_load_audio",
         lambda source: np.zeros(1600, dtype=np.float32),
     )
 
@@ -184,7 +189,7 @@ def test_request_builder_uses_string_prompt_when_audio_is_supplied_separately() 
             "custom diarization prompt",
             metadata={
                 "model": "moss-transcribe-diarize",
-                "audios": [np.zeros(1600, dtype=np.float32)],
+                "audios": [_wav_bytes()],
             },
         )
     )
