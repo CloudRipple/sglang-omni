@@ -55,3 +55,100 @@ def test_split_clean_by_speaker_preserves_spoken_event_words() -> None:
         "[S1]": "我笑了",
         "[S2]": "ilovemusic",
     }
+
+
+def test_compute_diarization_metrics_includes_timestamp_der_for_exact_match() -> None:
+    result = compute_diarization_metrics(
+        [
+            DiarizationRow(
+                sample_id="sample-1",
+                audio_path="/tmp/sample-1.wav",
+                reference_text="[0.00][S01]hello[1.00][1.00][S02]world[2.00]",
+                prediction_text="[0.00][S01]hello[1.00][1.00][S02]world[2.00]",
+            )
+        ]
+    )
+
+    assert result.metrics["speaker_timestamp_der"] == pytest.approx(0.0)
+    assert result.metrics["speaker_timestamp_der_valid_samples"] == 1
+    assert result.metrics["speaker_timestamp_der_skipped"] == 0
+    assert result.samples[0].speaker_timestamp_der_valid is True
+    assert result.samples[0].speaker_timestamp_der == pytest.approx(0.0)
+
+
+def test_compute_diarization_metrics_marks_missing_timestamp_prediction_invalid() -> None:
+    result = compute_diarization_metrics(
+        [
+            DiarizationRow(
+                sample_id="sample-1",
+                audio_path="/tmp/sample-1.wav",
+                reference_text="[0.00][S01]hello[1.00]",
+                prediction_text="[S01]hello",
+            )
+        ]
+    )
+
+    assert result.metrics["speaker_timestamp_der"] is None
+    assert result.metrics["speaker_timestamp_der_valid_samples"] == 0
+    assert result.metrics["speaker_timestamp_der_skipped_no_pred_segments"] == 1
+    assert result.samples[0].speaker_timestamp_der_valid is False
+    assert result.samples[0].speaker_timestamp_der_invalid_reason == "no_pred_timestamped_speaker_segments"
+
+
+def test_build_metrics_section_prints_timestamp_metrics() -> None:
+    module = _load_eval_module()
+
+    section = module._build_metrics_section(
+        "diarization_metrics_percent",
+        {
+            "speaker_timestamp_der": 12.3456,
+            "speaker_timestamp_der_valid_samples": 7,
+            "speaker_timestamp_der_skipped": 1,
+        },
+        (
+            "speaker_timestamp_der",
+            "speaker_timestamp_der_valid_samples",
+            "speaker_timestamp_der_skipped",
+        ),
+    )
+
+    assert "speaker_timestamp_der:" in section
+    assert "12.35" in section
+    assert "speaker_timestamp_der_valid_samples:" in section
+
+
+def test_build_key_metrics_section_prints_selected_metrics() -> None:
+    module = _load_eval_module()
+
+    section = module._build_key_metrics_section(
+        {
+            "cer_no_spk": 6.57,
+            "cp_cer": 14.42,
+            "delta_cer": 7.85,
+            "speaker_timestamp_der": 23.97,
+        }
+    )
+
+    assert "key_metrics" in section
+    assert "cer_no_spk:" in section
+    assert "6.57" in section
+    assert "cp_cer:" in section
+    assert "14.42" in section
+    assert "delta_cer:" in section
+    assert "7.85" in section
+    assert "speaker_timestamp_der:" in section
+    assert "23.97" in section
+
+
+def test_extract_prediction_text_prefers_top_level_text_for_timestamps() -> None:
+    from benchmarks.tasks.transcribe_diarize import extract_prediction_text
+
+    payload = {
+        "text": "[0.00][S01]hello[1.00][1.00][S02]world[2.00]",
+        "segments": [
+            {"text": "[S01]hello"},
+            {"text": "[S02]world"},
+        ],
+    }
+
+    assert extract_prediction_text(payload) == payload["text"]

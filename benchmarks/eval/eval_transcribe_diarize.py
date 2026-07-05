@@ -287,6 +287,7 @@ def main() -> int:
     print(f"  {'Concurrency:':<{SPEED_LABEL_WIDTH}} {args.concurrency}")
     print(f"  {'Output:':<{SPEED_LABEL_WIDTH}} {output_path}")
     print(f"{'=' * SPEED_LINE_WIDTH}")
+    print(_build_key_metrics_section(payload["diarization_metrics_percent"]))
     print(_build_metrics_section("summary", payload["summary"], SUMMARY_ORDER))
     print(_build_metrics_section("speed", payload["speed"], SPEED_ORDER))
     print(
@@ -436,6 +437,17 @@ def _build_metrics_section(
     return "\n".join(lines)
 
 
+def _build_key_metrics_section(metrics: Mapping[str, object]) -> str:
+    lines = ["\nkey_metrics", "-" * SPEED_LINE_WIDTH]
+    for key in KEY_METRICS_ORDER:
+        if key not in metrics:
+            continue
+        lines.append(
+            f"  {key + ':':<{SPEED_LABEL_WIDTH}} {_display_value('diarization_metrics_percent', key, metrics[key])}"
+        )
+    return "\n".join(lines)
+
+
 def _display_value(section: str, key: str, value: object) -> object:
     if isinstance(value, float):
         return _format_float(section, key, value)
@@ -446,6 +458,8 @@ def _format_float(section: str, key: str, value: float) -> float:
     if section == "summary":
         return round(value, 4)
     if section == "diarization_metrics_percent":
+        if key.endswith(("_seconds", "_false_alarm", "_missed_detection", "_confusion", "_collar")):
+            return round(value, 4)
         return round(value, 2)
     if "rtf" in key:
         return round(value, 4)
