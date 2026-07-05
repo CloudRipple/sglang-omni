@@ -19,7 +19,7 @@ from benchmarks.metrics.transcribe_diarize_metrics import (
     compute_diarization_metrics,
 )
 
-MOVIES800_REPO_ID: Final[str] = "zhaochenyang20/movies800"
+MOVIES800_REPO_ID: Final[str] = "zhaochenyang20/movies800time"
 EXPECTED_SAMPLE_COUNT: Final[int] = 800
 TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(r"\[\d+(?:\.\d+)?\]")
 SPEAKER_RE: Final[re.Pattern[str]] = re.compile(r"\[\s*s0*(\d+)\s*\]", re.IGNORECASE)
