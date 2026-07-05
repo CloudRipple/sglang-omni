@@ -9,16 +9,14 @@ from pathlib import Path
 import pytest
 
 from benchmarks.metrics.transcribe_diarize_metrics import (
+    DiarizationRow,
     clean_no_speaker,
     compute_diarization_metrics,
-    DiarizationRow,
     split_clean_by_speaker,
 )
 
-
 EVAL_SCRIPT_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "benchmarks/eval/eval_transcribe_diarize.py"
+    Path(__file__).resolve().parents[3] / "benchmarks/eval/eval_transcribe_diarize.py"
 )
 
 
@@ -76,7 +74,9 @@ def test_compute_diarization_metrics_includes_timestamp_der_for_exact_match() ->
     assert result.samples[0].speaker_timestamp_der == pytest.approx(0.0)
 
 
-def test_compute_diarization_metrics_marks_missing_timestamp_prediction_invalid() -> None:
+def test_compute_diarization_metrics_marks_missing_timestamp_prediction_invalid() -> (
+    None
+):
     result = compute_diarization_metrics(
         [
             DiarizationRow(
@@ -92,7 +92,10 @@ def test_compute_diarization_metrics_marks_missing_timestamp_prediction_invalid(
     assert result.metrics["speaker_timestamp_der_valid_samples"] == 0
     assert result.metrics["speaker_timestamp_der_skipped_no_pred_segments"] == 1
     assert result.samples[0].speaker_timestamp_der_valid is False
-    assert result.samples[0].speaker_timestamp_der_invalid_reason == "no_pred_timestamped_speaker_segments"
+    assert (
+        result.samples[0].speaker_timestamp_der_invalid_reason
+        == "no_pred_timestamped_speaker_segments"
+    )
 
 
 def test_build_metrics_section_prints_timestamp_metrics() -> None:

@@ -458,7 +458,9 @@ def _format_float(section: str, key: str, value: float) -> float:
     if section == "summary":
         return round(value, 4)
     if section == "diarization_metrics_percent":
-        if key.endswith(("_seconds", "_false_alarm", "_missed_detection", "_confusion", "_collar")):
+        if key.endswith(
+            ("_seconds", "_false_alarm", "_missed_detection", "_confusion", "_collar")
+        ):
             return round(value, 4)
         return round(value, 2)
     if "rtf" in key:

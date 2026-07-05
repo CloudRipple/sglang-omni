@@ -143,7 +143,9 @@ def print_diarization_accuracy_summary(
         f"  {'Exact match rate:':<{label_width}} "
         f"{_as_float(summary, 'exact_match_rate'):.4f} ({_as_float(summary, 'exact_match_rate') * 100:.2f}%)"
     )
-    print(f"  {'CER:':<{label_width}} {_format_ratio(_as_optional_number(diarization_metrics, 'cer'))}")
+    print(
+        f"  {'CER:':<{label_width}} {_format_ratio(_as_optional_number(diarization_metrics, 'cer'))}"
+    )
     print(
         f"  {'CER no speaker:':<{label_width}} "
         f"{_format_ratio(_as_optional_number(diarization_metrics, 'cer_no_spk'))}"
@@ -478,7 +480,9 @@ def _as_optional_number(metrics: Mapping[str, object], key: str) -> float | int 
     if value is None:
         return None
     if not isinstance(value, int | float) or isinstance(value, bool):
-        raise TypeError(f"Metric {key!r} must be numeric or None, got {type(value).__name__}")
+        raise TypeError(
+            f"Metric {key!r} must be numeric or None, got {type(value).__name__}"
+        )
     return value
 
 
@@ -505,8 +509,7 @@ def _compute_timestamp_der(
     collar: float = 0.0,
 ) -> _TimestampDerAggregate:
     per_sample = [
-        _timestamp_der_validity(reference, prediction)
-        for reference, prediction in rows
+        _timestamp_der_validity(reference, prediction) for reference, prediction in rows
     ]
     valid_items = [
         (index, reference, prediction)
@@ -739,11 +742,7 @@ def _timestamp_der_one(
             for start, end, _speaker in reference_segments + prediction_segments
             for point in (start, end)
         }
-        | {
-            point
-            for start, end in collar_regions
-            for point in (start, end)
-        }
+        | {point for start, end in collar_regions for point in (start, end)}
     )
 
     total = 0.0
@@ -772,11 +771,14 @@ def _timestamp_der_one(
         missed_detection += (
             max(0, len(reference_active) - len(prediction_active_raw)) * duration
         )
-        confusion += max(
-            0,
-            min(len(reference_active), len(prediction_active_raw))
-            - len(reference_active & prediction_active),
-        ) * duration
+        confusion += (
+            max(
+                0,
+                min(len(reference_active), len(prediction_active_raw))
+                - len(reference_active & prediction_active),
+            )
+            * duration
+        )
     errors = false_alarm + missed_detection + confusion
     return {
         "der": errors / total if total > 0 else None,
@@ -800,12 +802,8 @@ def _best_hyp_to_ref_mapping(
     if not reference_labels or not prediction_labels:
         return {}
     overlap = np.zeros((len(reference_labels), len(prediction_labels)), dtype=float)
-    reference_index = {
-        label: index for index, label in enumerate(reference_labels)
-    }
-    prediction_index = {
-        label: index for index, label in enumerate(prediction_labels)
-    }
+    reference_index = {label: index for index, label in enumerate(reference_labels)}
+    prediction_index = {label: index for index, label in enumerate(prediction_labels)}
     for reference_segment in reference_segments:
         for prediction_segment in prediction_segments:
             duration = _segment_overlap(reference_segment, prediction_segment)
