@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+
 import pytest
 
 from benchmarks.metrics.transcribe_diarize_metrics import (
     clean_no_speaker,
+    compute_diarization_metrics,
+    DiarizationRow,
     split_clean_by_speaker,
 )
+
+
+EVAL_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "benchmarks/eval/eval_transcribe_diarize.py"
+)
+
+
+def _load_eval_module():
+    spec = importlib.util.spec_from_file_location(
+        "eval_transcribe_diarize_entry",
+        EVAL_SCRIPT_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.parametrize(

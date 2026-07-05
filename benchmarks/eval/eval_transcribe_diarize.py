@@ -99,9 +99,27 @@ DIARIZATION_METRICS_PERCENT_ORDER: Final[tuple[str, ...]] = (
     "cp_cer",
     "cer_no_spk_cp_valid",
     "delta_cer",
+    "speaker_timestamp_der",
+    "speaker_timestamp_der_collar",
+    "speaker_timestamp_der_valid_samples",
+    "speaker_timestamp_der_skipped",
+    "speaker_timestamp_der_skipped_parse_error",
+    "speaker_timestamp_der_skipped_no_ref_segments",
+    "speaker_timestamp_der_skipped_no_pred_segments",
+    "speaker_timestamp_der_compute_error",
+    "speaker_timestamp_der_total_seconds",
+    "speaker_timestamp_der_false_alarm",
+    "speaker_timestamp_der_missed_detection",
+    "speaker_timestamp_der_confusion",
     "cer_valid_samples",
     "cp_cer_valid_samples",
     "count",
+)
+KEY_METRICS_ORDER: Final[tuple[str, ...]] = (
+    "cer_no_spk",
+    "cp_cer",
+    "delta_cer",
+    "speaker_timestamp_der",
 )
 
 
