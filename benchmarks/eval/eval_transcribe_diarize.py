@@ -123,7 +123,12 @@ KEY_METRICS_ORDER: Final[tuple[str, ...]] = (
 )
 
 
-def make_send_fn(api_url: str, model_path: str, language: str | None) -> SendFn:
+def make_send_fn(
+    api_url: str,
+    model_path: str,
+    language: str | None,
+    max_new_tokens: int | None,
+) -> SendFn:
     async def send_fn(
         session: aiohttp.ClientSession,
         sample: Movies800Sample,
@@ -140,7 +145,13 @@ def make_send_fn(api_url: str, model_path: str, language: str | None) -> SendFn:
         try:
             async with session.post(
                 api_url,
-                data=_request_form(audio_bytes, audio_path, model_path, language),
+                data=_request_form(
+                    audio_bytes,
+                    audio_path,
+                    model_path,
+                    language,
+                    max_new_tokens,
+                ),
             ) as response:
                 if response.status != 200:
                     result.error = f"HTTP {response.status}: {await response.text()}"
@@ -174,6 +185,7 @@ async def run_eval(
     request_rate: float,
     disable_tqdm: bool,
     request_timeout_s: int,
+    max_new_tokens: int | None,
 ) -> tuple[list[RequestResult], float]:
     runner = BenchmarkRunner(
         RunConfig(
@@ -190,6 +202,7 @@ async def run_eval(
             api_url=f"{base_url}/v1/audio/transcriptions",
             model_path=model_path,
             language=language,
+            max_new_tokens=max_new_tokens,
         ),
     )
     return outputs, runner.wall_clock_s
@@ -223,7 +236,13 @@ def parse_args() -> argparse.Namespace:
         default=float("inf"),
         help="Requests per second (inf = send all at once).",
     )
-    parser.add_argument("--request-timeout-s", type=int, default=300)
+    parser.add_argument("--request-timeout-s", type=int, default=1800)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=_positive_int,
+        default=None,
+        help="Optional max_new_tokens forwarded to /v1/audio/transcriptions.",
+    )
     parser.add_argument("--server-timeout-s", type=int, default=600)
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
@@ -324,6 +343,7 @@ def _run_with_or_without_server(
                 request_rate=args.request_rate,
                 disable_tqdm=args.disable_tqdm,
                 request_timeout_s=args.request_timeout_s,
+                max_new_tokens=args.max_new_tokens,
             )
         )
         payload = _build_payload(args, samples, outputs, wall_clock_s)
@@ -356,6 +376,7 @@ def _run_with_or_without_server(
                 request_rate=args.request_rate,
                 disable_tqdm=args.disable_tqdm,
                 request_timeout_s=args.request_timeout_s,
+                max_new_tokens=args.max_new_tokens,
             )
         )
         payload = _build_payload(args, samples, outputs, wall_clock_s)
@@ -381,6 +402,16 @@ def _server_cuda_graph_max_bs(args: argparse.Namespace) -> int:
     if args.cuda_graph_max_bs is not None:
         return args.cuda_graph_max_bs
     return _server_max_running_requests(args)
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
 
 
 def _mem_fraction_static(value: str) -> float:
@@ -480,12 +511,15 @@ def _request_form(
     audio_path: Path,
     model_path: str,
     language: str | None,
+    max_new_tokens: int | None,
 ) -> aiohttp.FormData:
     form = aiohttp.FormData()
     form.add_field("model", model_path)
     form.add_field("response_format", "verbose_json")
     if language:
         form.add_field("language", language)
+    if max_new_tokens is not None:
+        form.add_field("max_new_tokens", str(max_new_tokens))
     form.add_field(
         "file",
         audio_bytes,
