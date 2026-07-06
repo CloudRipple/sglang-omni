@@ -1510,6 +1510,7 @@ def _register_transcriptions(app: FastAPI) -> None:
         prompt: str | None = Form(default=None),
         response_format: str = Form(default="json"),
         temperature: float | None = Form(default=None),
+        max_new_tokens: int | None = Form(default=None, ge=1),
     ) -> Response:
         client: Client = app.state.client
         default_model: str = app.state.model_name
@@ -1529,6 +1530,7 @@ def _register_transcriptions(app: FastAPI) -> None:
             language=language,
             prompt=prompt,
             temperature=temperature,
+            max_new_tokens=max_new_tokens,
         )
 
         try:
@@ -1602,6 +1604,7 @@ def build_transcription_generate_request(
     language: str | None,
     prompt: str | None,
     temperature: float | None,
+    max_new_tokens: int | None = None,
 ) -> GenerateRequest:
     params: dict[str, Any] = {"task": "transcribe"}
     if language is not None:
@@ -1611,6 +1614,8 @@ def build_transcription_generate_request(
     # note (aaron): the client layer fills in the SamplingParams default of 1.0
     # when this key is absent. 0.0 (greedy) matches the OpenAI API, see issue #959.
     params["temperature"] = temperature if temperature is not None else 0.0
+    if max_new_tokens is not None:
+        params["max_new_tokens"] = max_new_tokens
 
     return GenerateRequest(
         model=model,

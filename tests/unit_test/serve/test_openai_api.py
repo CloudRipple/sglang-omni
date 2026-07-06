@@ -859,6 +859,24 @@ def test_transcription_request_passes_explicit_temperature() -> None:
     assert omni_req.params["temperature"] == 0.7
 
 
+def test_transcription_request_passes_explicit_max_new_tokens() -> None:
+    gen_req = build_transcription_generate_request(
+        audio_bytes=b"RIFF",
+        filename="sample.wav",
+        content_type="audio/wav",
+        model="OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        language="en",
+        prompt=None,
+        temperature=None,
+        max_new_tokens=4096,
+    )
+
+    assert gen_req.model == "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+    assert gen_req.extra_params["max_new_tokens"] == 4096
+    omni_req = Client._build_omni_request(gen_req)
+    assert omni_req.params["max_new_tokens"] == 4096
+
+
 def test_transcription_endpoint_returns_text_json() -> None:
     transcription_client = SuccessfulTranscriptionClient()
     client = TestClient(
@@ -878,6 +896,31 @@ def test_transcription_endpoint_returns_text_json() -> None:
     assert request.model == "openai/whisper-large-v3"
     assert request.prompt["filename"] == "sample.wav"
     assert request.extra_params["language"] == "en"
+
+
+def test_transcription_endpoint_passes_explicit_max_new_tokens() -> None:
+    transcription_client = SuccessfulTranscriptionClient()
+    client = TestClient(
+        create_app(
+            transcription_client,
+            model_name="OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={
+            "model": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+            "max_new_tokens": "4096",
+        },
+        files={"file": ("sample.wav", b"RIFF", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert transcription_client.requests
+    request = transcription_client.requests[0]
+    assert request.model == "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+    assert request.extra_params["max_new_tokens"] == 4096
 
 
 class DiarizationTranscriptionClient:
