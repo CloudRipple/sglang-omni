@@ -159,26 +159,32 @@ class MossTranscribeDiarizeForConditionalGeneration(nn.Module):
                 (0, hidden_size), device=adaptor_param.device, dtype=adaptor_param.dtype
             )
 
-        batched_features = torch.stack(chunks).to(device=device, dtype=encoder_dtype)
-        encoder_len = (batched_features.shape[-1] - 1) // 2 + 1
-        encoder_position_ids = torch.arange(
-            encoder_len, device=device, dtype=torch.long
-        )
-        features = self.whisper_encoder(
-            batched_features, encoder_position_ids, forward_batch
-        )
+        with torch.no_grad():
+            batched_features = torch.stack(chunks).to(
+                device=device, dtype=encoder_dtype
+            )
+            encoder_len = (batched_features.shape[-1] - 1) // 2 + 1
+            encoder_position_ids = torch.arange(
+                encoder_len, device=device, dtype=torch.long
+            )
+            features = self.whisper_encoder(
+                batched_features, encoder_position_ids, forward_batch
+            )
 
-        adaptor_dtype = next(self.vq_adaptor.parameters()).dtype
-        merged = [
-            self.time_merge(
-                torch.cat(
-                    [features[i : i + 1, : token_lens[i] * merge_size] for i in ids],
-                    dim=1,
-                ).to(dtype=adaptor_dtype)
-            ).squeeze(0)
-            for ids in audio_spans
-        ]
-        return self.vq_adaptor(torch.cat(merged, dim=0))
+            adaptor_dtype = next(self.vq_adaptor.parameters()).dtype
+            merged = [
+                self.time_merge(
+                    torch.cat(
+                        [
+                            features[i : i + 1, : token_lens[i] * merge_size]
+                            for i in ids
+                        ],
+                        dim=1,
+                    ).to(dtype=adaptor_dtype)
+                ).squeeze(0)
+                for ids in audio_spans
+            ]
+            return self.vq_adaptor(torch.cat(merged, dim=0))
 
     def forward(
         self,
