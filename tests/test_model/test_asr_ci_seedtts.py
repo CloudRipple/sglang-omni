@@ -140,6 +140,7 @@ def test_asr_matches_seedtts_reference_text(
                 lang="en",
                 concurrency=QWEN3_ASR_CONCURRENCY,
                 warmup=QWEN3_ASR_WARMUP_REQUESTS,
+                disable_tqdm=False,
             )
         )
     summary = results["summary"]

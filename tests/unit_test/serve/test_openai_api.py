@@ -831,10 +831,32 @@ def test_transcription_request_builds_asr_generate_request() -> None:
         "filename": "sample.wav",
         "content_type": "audio/wav",
     }
-    assert gen_req.extra_params == {"task": "transcribe", "language": "en"}
+    assert gen_req.extra_params == {
+        "task": "transcribe",
+        "language": "en",
+        "temperature": 0.0,
+    }
+    omni_req = Client._build_omni_request(gen_req)
+    assert omni_req.params["temperature"] == 0.0
     assert gen_req.metadata == {"task": "asr"}
     assert gen_req.output_modalities == ["text"]
     assert gen_req.stream is False
+
+
+def test_transcription_request_passes_explicit_temperature() -> None:
+    gen_req = build_transcription_generate_request(
+        audio_bytes=b"RIFF",
+        filename="sample.wav",
+        content_type="audio/wav",
+        model="openai/whisper-large-v3",
+        language="en",
+        prompt=None,
+        temperature=0.7,
+    )
+
+    assert gen_req.extra_params["temperature"] == 0.7
+    omni_req = Client._build_omni_request(gen_req)
+    assert omni_req.params["temperature"] == 0.7
 
 
 def test_transcription_endpoint_returns_text_json() -> None:

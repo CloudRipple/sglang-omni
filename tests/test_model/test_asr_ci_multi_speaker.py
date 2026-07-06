@@ -163,7 +163,7 @@ def test_moss_transcribe_diarize_movies800_multi_speaker(
                 concurrency=MOSS_TD_CONCURRENCY,
                 warmup=MOSS_TD_WARMUP_REQUESTS,
                 request_rate=float("inf"),
-                disable_tqdm=True,
+                disable_tqdm=False,
                 request_timeout_s=300,
             )
         )
