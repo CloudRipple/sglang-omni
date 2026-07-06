@@ -30,9 +30,6 @@ from sglang_omni.scheduling.sglang_backend import (
     build_sglang_server_args,
 )
 
-# Note (yichi): Budget for long-form input and let the checkpoint window cap it.
-_LONG_FORM_PROMPT_TOKENS = 72000
-
 
 @contextmanager
 def _missing_additional_chat_templates_compat() -> Iterator[None]:
@@ -68,11 +65,10 @@ def _missing_additional_chat_templates_compat() -> Iterator[None]:
             setattr(module, "list_repo_templates", original)
 
 
-def _default_context_length(model_path: str, max_new_tokens: int) -> int:
+def _default_context_length(model_path: str) -> int:
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     text_config = getattr(config, "text_config", None)
-    max_positions = int(getattr(text_config, "max_position_embeddings", 40960))
-    return min(max_positions, _LONG_FORM_PROMPT_TOKENS + int(max_new_tokens))
+    return int(getattr(text_config, "max_position_embeddings", 131072))
 
 
 def _default_max_new_tokens(model_path: str) -> int:
@@ -112,7 +108,7 @@ def create_sglang_moss_transcribe_diarize_executor(
     resolved_context_length = (
         int(context_length)
         if context_length is not None
-        else _default_context_length(model_path, resolved_max_new_tokens)
+        else _default_context_length(model_path)
     )
 
     overrides = build_generation_batch_overrides(
