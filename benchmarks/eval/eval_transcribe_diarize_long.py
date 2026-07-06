@@ -240,11 +240,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-new-tokens",
         type=_positive_int,
-        default=None,
+        default=65536,
         help="Optional max_new_tokens forwarded to /v1/audio/transcriptions.",
     )
     parser.add_argument("--server-timeout-s", type=int, default=600)
-    parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument("--max-samples", type=int, default=20)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--use-existing-server", action="store_true")
     parser.add_argument("--disable-tqdm", action="store_true")
