@@ -104,7 +104,8 @@ tests/
     ├── scheduling/
     │   ├── test_engine_factory.py
     │   ├── test_pipeline_state.py
-    │   └── test_reference_encoder.py
+    │   ├── test_reference_encoder.py
+    │   └── test_streaming_vocoder.py
     ├── fishaudio_s2_pro/
     │   ├── test_pipeline.py
     │   ├── test_streaming_vocoder.py
