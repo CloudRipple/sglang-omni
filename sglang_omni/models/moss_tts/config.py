@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from sglang_omni.config import PipelineConfig, StageConfig
 
 _PKG = "sglang_omni.models.moss_tts"
+_REF_AUDIO_CACHE_MAX_ITEMS = 8192
+_REF_AUDIO_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 
 class MossTTSPipelineConfig(PipelineConfig):
@@ -55,6 +57,9 @@ class MossTTSPipelineConfig(PipelineConfig):
         }
 
     model_path: str
+    ref_audio_cache: bool = True
+    ref_audio_cache_max_items: int = _REF_AUDIO_CACHE_MAX_ITEMS
+    ref_audio_cache_max_bytes: int = _REF_AUDIO_CACHE_MAX_BYTES
     stages: list[StageConfig] = [
         StageConfig(
             name="preprocessing",
@@ -83,6 +88,43 @@ class MossTTSPipelineConfig(PipelineConfig):
             can_accept_stream_before_payload=True,
         ),
     ]
+
+    def model_post_init(self, __context: Any = None) -> None:
+        super().model_post_init(__context)
+        merged_keys = (
+            frozenset(__context.get("config_manager_merged_keys", ()))
+            if isinstance(__context, dict)
+            else frozenset()
+        )
+        if self.ref_audio_cache_max_items < 1:
+            raise ValueError(
+                "ref_audio_cache_max_items must be >= 1; got "
+                f"{self.ref_audio_cache_max_items}"
+            )
+        if self.ref_audio_cache_max_bytes < 1:
+            raise ValueError(
+                "ref_audio_cache_max_bytes must be >= 1; got "
+                f"{self.ref_audio_cache_max_bytes}"
+            )
+        for stage_index, stage in enumerate(self.stages):
+            if stage.factory.endswith("create_preprocessing_executor"):
+                cache_args = {
+                    "ref_audio_cache": self.ref_audio_cache,
+                    "ref_audio_cache_max_items": self.ref_audio_cache_max_items,
+                    "ref_audio_cache_max_bytes": self.ref_audio_cache_max_bytes,
+                }
+                for name, value in cache_args.items():
+                    stage_override_merged = bool(
+                        {
+                            f"stages.{stage.name}.factory_args.{name}",
+                            f"stages.{stage_index}.factory_args.{name}",
+                        }
+                        & merged_keys
+                    )
+                    if name in merged_keys and not stage_override_merged:
+                        stage.factory_args[name] = value
+                    else:
+                        stage.factory_args.setdefault(name, value)
 
     def supports_uploaded_voice_references(self) -> bool:
         return True

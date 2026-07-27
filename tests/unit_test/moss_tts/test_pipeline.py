@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import concurrent.futures
+import struct
 import sys
+import threading
 import types
 from contextlib import nullcontext
 from pathlib import Path
@@ -129,7 +133,64 @@ def test_moss_tts_config_and_registry_contracts() -> None:
     preprocessing = next(
         stage for stage in config.stages if stage.name == "preprocessing"
     )
-    assert preprocessing.factory_args == {"dtype": "float32"}
+    assert "device" not in preprocessing.factory_args
+    assert preprocessing.factory_args["dtype"] == "float32"
+    assert preprocessing.factory_args["ref_audio_cache"] is True
+    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 8192
+    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 64 * 1024 * 1024
+
+
+def test_moss_tts_config_injects_reference_cache_factory_args() -> None:
+    config = MossTTSPipelineConfig(
+        model_path="model",
+        ref_audio_cache=False,
+        ref_audio_cache_max_items=17,
+        ref_audio_cache_max_bytes=4096,
+    )
+    preprocessing = next(
+        stage for stage in config.stages if stage.name == "preprocessing"
+    )
+
+    assert preprocessing.factory_args["ref_audio_cache"] is False
+    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 17
+    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 4096
+
+
+def test_moss_tts_config_merge_updates_reference_cache_factory_args() -> None:
+    from sglang_omni.config.manager import ConfigManager
+
+    config = MossTTSPipelineConfig(model_path="model")
+    merged = ConfigManager(config).merge_config(
+        {
+            "ref_audio_cache": False,
+            "ref_audio_cache_max_items": 17,
+            "ref_audio_cache_max_bytes": 4096,
+        }
+    )
+    preprocessing = next(
+        stage for stage in merged.stages if stage.name == "preprocessing"
+    )
+
+    assert merged.ref_audio_cache is False
+    assert merged.ref_audio_cache_max_items == 17
+    assert merged.ref_audio_cache_max_bytes == 4096
+    assert preprocessing.factory_args["ref_audio_cache"] is False
+    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 17
+    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 4096
+
+    explicit_stage_override = ConfigManager(config).merge_config(
+        {
+            "ref_audio_cache": False,
+            "stages.preprocessing.factory_args.ref_audio_cache": True,
+        }
+    )
+    preprocessing = next(
+        stage
+        for stage in explicit_stage_override.stages
+        if stage.name == "preprocessing"
+    )
+    assert explicit_stage_override.ref_audio_cache is False
+    assert preprocessing.factory_args["ref_audio_cache"] is True
 
 
 def test_moss_tts_preprocessing_factory_receives_placement_gpu_id() -> None:
@@ -151,6 +212,21 @@ def test_moss_tts_preprocessing_factory_receives_placement_gpu_id() -> None:
     assert preprocessing.gpu == 2
     assert factory_args["gpu_id"] == 2
     assert "device" not in factory_args
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"ref_audio_cache_max_items": 0}, "ref_audio_cache_max_items"),
+        ({"ref_audio_cache_max_bytes": 0}, "ref_audio_cache_max_bytes"),
+    ],
+)
+def test_moss_tts_config_rejects_invalid_reference_cache_settings(
+    kwargs,
+    match,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        MossTTSPipelineConfig(model_path="model", **kwargs)
 
 
 def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
@@ -427,13 +503,18 @@ def test_moss_tts_preprocessing_loads_separate_codec(
     monkeypatch.setattr(stages, "load_moss_tts_audio_tokenizer", load_codec)
 
     try:
-        stages.create_preprocessing_executor("model", device="cpu")
+        stages.create_preprocessing_executor(
+            "model",
+            device="cpu",
+            ref_audio_cache=False,
+        )
         context = rb._QUEUE.snapshot().context
         assert context is not None
         assert context.processor is processor
         assert context.processor.audio_tokenizer is None
-        assert context.reference_encoder.audio_tokenizer is codec
-        assert context.reference_encoder.n_vq == 32
+        assert context.reference_encoder._audio_tokenizer is codec
+        assert context.reference_encoder._n_vq == 32
+        assert isinstance(context.reference_encoder, stages._DirectReferenceEncoder)
     finally:
         rb.clear_moss_tts_preprocessing_context()
 
@@ -464,15 +545,24 @@ def test_moss_tts_preprocessing_uses_placement_gpu_id(
     monkeypatch.setattr(stages, "load_moss_tts_audio_tokenizer", load_codec)
 
     try:
-        stages.create_preprocessing_executor("model", gpu_id=2)
+        stages.create_preprocessing_executor(
+            "model",
+            gpu_id=2,
+            ref_audio_cache=False,
+        )
         context = rb._QUEUE.snapshot().context
         assert context is not None
-        assert context.reference_encoder.audio_tokenizer is codec
+        assert isinstance(context.reference_encoder, stages._BatchedReferenceEncoder)
 
-        stages.create_preprocessing_executor("model", device="cpu", gpu_id=2)
+        stages.create_preprocessing_executor(
+            "model",
+            device="cpu",
+            gpu_id=2,
+            ref_audio_cache=False,
+        )
         context = rb._QUEUE.snapshot().context
         assert context is not None
-        assert context.reference_encoder.audio_tokenizer is codec
+        assert isinstance(context.reference_encoder, stages._DirectReferenceEncoder)
     finally:
         rb.clear_moss_tts_preprocessing_context()
 
@@ -504,27 +594,22 @@ def test_moss_tts_pathlike_reference_uses_separate_codec() -> None:
     assert encoded_paths == ["voice.wav"]
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
-        "voice.wav",
-        "data:audio/wav;base64,UklGRg==",
-    ],
-)
 def test_moss_tts_reference_encoder_uses_shared_audio_loader(
     monkeypatch: pytest.MonkeyPatch,
-    source: str,
 ) -> None:
     from sglang_omni.models.moss_tts import stages
 
     encoded = torch.tensor([[7, 8]], dtype=torch.long)
     load_calls: list[tuple[str, str, int, bool]] = []
     encode_calls: list[tuple[list[tuple[torch.Tensor, int]], int]] = []
+    load_threads: list[str] = []
+    encode_threads: list[str] = []
 
     class FakeAudioTokenizer:
         sample_rate = 24000
 
         def encode_waveforms(self, waveforms, *, num_quantizers):
+            encode_threads.append(threading.current_thread().name)
             encode_calls.append((waveforms, num_quantizers))
             return [encoded]
 
@@ -535,16 +620,21 @@ def test_moss_tts_reference_encoder_uses_shared_audio_loader(
         target_sample_rate,
         mono,
     ):
+        load_threads.append(threading.current_thread().name)
         load_calls.append((audio_source, source_name, target_sample_rate, mono))
         return np.asarray([0.1, 0.2], dtype=np.float32)
 
     monkeypatch.setattr(stages, "load_audio", fake_load_audio)
-    encoder = stages._MossTTSReferenceEncoder(FakeAudioTokenizer(), n_vq=2)
+    encoder = stages._BatchedReferenceEncoder(
+        FakeAudioTokenizer(),
+        n_vq=2,
+        max_batch_wait_ms=0,
+    )
 
-    result = encoder.encode(source)
+    result = encoder.encode("voice.wav")
 
     assert result is encoded
-    assert load_calls == [(source, "MOSS-TTS reference", 24000, True)]
+    assert load_calls == [("voice.wav", "MOSS-TTS reference", 24000, True)]
     assert len(encode_calls) == 1
     waveforms, num_quantizers = encode_calls[0]
     assert num_quantizers == 2
@@ -552,6 +642,363 @@ def test_moss_tts_reference_encoder_uses_shared_audio_loader(
     waveform, sample_rate = waveforms[0]
     assert waveform.tolist() == pytest.approx([0.1, 0.2])
     assert sample_rate == 24000
+    assert load_threads == [threading.current_thread().name]
+    assert encode_threads == ["moss-tts-ref-encode"]
+
+
+def test_moss_tts_slow_reference_load_does_not_block_ready_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    results: dict[str, torch.Tensor | BaseException] = {}
+    slow_source = "https://slow.test/ref.wav"
+    fast_source = "https://fast.test/ref.wav"
+
+    class FakeAudioTokenizer:
+        sample_rate = 24000
+
+        def encode_waveforms(self, waveforms, *, num_quantizers):
+            assert num_quantizers == 2
+            return [
+                torch.tensor([[int(waveform[0].item())]], dtype=torch.long)
+                for waveform, _ in waveforms
+            ]
+
+    def fake_load_audio(source, **kwargs):
+        del kwargs
+        if source == slow_source:
+            slow_started.set()
+            assert release_slow.wait(timeout=5)
+            return np.asarray([1.0], dtype=np.float32)
+        return np.asarray([2.0], dtype=np.float32)
+
+    monkeypatch.setattr(stages, "load_audio", fake_load_audio)
+    encoder = stages._BatchedReferenceEncoder(
+        FakeAudioTokenizer(),
+        n_vq=2,
+        max_batch_size=1,
+        max_batch_wait_ms=0,
+    )
+
+    def run(path: str) -> None:
+        try:
+            results[path] = encoder.encode(path)
+        except BaseException as exc:
+            results[path] = exc
+
+    slow = threading.Thread(target=run, args=(slow_source,))
+    fast = threading.Thread(target=run, args=(fast_source,))
+    slow.start()
+    assert slow_started.wait(timeout=5)
+    fast.start()
+    try:
+        fast.join(timeout=2)
+        assert not fast.is_alive()
+        assert int(results[fast_source][0, 0]) == 2
+    finally:
+        release_slow.set()
+        slow.join(timeout=5)
+        fast.join(timeout=5)
+
+    assert int(results[slow_source][0, 0]) == 1
+
+
+def test_moss_tts_batch_wait_uses_one_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    entries = [(object(), object()), (object(), object())]
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        def get(self, timeout=None):
+            self.timeouts.append(timeout)
+            if entries:
+                return entries.pop(0)
+            raise stages.queue.Empty
+
+    fake_queue = FakeQueue()
+    encoder = object.__new__(stages._BatchedReferenceEncoder)
+    encoder._max_batch_size = 8
+    encoder._max_wait_s = 0.004
+    encoder._queue = fake_queue
+    clock = iter((10.0, 10.001, 10.003))
+    monkeypatch.setattr(stages.time, "monotonic", lambda: next(clock))
+
+    batch = encoder._drain_batch()
+
+    assert len(batch) == 2
+    assert fake_queue.timeouts[0] is None
+    assert fake_queue.timeouts[1:] == pytest.approx([0.003, 0.001])
+
+
+def _make_moss_tts_wav_data_uri(
+    n_samples: int = 100,
+    sample_rate: int = 16000,
+) -> tuple[str, bytes]:
+    samples = b"\x00\x00" * n_samples
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + len(samples),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sample_rate,
+        sample_rate * 2,
+        2,
+        16,
+        b"data",
+        len(samples),
+    )
+    raw = header + samples
+    return f"data:audio/wav;base64,{base64.b64encode(raw).decode()}", raw
+
+
+def test_moss_tts_batched_reference_encoder_coalesces_and_isolates_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    calls: list[list[int]] = []
+    loaded_sources: list[str] = []
+
+    class FakeAudioTokenizer:
+        sample_rate = 24000
+        device = "cpu"
+
+        def encode_waveforms(self, waveforms, *, num_quantizers):
+            assert num_quantizers == 2
+            lengths = [int(wav.shape[-1]) for wav, _ in waveforms]
+            calls.append(lengths)
+            if 4 in lengths:
+                raise RuntimeError("cannot encode bad reference")
+            return [torch.full((length, 2), length) for length in lengths]
+
+    def fake_load_audio(source, **kwargs):
+        del kwargs
+        loaded_sources.append(source)
+        length = {"aa": 2, "bbb": 3, "bad1": 4}[source]
+        return np.full(length, length, dtype=np.float32)
+
+    monkeypatch.setattr(stages, "load_audio", fake_load_audio)
+    encoder = stages._BatchedReferenceEncoder(
+        FakeAudioTokenizer(),
+        n_vq=2,
+        max_batch_size=4,
+        max_batch_wait_ms=20,
+    )
+    results: dict[str, torch.Tensor | BaseException] = {}
+
+    def run(path: str) -> None:
+        try:
+            results[path] = encoder.encode(path)
+        except BaseException as exc:
+            results[path] = exc
+
+    threads = [
+        threading.Thread(target=run, args=(path,)) for path in ("aa", "bbb", "bad1")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert isinstance(results["bad1"], BaseException)
+    assert int(results["aa"][0, 0]) == 2
+    assert int(results["bbb"][0, 0]) == 3
+    assert sorted(loaded_sources) == ["aa", "bad1", "bbb"]
+    assert any(len(call) > 1 for call in calls)
+
+
+def test_moss_tts_batched_reference_encoder_deduplicates_same_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    loaded_sources: list[str] = []
+    encode_batch_sizes: list[int] = []
+
+    class FakeAudioTokenizer:
+        sample_rate = 24000
+        device = "cpu"
+
+        def encode_waveforms(self, waveforms, *, num_quantizers):
+            assert num_quantizers == 2
+            encode_batch_sizes.append(len(waveforms))
+            return [torch.full((3, 2), 7) for _ in waveforms]
+
+    def fake_load_audio(source, **kwargs):
+        del kwargs
+        loaded_sources.append(source)
+        return np.zeros(3, dtype=np.float32)
+
+    monkeypatch.setattr(stages, "load_audio", fake_load_audio)
+    encoder = stages._BatchedReferenceEncoder(
+        FakeAudioTokenizer(),
+        n_vq=2,
+        max_batch_size=2,
+        max_batch_wait_ms=100,
+    )
+    barrier = threading.Barrier(2)
+
+    def run() -> torch.Tensor:
+        barrier.wait(timeout=5)
+        return encoder.encode("same.wav")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = [
+            future.result(timeout=10) for future in (pool.submit(run), pool.submit(run))
+        ]
+
+    assert all(torch.equal(result, torch.full((3, 2), 7)) for result in results)
+    assert loaded_sources == ["same.wav"]
+    assert encode_batch_sizes == [1]
+
+
+def test_moss_tts_cached_reference_encoder_path_data_uri_and_isolation(
+    tmp_path: Path,
+) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"reference bytes")
+    data_uri, raw = _make_moss_tts_wav_data_uri()
+    calls: list[tuple[str, str]] = []
+
+    class FakeBatched:
+        class AudioTokenizer:
+            sample_rate = 24000
+            device = "cpu"
+            model = None
+
+        _audio_tokenizer = AudioTokenizer()
+
+        @staticmethod
+        def normalize_source(source):
+            return stages._BatchedReferenceEncoder.normalize_source(source)
+
+        def encode_input(self, item):
+            calls.append((item.source_kind, item.source))
+            return torch.full((4, 2), 99, dtype=torch.long)
+
+    encoder = stages._MossTTSReferenceEncoder(
+        FakeBatched(),
+        codec_model_path="codec",
+        n_vq=2,
+        max_items=8,
+        max_bytes=4096,
+    )
+
+    first_path = encoder.encode(ref)
+    first_path.fill_(-1)
+    second_path = encoder.encode(ref)
+    first_uri = encoder.encode(data_uri)
+    second_uri = encoder.encode(data_uri)
+
+    assert torch.all(second_path == 99)
+    assert torch.equal(first_uri, second_uri)
+    assert calls == [("path", str(ref)), ("data_uri", data_uri)]
+    assert stages.decode_audio_data_uri(data_uri) == raw
+    assert encoder.stats()["hits"] == 2
+    assert encoder.stats()["misses"] == 2
+
+
+def test_moss_tts_cached_reference_encoder_merges_inflight(tmp_path: Path) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"reference bytes")
+    entered = threading.Event()
+    release = threading.Event()
+    encode_count = 0
+
+    class FakeBatched:
+        class AudioTokenizer:
+            sample_rate = 24000
+            device = "cpu"
+            model = None
+
+        _audio_tokenizer = AudioTokenizer()
+
+        @staticmethod
+        def normalize_source(source):
+            return stages._BatchedReferenceEncoder.normalize_source(source)
+
+        def encode_input(self, item):
+            nonlocal encode_count
+            del item
+            encode_count += 1
+            entered.set()
+            assert release.wait(timeout=5)
+            return torch.ones((4, 2), dtype=torch.long)
+
+    encoder = stages._MossTTSReferenceEncoder(
+        FakeBatched(),
+        codec_model_path="codec",
+        n_vq=2,
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(encoder.encode, ref)
+        assert entered.wait(timeout=5)
+        second = pool.submit(encoder.encode, ref)
+        release.set()
+        assert torch.equal(first.result(timeout=5), second.result(timeout=5))
+
+    assert encode_count == 1
+    assert encoder.stats()["merged"] == 1
+
+
+def test_moss_tts_preprocessing_reference_cache_toggles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import request_builders as rb
+    from sglang_omni.models.moss_tts import stages
+
+    processor = SimpleNamespace(
+        audio_tokenizer=None,
+        model_config=SimpleNamespace(
+            n_vq=32,
+            audio_tokenizer_name_or_path="codec",
+        ),
+    )
+    codec = SimpleNamespace(sample_rate=24000, device="cpu", model=None)
+    monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
+    monkeypatch.setattr(stages, "load_moss_tts_audio_tokenizer", lambda *a, **k: codec)
+
+    try:
+        stages.create_preprocessing_executor(
+            "model",
+            device="cpu",
+            ref_audio_cache=False,
+        )
+        assert isinstance(
+            rb._QUEUE.snapshot().context.reference_encoder,
+            stages._DirectReferenceEncoder,
+        )
+
+        monkeypatch.setenv("MOSS_REF_AUDIO_CACHE", "0")
+        stages.create_preprocessing_executor("model", device="cpu")
+        assert isinstance(
+            rb._QUEUE.snapshot().context.reference_encoder,
+            stages._DirectReferenceEncoder,
+        )
+
+        monkeypatch.delenv("MOSS_REF_AUDIO_CACHE")
+        stages.create_preprocessing_executor("model", device="cpu")
+        cached = rb._QUEUE.snapshot().context.reference_encoder
+        assert isinstance(cached, stages._MossTTSReferenceEncoder)
+        assert cached._service._cache.max_size == 8192
+    finally:
+        rb.clear_moss_tts_preprocessing_context()
 
 
 def test_moss_tts_processor_load_preserves_codec_metadata(

@@ -100,7 +100,10 @@ class ConfigManager:
         _sync_stage_parallelism_aliases(cfg_copy, set(extra_args))
 
         # validate the configuration
-        merged_config = config_cls(**cfg_copy)
+        merged_config = config_cls.model_validate(
+            cfg_copy,
+            context={"config_manager_merged_keys": frozenset(extra_args)},
+        )
         return merged_config
 
     @staticmethod
