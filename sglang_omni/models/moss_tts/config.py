@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from sglang_omni.config import PipelineConfig, StageConfig
 
@@ -60,6 +60,8 @@ class MossTTSPipelineConfig(PipelineConfig):
     ref_audio_cache: bool = True
     ref_audio_cache_max_items: int = _REF_AUDIO_CACHE_MAX_ITEMS
     ref_audio_cache_max_bytes: int = _REF_AUDIO_CACHE_MAX_BYTES
+    optimized_vocoder: bool = True
+    optimized_vocoder_dtype: Literal["float16", "bfloat16"] = "bfloat16"
     stages: list[StageConfig] = [
         StageConfig(
             name="preprocessing",
@@ -122,6 +124,32 @@ class MossTTSPipelineConfig(PipelineConfig):
                         & merged_keys
                     )
                     if name in merged_keys and not stage_override_merged:
+                        stage.factory_args[name] = value
+                    else:
+                        stage.factory_args.setdefault(name, value)
+            if stage.factory.endswith("create_vocoder_executor"):
+                optimized_args = {
+                    "optimized": self.optimized_vocoder,
+                    "optimized_decoder_dtype": (
+                        self.optimized_vocoder_dtype if self.optimized_vocoder else None
+                    ),
+                }
+                merged_sources = {
+                    "optimized": {"optimized_vocoder"},
+                    "optimized_decoder_dtype": {
+                        "optimized_vocoder",
+                        "optimized_vocoder_dtype",
+                    },
+                }
+                for name, value in optimized_args.items():
+                    stage_override_merged = bool(
+                        {
+                            f"stages.{stage.name}.factory_args.{name}",
+                            f"stages.{stage_index}.factory_args.{name}",
+                        }
+                        & merged_keys
+                    )
+                    if merged_sources[name] & merged_keys and not stage_override_merged:
                         stage.factory_args[name] = value
                     else:
                         stage.factory_args.setdefault(name, value)

@@ -200,6 +200,64 @@ class _CountingLayer(_FakeLayer):
         self.layer_scale_2 = _CountingLayerScale(hidden_size)
 
 
+class _LegacyAttention(nn.Module):
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.embed_dim = hidden_size
+        self.num_heads = 2
+        self.causal = True
+        self.context = 4
+        self.rope = None
+        self.in_projs = nn.ModuleList(
+            [nn.Linear(hidden_size, 3 * hidden_size, bias=False)]
+        )
+        self.out_projs = nn.ModuleList(
+            [nn.Linear(hidden_size, hidden_size, bias=False)]
+        )
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        del key, value
+        return query
+
+
+class _LegacyLayer(nn.Module):
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.self_attn = _LegacyAttention(hidden_size)
+        self.layer_scale_1 = _FakeLayerScale(hidden_size)
+        self.norm2 = nn.LayerNorm(hidden_size)
+        self.linear1 = nn.Linear(hidden_size, hidden_size * 2)
+        self.linear2 = nn.Linear(hidden_size * 2, hidden_size)
+        self.activation = F.gelu
+        self.layer_scale_2 = _FakeLayerScale(hidden_size)
+
+
+class _LegacyTransformer(_FallbackTransformer):
+    def __init__(self, hidden_size: int) -> None:
+        nn.Module.__init__(self)
+        self.layers = nn.ModuleList([_LegacyLayer(hidden_size)])
+        self.positional_embedding = "rope"
+        self.positional_scale = 1.0
+        self.max_period = 10000.0
+
+
+class _LegacyProjectedStage(_FallbackProjectedStage):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        self.input_proj = nn.Linear(3, 6)
+        self.transformer = _LegacyTransformer(6)
+        self.output_proj = nn.Linear(6, 7)
+        self.is_streaming = False
+        self.module_type = "Transformer"
+        self.seen_input_shape = None
+
+
 def test_projected_transformer_sdpa_path_does_not_reenter_source_stage() -> None:
     source = _FallbackProjectedStage()
     wrapper = MossTTSLocalProjectedTransformer(source)
@@ -666,3 +724,56 @@ def test_vocoder_decoder_wraps_supported_stage_types() -> None:
     assert len(wrapped) == 2
     assert isinstance(wrapped[0], MossTTSLocalProjectedTransformer)
     assert wrapped[1] is patch_stage
+
+
+def test_vocoder_decoder_requires_packed_flash_for_every_transformer() -> None:
+    legacy_source = _LegacyProjectedStage()
+    legacy = MossTTSLocalVocoderDecoder(nn.ModuleList([legacy_source]))
+    legacy_attention = legacy[0].transformer.layers[0].self_attn
+    legacy_attention._flash_attn_varlen = lambda *args, **kwargs: None
+
+    assert legacy.supports_packed_flash("cuda", torch.bfloat16)
+    assert legacy.supports_packed_flash("cuda", torch.float16)
+    assert not legacy.supports_packed_flash("cpu", torch.bfloat16)
+    assert not legacy.supports_packed_flash("cuda", None)
+
+    legacy_attention._flash_attn_varlen = None
+    assert not legacy.supports_packed_flash("cuda", torch.bfloat16)
+
+    local_source = _FallbackProjectedStage()
+    local_source.transformer.layers[0].self_attn.attention_implementation = (
+        "flash_attention_2"
+    )
+    local = MossTTSLocalVocoderDecoder(nn.ModuleList([local_source]))
+    local_attention = local[0].transformer.layers[0].self_attn
+    local_attention._flash_attn_varlen = lambda *args, **kwargs: None
+
+    assert local.supports_packed_flash("cuda", torch.bfloat16)
+    assert not local.supports_packed_flash("cuda", torch.float16)
+
+
+def test_vocoder_decoder_wraps_legacy_moss_audio_tokenizer_fields() -> None:
+    source = _LegacyProjectedStage()
+    wrapped = MossTTSLocalVocoderDecoder(nn.ModuleList([source]))
+    source_layer = source.transformer.layers[0]
+    wrapped_layer = wrapped[0].transformer.layers[0]
+    attention = wrapped_layer.self_attn
+
+    assert attention.in_proj is source_layer.self_attn.in_projs[0]
+    assert attention.out_proj is source_layer.self_attn.out_projs[0]
+    assert wrapped_layer.ffn.linear1 is source_layer.linear1
+    assert wrapped_layer.ffn.linear2 is source_layer.linear2
+    assert wrapped_layer.ffn.activation is source_layer.activation
+
+    attention._can_run_packed_flash = lambda _: True
+    assert attention.resolve_attention_implementation(torch.randn(2, 6)) == (
+        "flash_attention_2"
+    )
+
+    attention._can_run_packed_flash = lambda _: False
+    x = torch.randn(2, 3, 4)
+    lengths = torch.tensor([4, 3])
+    out, out_lengths = wrapped(x, lengths)
+
+    assert out.shape == (2, 7, 4)
+    assert torch.equal(out_lengths, lengths)

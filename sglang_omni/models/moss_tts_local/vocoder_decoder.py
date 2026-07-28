@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MOSS-TTS Local non-streaming vocoder decoder with packed attention.
+"""MOSS audio-tokenizer non-streaming vocoder decoder with packed attention.
 
 The wrapper keeps the upstream codec embeddings, pretransform stages, and
 waveform projection. It replaces only the non-streaming projected transformer
 attention path so decoder frames can run through SGLang's packed varlen
-FlashAttention.
+FlashAttention. Both MOSS-Audio-Tokenizer-v2 (MOSS-TTS Local) and the legacy
+MOSS-Audio-Tokenizer used by MOSS-TTS Delay are supported; the latter exposes
+equivalent primitives under older field names.
 """
 
 from __future__ import annotations
@@ -28,6 +30,45 @@ except ImportError:
 # varlen sequence spans multiple 128-token query tiles. Pack each tile as an
 # independent sequence in one kernel launch.
 _FA3_LOCAL_WINDOW_QUERY_TILE_SIZE = 128
+_FLASH_ATTENTION_BACKEND = "flash_attention_2"
+
+
+def _single_module(source: nn.Module, singular: str, plural: str) -> nn.Module:
+    module = getattr(source, singular, None)
+    if module is not None:
+        return module
+    modules = getattr(source, plural, None)
+    if modules is None or len(modules) != 1:
+        raise ValueError(
+            f"MOSS vocoder expects one {singular!r} module; "
+            f"got {plural}={modules!r}"
+        )
+    return modules[0]
+
+
+class _LegacyFeedForward(nn.Module):
+    """Expose the legacy Linear-GELU-Linear fields as one callable module."""
+
+    def __init__(self, source: nn.Module) -> None:
+        super().__init__()
+        self.linear1 = source.linear1
+        self.linear2 = source.linear2
+        self.activation = source.activation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear2(self.activation(self.linear1(x)))
+
+
+def _feed_forward(source: nn.Module) -> nn.Module:
+    ffn = getattr(source, "ffn", None)
+    if ffn is not None:
+        return ffn
+    if (
+        getattr(source, "linear1", None) is None
+        or getattr(source, "linear2", None) is None
+    ):
+        raise ValueError("MOSS vocoder transformer layer has no supported FFN")
+    return _LegacyFeedForward(source)
 
 
 @dataclass(frozen=True)
@@ -296,8 +337,8 @@ class MossTTSLocalAttention(nn.Module):
     ) -> None:
         super().__init__()
         object.__setattr__(self, "source", source)
-        self.in_proj = source.in_proj
-        self.out_proj = source.out_proj
+        self.in_proj = _single_module(source, "in_proj", "in_projs")
+        self.out_proj = _single_module(source, "out_proj", "out_projs")
         self.embed_dim = int(source.embed_dim)
         self.num_heads = int(source.num_heads)
         self.head_dim = int(
@@ -311,6 +352,7 @@ class MossTTSLocalAttention(nn.Module):
         self.causal = bool(source.causal)
         self.context = source.context
         self.rope = source.rope
+        self._legacy_api = not hasattr(source, "resolve_attention_implementation")
         self._flash_attn_varlen = flash_attn_varlen_func
         max_period = self.rope.max_period if self.rope is not None else 10000.0
         self._packed_rope_cache = packed_rope_cache or _MossPackedRopeCache(
@@ -318,19 +360,50 @@ class MossTTSLocalAttention(nn.Module):
         )
 
     def resolve_attention_implementation(self, x: torch.Tensor) -> str:
-        if (
-            self.source.attention_implementation == "flash_attention_2"
-            and self._can_run_packed_flash(x)
-        ):
-            return "flash_attention_2"
-        return self.source.resolve_attention_implementation(x, is_streaming=False)
+        preferred = getattr(self.source, "attention_implementation", None)
+        if preferred is None:
+            # The legacy tokenizer has no backend selector, but exposes the same
+            # local-causal operation. Prefer the packed path when its dtype and
+            # device requirements are satisfied.
+            preferred = _FLASH_ATTENTION_BACKEND
+        if preferred == _FLASH_ATTENTION_BACKEND and self._can_run_packed_flash(x):
+            return _FLASH_ATTENTION_BACKEND
+        resolver = getattr(self.source, "resolve_attention_implementation", None)
+        if resolver is None:
+            return "sdpa"
+        return resolver(x, is_streaming=False)
+
+    def supports_packed_flash(
+        self,
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> bool:
+        if dtype is None or self._flash_attn_varlen is None or device.type != "cuda":
+            return False
+        preferred = getattr(self.source, "attention_implementation", None)
+        if preferred not in (None, _FLASH_ATTENTION_BACKEND):
+            return False
+        if getattr(self.source, "_get_backend_check_dtype", None) is not None:
+            # Preserve the v2/Local contract, whose packed path is BF16-only.
+            return dtype == torch.bfloat16
+        return dtype in (torch.float16, torch.bfloat16)
 
     def _can_run_packed_flash(self, x: torch.Tensor) -> bool:
-        if self._flash_attn_varlen is None:
-            return False
-        if x.device.type != "cuda":
-            return False
-        return self.source._get_backend_check_dtype(x) == torch.bfloat16
+        dtype_resolver = getattr(self.source, "_get_backend_check_dtype", None)
+        if dtype_resolver is not None:
+            backend_dtype = dtype_resolver(x)
+        else:
+            backend_dtype = x.dtype
+            try:
+                autocast_enabled = torch.is_autocast_enabled("cuda")
+            except TypeError:
+                autocast_enabled = torch.is_autocast_enabled()
+            if autocast_enabled:
+                try:
+                    backend_dtype = torch.get_autocast_dtype("cuda")
+                except TypeError:
+                    backend_dtype = torch.get_autocast_gpu_dtype()
+        return self.supports_packed_flash(x.device, backend_dtype)
 
     def forward(
         self,
@@ -367,10 +440,9 @@ class MossTTSLocalAttention(nn.Module):
             )
         if input_lengths is None:
             raise ValueError("dense attention requires input_lengths")
-        return self.source(
-            query,
-            input_lengths=input_lengths,
-        )
+        if self._legacy_api:
+            return self.source(query, query, query)
+        return self.source(query, input_lengths=input_lengths)
 
     def _project_qkv(
         self, x: torch.Tensor
@@ -483,14 +555,12 @@ class MossTTSLocalTransformerLayer(nn.Module):
         self.norm2 = source.norm2
         self.layer_scale_1 = source.layer_scale_1
         self.layer_scale_2 = source.layer_scale_2
-        self.ffn = source.ffn
+        self.ffn = _feed_forward(source)
         self.self_attn = MossTTSLocalAttention(
             source.self_attn,
             packed_rope_cache=packed_rope_cache,
         )
-        assert (
-            isinstance(self.ffn, nn.Sequential) and len(self.ffn) >= 3
-        ), "MOSS vocoder transformer layer requires Linear-GELU-Linear FFN"
+        assert callable(self.ffn), "MOSS vocoder transformer layer requires an FFN"
 
     def forward(self, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         residual = x
@@ -527,6 +597,16 @@ class MossTTSLocalTransformer(nn.Module):
     def resolve_attention_implementation(self, x: torch.Tensor) -> str:
         assert len(self.layers) > 0, "MOSS vocoder transformer must have layers"
         return self.layers[0].self_attn.resolve_attention_implementation(x)
+
+    def supports_packed_flash(
+        self,
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> bool:
+        return bool(self.layers) and all(
+            layer.self_attn.supports_packed_flash(device, dtype)
+            for layer in self.layers
+        )
 
     def forward(self, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         if self.positional_embedding in {"sin", "sin_rope"}:
@@ -617,6 +697,13 @@ class MossTTSLocalProjectedTransformer(nn.Module):
             x = self.transformer(x, input_lengths=input_lengths, **kwargs)
         return self.output_proj(x).transpose(1, 2), input_lengths
 
+    def supports_packed_flash(
+        self,
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> bool:
+        return self.transformer.supports_packed_flash(device, dtype)
+
 
 class MossTTSLocalVocoderDecoder(nn.Module):
     """Iterable MOSS vocoder decoder with patched projected transformers."""
@@ -650,6 +737,21 @@ class MossTTSLocalVocoderDecoder(nn.Module):
     def __getitem__(self, index: int) -> nn.Module:
         return self.stages[index]
 
+    def supports_packed_flash(
+        self,
+        device: str | torch.device,
+        dtype: torch.dtype | None,
+    ) -> bool:
+        device = torch.device(device)
+        transformer_stages = [
+            stage
+            for stage in self.stages
+            if isinstance(stage, MossTTSLocalProjectedTransformer)
+        ]
+        return bool(transformer_stages) and all(
+            stage.supports_packed_flash(device, dtype) for stage in transformer_stages
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -658,3 +760,8 @@ class MossTTSLocalVocoderDecoder(nn.Module):
         for stage in self.stages:
             x, input_lengths = stage(x, input_lengths)
         return x, input_lengths
+
+
+# Shared name for callers outside MOSS-TTS Local. Keep the original public name
+# for compatibility with existing imports and downstream code.
+MossAudioTokenizerVocoderDecoder = MossTTSLocalVocoderDecoder
