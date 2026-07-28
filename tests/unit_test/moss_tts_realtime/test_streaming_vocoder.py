@@ -523,6 +523,17 @@ def test_stop_releases_all_live_slots_and_closes_context() -> None:
     assert all(module._streaming_state is None for module in codec.state_modules)
 
 
+def test_serving_start_opens_fixed_slot_codec_session() -> None:
+    scheduler, codec = _scheduler(stream_slots=3)
+
+    scheduler.on_serving_start()
+
+    assert scheduler._session is not None
+    assert scheduler._session.free_slots == 3
+    assert codec.streaming_batch_sizes == [3]
+    scheduler.on_serving_stop()
+
+
 def test_idle_offline_batch_uses_full_batch_decode() -> None:
     scheduler, codec = _scheduler(stream_slots=2)
     rows_a = _rows(4, seed=10)

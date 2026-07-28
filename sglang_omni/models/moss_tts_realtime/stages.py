@@ -6,8 +6,9 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from numbers import Integral
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -28,6 +29,7 @@ from sglang_omni.models.moss_tts_realtime.request_builders import (
 from sglang_omni.models.moss_tts_realtime.streaming_vocoder import (
     MossTTSRealtimeStreamingVocoderScheduler,
 )
+from sglang_omni.models.weight_loader import load_module
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.utils.audio import load_audio
 
@@ -49,30 +51,166 @@ def _resolve_codec_device(device: str | None, gpu_id: int | None) -> str:
     return "cuda:0"
 
 
+def _create_moss_tts_realtime_codec_shell(checkpoint_dir: str) -> Any:
+    """Build the codec structure without materializing its parameters."""
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig, AutoModel
+
+    with moss_transformers_processor_compat():
+        config = AutoConfig.from_pretrained(
+            checkpoint_dir,
+            trust_remote_code=True,
+        )
+        with init_empty_weights(include_buffers=False):
+            codec = AutoModel.from_config(config, trust_remote_code=True)
+
+    for name in ("encoder", "decoder", "quantizer"):
+        if not isinstance(getattr(codec, name, None), torch.nn.Module):
+            raise RuntimeError(
+                f"MOSS-TTS-Realtime codec does not expose a {name} module"
+            )
+    return codec
+
+
+def _load_moss_tts_realtime_codec_component(
+    checkpoint_dir: str,
+    *,
+    component: Literal["encoder", "decoder"],
+    device: str,
+) -> Any:
+    codec = _create_moss_tts_realtime_codec_shell(checkpoint_dir)
+    unused_component = "decoder" if component == "encoder" else "encoder"
+    setattr(codec, unused_component, torch.nn.ModuleList())
+
+    loaded_component = load_module(
+        getattr(codec, component),
+        checkpoint_dir,
+        prefix=f"{component}.",
+        device=device,
+        strict=True,
+        local_files_only=True,
+    )
+    setattr(codec, component, loaded_component)
+    codec.quantizer = load_module(
+        codec.quantizer,
+        checkpoint_dir,
+        prefix="quantizer.",
+        device=device,
+        strict=True,
+        local_files_only=True,
+    )
+
+    remaining_meta = [
+        name
+        for name, value in codec.state_dict().items()
+        if value.device.type == "meta"
+    ]
+    if remaining_meta:
+        raise RuntimeError(
+            "MOSS-TTS-Realtime codec component remained on meta device: "
+            f"{remaining_meta[:8]}"
+        )
+    codec.eval()
+    loaded_bytes = sum(
+        value.numel() * value.element_size() for value in codec.state_dict().values()
+    )
+    logger.info(
+        "Loaded MOSS-TTS-Realtime codec %s component from %s on %s (%.2f GiB)",
+        component,
+        checkpoint_dir,
+        device,
+        loaded_bytes / (1024**3),
+    )
+    return codec
+
+
+def _module_tensor_bytes(module: torch.nn.Module) -> int:
+    seen: set[int] = set()
+    total = 0
+    for tensors in (module.parameters(), module.buffers()):
+        for tensor in tensors:
+            identity = id(tensor)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += tensor.numel() * tensor.element_size()
+    return total
+
+
+def _tensor_tree_bytes(value: Any, seen: set[int]) -> int:
+    if value is None:
+        return 0
+    identity = id(value)
+    if identity in seen:
+        return 0
+    seen.add(identity)
+
+    if isinstance(value, torch.Tensor):
+        return value.numel() * value.element_size()
+    if is_dataclass(value) and not isinstance(value, type):
+        return sum(
+            _tensor_tree_bytes(getattr(value, field.name), seen)
+            for field in fields(value)
+        )
+    if isinstance(value, Mapping):
+        return sum(_tensor_tree_bytes(item, seen) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return sum(_tensor_tree_bytes(item, seen) for item in value)
+    if hasattr(value, "__dict__"):
+        return sum(_tensor_tree_bytes(item, seen) for item in vars(value).values())
+    return 0
+
+
+def _streaming_state_bytes(codec: torch.nn.Module) -> int:
+    seen: set[int] = set()
+    return sum(
+        _tensor_tree_bytes(getattr(module, "_streaming_state", None), seen)
+        for module in codec.modules()
+    )
+
+
+def estimate_moss_tts_realtime_codec_memory(
+    model_path: str = DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
+    *,
+    max_active_turns: int,
+) -> tuple[int, int]:
+    """Return decoder-component and fixed-slot streaming-state bytes."""
+    if max_active_turns < 1:
+        raise ValueError("max_active_turns must be positive")
+
+    checkpoint_dir = str(resolve_moss_checkpoint(model_path))
+    try:
+        codec = _create_moss_tts_realtime_codec_shell(checkpoint_dir)
+        codec.encoder = torch.nn.ModuleList()
+        decoder_component_bytes = _module_tensor_bytes(codec)
+        with torch.no_grad(), codec.streaming(max_active_turns):
+            streaming_state_bytes = _streaming_state_bytes(codec)
+    except Exception as exc:
+        raise RuntimeError(_INSTALL_HINT) from exc
+    return decoder_component_bytes, streaming_state_bytes
+
+
 def load_moss_tts_realtime_codec(
     model_path: str = DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
     *,
+    component: Literal["encoder", "decoder"],
     device: str = "cuda:0",
 ) -> Any:
-    checkpoint_dir = resolve_moss_checkpoint(model_path)
+    if component not in ("encoder", "decoder"):
+        raise ValueError(f"unsupported MOSS-TTS-Realtime codec component: {component}")
+    checkpoint_dir = str(resolve_moss_checkpoint(model_path))
+    resolved_device = str(torch.device(device))
     logger.info(
-        "Loading MOSS-TTS-Realtime codec from %s on %s",
+        "Loading MOSS-TTS-Realtime codec %s component from %s on %s",
+        component,
         checkpoint_dir,
-        device,
+        resolved_device,
     )
-    try:
-        from transformers import AutoModel
-
-        with moss_transformers_processor_compat():
-            codec = AutoModel.from_pretrained(
-                checkpoint_dir,
-                trust_remote_code=True,
-            )
-    except Exception as exc:
-        raise RuntimeError(_INSTALL_HINT) from exc
-    codec.eval()
-    codec.to(device)
-    return codec
+    return _load_moss_tts_realtime_codec_component(
+        checkpoint_dir,
+        component=component,
+        device=resolved_device,
+    )
 
 
 def _strict_processor_int(value: Any, name: str, *, minimum: int = 0) -> int:
@@ -241,6 +379,7 @@ def create_preprocessing_executor(
     processor = load_moss_tts_realtime_processor(model_path)
     codec = load_moss_tts_realtime_codec(
         codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
+        component="encoder",
         device=resolved_device,
     )
     audio_encoder = MossTTSRealtimeAudioEncoder(codec, device=resolved_device)
@@ -264,7 +403,7 @@ def create_sglang_tts_engine_executor(
     server_args_overrides: dict[str, Any] | None = None,
     max_seq_len: int | None = None,
     total_gpu_memory_fraction: float | None = None,
-    codec_mem_reserve: float = 0.0,
+    codec_model_path: str | None = None,
     max_sessions: int = _DEFAULT_LIMITS.max_sessions,
     max_held_sessions: int = _DEFAULT_LIMITS.max_held_sessions,
     max_active_turns: int = _DEFAULT_LIMITS.max_active_turns,
@@ -284,7 +423,7 @@ def create_sglang_tts_engine_executor(
     return MossTTSRealtimeEngineBuilder(
         max_seq_len=max_seq_len,
         total_gpu_memory_fraction=total_gpu_memory_fraction,
-        codec_mem_reserve=codec_mem_reserve,
+        codec_model_path=(codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL),
         max_sessions=max_sessions,
         max_held_sessions=max_held_sessions,
         max_active_turns=max_active_turns,
@@ -322,6 +461,7 @@ def create_vocoder_executor(
     processor = load_moss_tts_realtime_processor(model_path)
     codec = load_moss_tts_realtime_codec(
         codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
+        component="decoder",
         device=resolved_device,
     )
     return MossTTSRealtimeStreamingVocoderScheduler(

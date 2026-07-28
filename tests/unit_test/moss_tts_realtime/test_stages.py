@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,7 +22,6 @@ def _builder(**overrides: Any) -> MossTTSRealtimeEngineBuilder:
     values: dict[str, Any] = {
         "max_seq_len": 40960,
         "total_gpu_memory_fraction": 0.90,
-        "codec_mem_reserve": 0.15,
         "max_sessions": 7,
         "max_held_sessions": 5,
         "max_active_turns": 3,
@@ -101,7 +101,7 @@ def test_engine_pre_infra_reuses_processor_model_config(monkeypatch) -> None:
         "load_moss_tts_realtime_processor",
         lambda checkpoint_dir: processor,
     )
-    builder = _builder(max_seq_len=None)
+    builder = _builder(max_seq_len=None, total_gpu_memory_fraction=None)
 
     builder.pre_infra_setup("checkpoint")
 
@@ -167,6 +167,173 @@ def test_audio_encoder_normalizes_base64_mapping(monkeypatch) -> None:
     assert seen["encode_kwargs"] == {"return_dict": True}
 
 
+@pytest.mark.parametrize(
+    ("component", "expected_keys"),
+    [
+        ("encoder", {"encoder.weight", "quantizer.weight"}),
+        ("decoder", {"decoder.weight", "quantizer.weight"}),
+    ],
+)
+def test_codec_loader_reads_only_requested_component_weights(
+    monkeypatch,
+    tmp_path,
+    component: str,
+    expected_keys: set[str],
+) -> None:
+    import safetensors
+    import transformers
+    from safetensors.torch import save_file
+    from torch import nn
+
+    class TinyCodec(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = nn.Linear(2, 2, bias=False)
+            self.decoder = nn.Linear(2, 2, bias=False)
+            self.quantizer = nn.Linear(2, 2, bias=False)
+            self.config = object()
+
+    expected_weights = {
+        "encoder.weight": torch.full((2, 2), 1.0),
+        "decoder.weight": torch.full((2, 2), 2.0),
+        "quantizer.weight": torch.full((2, 2), 3.0),
+    }
+    save_file(
+        {
+            "encoder.weight": expected_weights["encoder.weight"],
+            "quantizer.weight": expected_weights["quantizer.weight"],
+        },
+        tmp_path / "model-00001-of-00002.safetensors",
+    )
+    save_file(
+        {"decoder.weight": expected_weights["decoder.weight"]},
+        tmp_path / "model-00002-of-00002.safetensors",
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "encoder.weight": "model-00001-of-00002.safetensors",
+                    "quantizer.weight": "model-00001-of-00002.safetensors",
+                    "decoder.weight": "model-00002-of-00002.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda _: tmp_path)
+    monkeypatch.setattr(
+        stages,
+        "moss_transformers_processor_compat",
+        contextlib.nullcontext,
+    )
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        transformers.AutoModel,
+        "from_config",
+        lambda *args, **kwargs: TinyCodec(),
+    )
+
+    loaded_keys: set[str] = set()
+    real_safe_open = safetensors.safe_open
+
+    class TrackingSafeOpen:
+        def __init__(self, filename, *args, **kwargs) -> None:
+            self._context = real_safe_open(filename, *args, **kwargs)
+            self._reader = None
+
+        def __enter__(self):
+            self._reader = self._context.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._context.__exit__(*args)
+
+        def get_tensor(self, name: str) -> torch.Tensor:
+            loaded_keys.add(name)
+            return self._reader.get_tensor(name)
+
+    monkeypatch.setattr(safetensors, "safe_open", TrackingSafeOpen)
+
+    codec = stages.load_moss_tts_realtime_codec(
+        "codec",
+        component=component,
+        device="cpu",
+    )
+
+    assert loaded_keys == expected_keys
+    assert set(codec.state_dict()) == expected_keys
+    for name, value in codec.state_dict().items():
+        assert value.device.type == "cpu"
+        assert torch.equal(value, expected_weights[name])
+
+
+def test_codec_memory_estimate_scales_streaming_state_with_active_turns(
+    monkeypatch,
+) -> None:
+    import transformers
+    from torch import nn
+
+    class StateModule(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self._streaming_state: Any | None = None
+
+    class TinyCodec(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = nn.Linear(2, 2, bias=False)
+            self.decoder = nn.Sequential(
+                nn.Linear(2, 3, bias=False),
+                StateModule(),
+            )
+            self.quantizer = nn.Linear(2, 2, bias=False)
+
+        @contextlib.contextmanager
+        def streaming(self, batch_size: int):
+            cache = torch.empty(batch_size, 5, dtype=torch.float32)
+            state = SimpleNamespace(
+                cache=cache,
+                cache_alias=cache,
+                exec_mask=torch.empty(batch_size, dtype=torch.bool),
+            )
+            self.decoder[1]._streaming_state = state
+            try:
+                yield
+            finally:
+                self.decoder[1]._streaming_state = None
+
+    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda _: "/codec")
+    monkeypatch.setattr(
+        stages,
+        "moss_transformers_processor_compat",
+        contextlib.nullcontext,
+    )
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        transformers.AutoModel,
+        "from_config",
+        lambda *args, **kwargs: TinyCodec(),
+    )
+
+    decoder_bytes, state_bytes = stages.estimate_moss_tts_realtime_codec_memory(
+        "codec",
+        max_active_turns=4,
+    )
+
+    assert decoder_bytes == 40
+    assert state_bytes == 84
+
+
 def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> None:
     calls: dict[str, Any] = {}
     processor = object()
@@ -183,8 +350,13 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
         fake_load_processor,
     )
 
-    def fake_load_codec(model_path: str, *, device: str) -> object:
-        calls["codec"] = (model_path, device)
+    def fake_load_codec(
+        model_path: str,
+        *,
+        component: str,
+        device: str,
+    ) -> object:
+        calls["codec"] = (model_path, component, device)
         return codec
 
     class FakeAudioEncoder:
@@ -220,7 +392,7 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
     assert scheduler._max_concurrency == 6
     assert calls == {
         "processor_path": "model",
-        "codec": ("codec", "cuda:3"),
+        "codec": ("codec", "encoder", "cuda:3"),
         "encoder": (codec, "cuda:3"),
         "context": (processor, encoder),
     }
@@ -312,6 +484,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
             calls.__setitem__("processor_loaded", True),
             setattr(self, "context_length", 40960),
             setattr(self, "processor", "processor"),
+            setattr(self, "minimum_codec_mem_reserve", 0.10),
         ),
     )
     monkeypatch.setattr(
@@ -363,7 +536,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
     assert built is calls["scheduler"]
     assert calls["server_args"]["context_length"] == 40960
     assert calls["server_args"]["max_running_requests"] == 7
-    assert calls["server_args"]["mem_fraction_static"] == pytest.approx(0.75)
+    assert calls["server_args"]["mem_fraction_static"] == pytest.approx(0.80)
     assert "attention_backend" not in calls["server_args"]
     assert calls["server_args"]["enable_streaming_session"] is True
     assert calls["server_args"]["disable_cuda_graph"] is False
@@ -373,7 +546,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
     assert gpu_id == 2
     assert server_args.enable_streaming_session is True
     assert infra_kwargs == {
-        "total_gpu_memory_fraction": pytest.approx(0.75),
+        "total_gpu_memory_fraction": pytest.approx(0.80),
         "model_arch_override": "MossTTSRealtimeSGLangModel",
     }
     assert worker.moss_tts_realtime_max_turn_frames == 40
@@ -522,8 +695,13 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
     processor = SimpleNamespace(model_config=SimpleNamespace(rvq=16))
     scheduler = object()
 
-    def fake_load_codec(model_path: str, *, device: str) -> object:
-        calls["codec"] = (model_path, device)
+    def fake_load_codec(
+        model_path: str,
+        *,
+        component: str,
+        device: str,
+    ) -> object:
+        calls["codec"] = (model_path, component, device)
         return codec
 
     def fake_scheduler(loaded_codec: Any, **kwargs: Any) -> object:
@@ -558,7 +736,7 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
     assert result is scheduler
     assert calls == {
         "processor": "model",
-        "codec": ("codec", "cuda:2"),
+        "codec": ("codec", "decoder", "cuda:2"),
         "scheduler": (
             codec,
             {

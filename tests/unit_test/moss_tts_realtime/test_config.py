@@ -34,6 +34,9 @@ def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     assert stages["preprocessing"].factory_args["codec_model_path"] == (
         DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
     )
+    assert stages["tts_engine"].factory_args["codec_model_path"] == (
+        DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
+    )
     assert "enable_streaming_session" not in stages["tts_engine"].factory_args
     assert not any(
         key.startswith("local_cuda_graph") for key in stages["tts_engine"].factory_args
@@ -62,7 +65,8 @@ def test_tts_engine_runtime_resolves_context_and_colocated_budget() -> None:
     assert args["gpu_id"] == 0
     assert "max_seq_len" not in args
     assert args["total_gpu_memory_fraction"] == pytest.approx(0.90)
-    assert args["codec_mem_reserve"] == pytest.approx(0.15)
+    assert args["codec_model_path"] == DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
+    assert "codec_mem_reserve" not in args
 
 
 def test_split_pipeline_targets_second_visible_gpu_for_codec() -> None:
@@ -83,6 +87,17 @@ def test_pipeline_config_round_trip_and_defaults_are_independent() -> None:
 
     restored = MossTTSRealtimePipelineConfig.model_validate(first.model_dump())
     assert restored.model_dump() == first.model_dump()
+
+
+def test_codec_model_path_is_shared_by_all_codec_consumers() -> None:
+    config = MossTTSRealtimePipelineConfig(
+        model_path="fake-model",
+        codec_model_path="custom-codec",
+    )
+
+    for stage in config.stages:
+        if stage.name in {"preprocessing", "tts_engine", "vocoder"}:
+            assert stage.factory_args["codec_model_path"] == "custom-codec"
 
 
 def test_pipeline_builds_model_owned_speech_websocket_handler(monkeypatch) -> None:

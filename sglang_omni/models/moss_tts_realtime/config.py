@@ -20,7 +20,6 @@ _PKG = "sglang_omni.models.moss_tts_realtime"
 DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
 
 _COLOCATED_TOTAL_GPU_MEMORY_FRACTION = 0.90
-_COLOCATED_CODEC_MEM_RESERVE = 0.15
 _AR_MEM_FRACTION_STATIC = 0.85
 
 
@@ -88,8 +87,6 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
         ),
     )
     tts_engine_args: dict[str, Any] = {"dtype": "bfloat16"}
-    if colocated:
-        tts_engine_args["codec_mem_reserve"] = _COLOCATED_CODEC_MEM_RESERVE
 
     return [
         StageConfig(
@@ -176,8 +173,9 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         limit_args = self.limits.model_dump()
         for stage in self.stages:
             if stage.factory.endswith("create_preprocessing_executor"):
-                stage.factory_args.setdefault("codec_model_path", self.codec_model_path)
+                stage.factory_args["codec_model_path"] = self.codec_model_path
             elif stage.factory.endswith("create_sglang_tts_engine_executor"):
+                stage.factory_args["codec_model_path"] = self.codec_model_path
                 for key in (
                     "max_session_rows",
                     "max_held_kv_tokens",
@@ -199,7 +197,7 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
                 ):
                     stage.factory_args[key] = limit_args[key]
             elif stage.factory.endswith("create_vocoder_executor"):
-                stage.factory_args.setdefault("codec_model_path", self.codec_model_path)
+                stage.factory_args["codec_model_path"] = self.codec_model_path
                 stage.factory_args["stream_slots"] = self.limits.max_active_turns
 
     def supports_uploaded_voice_references(self) -> bool:

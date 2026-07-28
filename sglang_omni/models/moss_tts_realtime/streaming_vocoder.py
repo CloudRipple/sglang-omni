@@ -378,8 +378,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             raise ValueError("MOSS-TTS-Realtime n_vq must be positive")
         if num_quantizers < self._n_vq:
             raise ValueError(
-                "MOSS-TTS-Realtime codec must expose at least "
-                f"{self._n_vq} quantizers"
+                f"MOSS-TTS-Realtime codec must expose at least {self._n_vq} quantizers"
             )
         if codebook_size < 1:
             raise ValueError("MOSS-TTS-Realtime codec codebook_size must be positive")
@@ -494,6 +493,9 @@ class MossTTSRealtimeStreamingVocoderScheduler(
                 "data": self.resource_snapshot(),
             }
 
+    def on_serving_start(self) -> None:
+        self._ensure_session()
+
     def on_serving_stop(self) -> None:
         if self._session is not None:
             self._session.close()
@@ -568,8 +570,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         codes = codes.detach().to(device="cpu", dtype=torch.long).contiguous()
         if torch.any(codes < 0) or torch.any(codes >= self._codebook_size):
             raise ValueError(
-                "MOSS-TTS-Realtime stream codes must be in "
-                f"[0, {self._codebook_size})"
+                f"MOSS-TTS-Realtime stream codes must be in [0, {self._codebook_size})"
             )
         return codes
 
@@ -751,7 +752,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         codes = torch.as_tensor(state.audio_codes)
         if codes.ndim != 2 or int(codes.shape[1]) != self._n_vq:
             raise ValueError(
-                "MOSS-TTS-Realtime audio_codes must have shape " f"[T, {self._n_vq}]"
+                f"MOSS-TTS-Realtime audio_codes must have shape [T, {self._n_vq}]"
             )
         if (
             codes.dtype == torch.bool
@@ -764,8 +765,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             return state, None
         if torch.any(codes < 0) or torch.any(codes >= self._codebook_size):
             raise ValueError(
-                "MOSS-TTS-Realtime audio_codes must be in "
-                f"[0, {self._codebook_size})"
+                f"MOSS-TTS-Realtime audio_codes must be in [0, {self._codebook_size})"
             )
         return state, codes
 

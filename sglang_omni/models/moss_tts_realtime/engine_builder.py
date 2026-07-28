@@ -8,7 +8,10 @@ import logging
 from typing import Any
 
 from sglang_omni.models.moss_tts_realtime import request_builders
-from sglang_omni.models.moss_tts_realtime.config import MossTTSRealtimeResourceLimits
+from sglang_omni.models.moss_tts_realtime.config import (
+    DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
+    MossTTSRealtimeResourceLimits,
+)
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
 logger = logging.getLogger(__name__)
@@ -27,7 +30,7 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
         *,
         max_seq_len: int | None = None,
         total_gpu_memory_fraction: float | None = None,
-        codec_mem_reserve: float = 0.0,
+        codec_model_path: str = DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
         max_sessions: int,
         max_held_sessions: int,
         max_active_turns: int,
@@ -68,15 +71,20 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
             0.0 < float(total_gpu_memory_fraction) <= 1.0
         ):
             raise ValueError("total_gpu_memory_fraction must be in (0, 1]")
-        if not 0.0 <= float(codec_mem_reserve) < 1.0:
-            raise ValueError("codec_mem_reserve must be in [0, 1)")
+        if not codec_model_path.strip():
+            raise ValueError("codec_model_path must not be empty")
 
         self.total_gpu_memory_fraction = (
             None
             if total_gpu_memory_fraction is None
             else float(total_gpu_memory_fraction)
         )
-        self.codec_mem_reserve = float(codec_mem_reserve)
+        self.codec_model_path = codec_model_path
+        self.gpu_memory_bytes: int | None = None
+        self.codec_decoder_bytes: int | None = None
+        self.codec_streaming_state_bytes: int | None = None
+        self.codec_runtime_margin_bytes: int | None = None
+        self.minimum_codec_mem_reserve: float | None = None
         self.profile_total_gpu_memory_fraction: float | None = None
         self.processor: Any | None = None
 
@@ -93,12 +101,47 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
         self.context_length = self.requested_context_length or max_context_rows
         if not 1 <= self.context_length <= max_context_rows:
             raise ValueError(
-                "MOSS-TTS-Realtime max_seq_len must be in [1, " f"{max_context_rows}]"
+                f"MOSS-TTS-Realtime max_seq_len must be in [1, {max_context_rows}]"
             )
         if self.limits.max_pending_text_tokens < int(config.delay_tokens_len):
             raise ValueError(
                 "max_pending_text_tokens must admit the checkpoint prefill delay"
             )
+        if self.total_gpu_memory_fraction is not None:
+            self._derive_colocated_codec_memory_budget()
+
+    def _derive_colocated_codec_memory_budget(self) -> None:
+        from sglang_omni.models.moss_tts_realtime.stages import (
+            estimate_moss_tts_realtime_codec_memory,
+        )
+        from sglang_omni.utils.gpu_memory import get_gpu_device_info
+
+        device_info = get_gpu_device_info(self.gpu_id)
+        total_memory_bytes = device_info.total_memory_bytes
+        if total_memory_bytes is None or total_memory_bytes <= 0:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime colocated startup requires the total HBM "
+                f"capacity for gpu_id={self.gpu_id}"
+            )
+
+        decoder_bytes, streaming_state_bytes = estimate_moss_tts_realtime_codec_memory(
+            self.codec_model_path,
+            max_active_turns=self.limits.max_active_turns,
+        )
+        runtime_margin_bytes = max(
+            2 * 1024**3,
+            (total_memory_bytes + 49) // 50,
+        )
+        required_bytes = decoder_bytes + streaming_state_bytes + runtime_margin_bytes
+        reserve_millis = (
+            required_bytes * 1000 + total_memory_bytes - 1
+        ) // total_memory_bytes
+
+        self.gpu_memory_bytes = total_memory_bytes
+        self.codec_decoder_bytes = decoder_bytes
+        self.codec_streaming_state_bytes = streaming_state_bytes
+        self.codec_runtime_margin_bytes = runtime_margin_bytes
+        self.minimum_codec_mem_reserve = reserve_millis / 1000
 
     def generation_defaults(self, *, dtype: str) -> dict[str, Any]:
         defaults: dict[str, Any] = {
@@ -126,17 +169,31 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
         if total is None:
             self.profile_total_gpu_memory_fraction = None
             return
+        reserve = self.minimum_codec_mem_reserve
+        if reserve is None:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec memory budget was not derived before "
+                "SGLang argument resolution"
+            )
+        max_ar_fraction = total - reserve
+        if max_ar_fraction < 0.1:
+            raise ValueError(
+                "MOSS-TTS-Realtime colocated memory budget leaves less than "
+                "the safe AR floor 0.1 after reserving decoder and streaming "
+                f"state memory: total={total:.3f}, reserve={reserve:.3f}"
+            )
 
         explicit = overrides.get("mem_fraction_static")
         if explicit is None:
-            effective = round(total - self.codec_mem_reserve, 3)
+            effective = max_ar_fraction
             overrides["mem_fraction_static"] = effective
         else:
             effective = float(explicit)
-            if effective > total:
+            if effective - max_ar_fraction > 1e-9:
                 raise ValueError(
-                    "MOSS-TTS-Realtime mem_fraction_static cannot exceed "
-                    "runtime.resources.total_gpu_memory_fraction"
+                    "MOSS-TTS-Realtime mem_fraction_static leaves less than "
+                    "the required decoder and streaming-state reserve: "
+                    f"{effective:.3f} > {max_ar_fraction:.3f}"
                 )
         if not 0.0 < effective < 1.0:
             raise ValueError(
@@ -159,17 +216,29 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
             self.profile_total_gpu_memory_fraction = None
 
     def customize_server_args(self, server_args: Any) -> None:
+        from sglang_omni.utils.gpu_memory import format_bytes_gib
+
         server_args.disable_overlap_schedule = True
         logger.info(
             "MOSS-TTS-Realtime SGLang startup: gpu_id=%s "
-            "total_gpu_memory_fraction=%s codec_mem_reserve=%.3f "
+            "total_gpu_memory_fraction=%s minimum_codec_mem_reserve=%s "
             "mem_fraction_static=%s profile_total_gpu_memory_fraction=%s",
             self.gpu_id,
             self.total_gpu_memory_fraction,
-            self.codec_mem_reserve,
+            self.minimum_codec_mem_reserve,
             server_args.mem_fraction_static,
             self.profile_total_gpu_memory_fraction,
         )
+        if self.minimum_codec_mem_reserve is not None:
+            logger.info(
+                "MOSS-TTS-Realtime codec memory budget: hbm=%s decoder=%s "
+                "streaming_state=%s max_active_turns=%d runtime_margin=%s",
+                format_bytes_gib(self.gpu_memory_bytes),
+                format_bytes_gib(self.codec_decoder_bytes),
+                format_bytes_gib(self.codec_streaming_state_bytes),
+                self.limits.max_active_turns,
+                format_bytes_gib(self.codec_runtime_margin_bytes),
+            )
 
     def infra_kwargs(self) -> dict[str, Any]:
         return {
