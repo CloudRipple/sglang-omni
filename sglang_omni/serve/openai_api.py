@@ -113,7 +113,10 @@ from sglang_omni.serve.speech_limits import (
 )
 from sglang_omni.serve.speech_service import SpeechRequestValidator
 from sglang_omni.serve.speech_voices import SpeakerSampleStore
-from sglang_omni.serve.speech_ws import SpeechWebSocketSession
+from sglang_omni.serve.speech_ws import (
+    SpeechWebSocketModeHandler,
+    SpeechWebSocketSession,
+)
 from sglang_omni.serve.streaming import STREAM_DONE_SENTINEL
 from sglang_omni.serve.streaming import (
     ClosableStreamingResponse as _ClosableStreamingResponse,
@@ -192,6 +195,7 @@ def create_app(
     tts_batch_max_items: int = DEFAULT_TTS_BATCH_MAX_ITEMS,
     architectures: list[str] | None = None,
     audio_chunking: ResolvedAudioChunking | None = None,
+    speech_ws_mode_handlers: dict[str, SpeechWebSocketModeHandler] | None = None,
 ) -> FastAPI:
     """Create a FastAPI application with OpenAI-compatible endpoints.
 
@@ -225,6 +229,8 @@ def create_app(
             ``/v1/audio/speech/batch``.
         audio_chunking: Long-audio chunking policy for ``/v1/audio/transcriptions``,
             declared by the pipeline config. None keeps chunking off.
+        speech_ws_mode_handlers: Optional model-owned handlers for explicit
+            speech WebSocket modes.
 
     Returns:
         Configured FastAPI application.
@@ -252,6 +258,7 @@ def create_app(
     app.state.realtime_enabled = enable_realtime
     app.state.supports_realtime_audio_output = supports_realtime_audio_output
     app.state.speaker_sample_store = SpeakerSampleStore()
+    app.state.speech_ws_mode_handlers = dict(speech_ws_mode_handlers or {})
     app.state.speech_service = SpeechRequestValidator(
         default_model=app.state.model_name,
         requires_uploaded_voice_for_named_voice=(
@@ -1396,6 +1403,7 @@ def _register_speech_ws(app: FastAPI) -> None:
             websocket,
             client=app.state.client,
             speech_service=app.state.speech_service,
+            mode_handlers=app.state.speech_ws_mode_handlers,
         )
         await session.run()
 

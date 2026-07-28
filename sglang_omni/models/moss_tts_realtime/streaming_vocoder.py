@@ -1,0 +1,869 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Fixed-slot streaming vocoder for MOSS-TTS-Realtime."""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+import torch
+
+from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
+from sglang_omni.profiler.event_recorder import emit as _emit_event
+from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.pipeline_state import build_usage
+from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
+from sglang_omni.utils.audio_payload import audio_waveform_payload
+
+logger = logging.getLogger(__name__)
+
+_SOURCE_HINT = "MOSS-TTS-Realtime"
+_CHUNK_RAMP = (1, 2, 3)
+_STEADY_CHUNK_FRAMES = 3
+
+
+class _LegacyCodecStreamingStateAdapter:
+    """Cached access to the legacy codec's module-owned streaming states."""
+
+    def __init__(self, codec: Any, *, device: torch.device) -> None:
+        self._states: list[Any] = []
+
+        def collect(module: Any) -> None:
+            state = getattr(module, "_streaming_state", None)
+            if state is None:
+                return
+            if not callable(getattr(state, "set_exec_mask", None)):
+                raise RuntimeError(
+                    f"codec streaming state {type(state).__name__} lacks "
+                    "set_exec_mask()"
+                )
+            if not callable(getattr(state, "reset", None)):
+                raise RuntimeError(
+                    f"codec streaming state {type(state).__name__} lacks reset()"
+                )
+            if getattr(state, "device", None) is None:
+                raise RuntimeError(
+                    f"codec streaming state {type(state).__name__} has no device"
+                )
+            self._states.append(state)
+
+        codec.apply(collect)
+        if not self._states:
+            raise RuntimeError("MOSS-TTS-Realtime codec has no active streaming state")
+        self._device = device
+
+    @property
+    def count(self) -> int:
+        return len(self._states)
+
+    def set_exec_mask(self, exec_mask: torch.Tensor) -> None:
+        for state in self._states:
+            state.set_exec_mask(exec_mask.to(device=state.device))
+
+    def reset_slots(self, slots: list[int], *, batch_size: int) -> None:
+        if not slots:
+            return
+        reset_mask = torch.zeros(batch_size, dtype=torch.bool, device=self._device)
+        reset_mask[slots] = True
+        for state in self._states:
+            state.reset(reset_mask.to(device=state.device))
+
+
+class _CodecStreamSession:
+    """One persistent ``codec.streaming()`` context and its slot ownership."""
+
+    def __init__(
+        self,
+        codec: Any,
+        *,
+        stream_slots: int,
+        n_vq: int,
+        samples_per_frame: int,
+    ) -> None:
+        self._codec = codec
+        self._batch_size = int(stream_slots)
+        self._n_vq = int(n_vq)
+        self._samples_per_frame = int(samples_per_frame)
+        try:
+            self._device = next(codec.parameters()).device
+        except StopIteration as exc:
+            raise RuntimeError("MOSS-TTS-Realtime codec has no parameters") from exc
+        self._free_slots = list(range(self._batch_size - 1, -1, -1))
+        self._leased_slots: set[int] = set()
+        self._quarantined_slots: set[int] = set()
+        self._closed = False
+        self._exit_stack = contextlib.ExitStack()
+        try:
+            with torch.no_grad():
+                self._exit_stack.enter_context(codec.streaming(self._batch_size))
+            self._state_adapter = _LegacyCodecStreamingStateAdapter(
+                codec,
+                device=self._device,
+            )
+        except BaseException:
+            self._exit_stack.close()
+            raise
+
+    @property
+    def active_leases(self) -> int:
+        return len(self._leased_slots)
+
+    @property
+    def free_slots(self) -> int:
+        return len(self._free_slots)
+
+    @property
+    def streaming_state_count(self) -> int:
+        return self._state_adapter.count
+
+    @property
+    def quarantined_slots(self) -> int:
+        return len(self._quarantined_slots)
+
+    def acquire(self) -> int:
+        if self._closed:
+            raise RuntimeError("MOSS-TTS-Realtime codec session is closed")
+        if not self._free_slots:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec stream slots are exhausted; "
+                "increase max_active_turns or reduce active turns"
+            )
+        slot = self._free_slots.pop()
+        self._leased_slots.add(slot)
+        return slot
+
+    def release(self, slot: int) -> None:
+        if self._closed:
+            return
+        if slot not in self._leased_slots:
+            raise RuntimeError(
+                f"MOSS-TTS-Realtime codec slot {slot} is not currently leased"
+            )
+        try:
+            self._state_adapter.reset_slots([slot], batch_size=self._batch_size)
+        except BaseException:
+            self._leased_slots.remove(slot)
+            self._quarantined_slots.add(slot)
+            raise
+        self._leased_slots.remove(slot)
+        self._free_slots.append(slot)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        with torch.no_grad():
+            self._exit_stack.close()
+        self._closed = True
+
+    def step(self, slot_codes: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+        if not slot_codes:
+            return {}
+        for slot in slot_codes:
+            if slot not in self._leased_slots:
+                raise RuntimeError(f"MOSS-TTS-Realtime codec slot {slot} is not leased")
+        step_lengths = {int(codes.shape[1]) for codes in slot_codes.values()}
+        if len(step_lengths) != 1:
+            raise ValueError(
+                "MOSS-TTS-Realtime codec step requires one uniform frame length, "
+                f"got {sorted(step_lengths)}"
+            )
+        (step_frames,) = step_lengths
+        if step_frames < 1:
+            raise ValueError("MOSS-TTS-Realtime codec step must contain frames")
+        for codes in slot_codes.values():
+            if codes.ndim != 2 or tuple(codes.shape) != (
+                self._n_vq,
+                step_frames,
+            ):
+                raise ValueError(
+                    "MOSS-TTS-Realtime codec slot codes must have shape "
+                    f"[{self._n_vq}, T], got {tuple(codes.shape)}"
+                )
+
+        codes_batch = torch.zeros(
+            self._n_vq,
+            self._batch_size,
+            step_frames,
+            dtype=torch.long,
+            device=self._device,
+        )
+        codes_lengths = torch.zeros(
+            self._batch_size,
+            dtype=torch.long,
+            device=self._device,
+        )
+        exec_mask = torch.zeros(
+            self._batch_size,
+            dtype=torch.bool,
+            device=self._device,
+        )
+        for slot, codes in slot_codes.items():
+            codes_batch[:, slot, :] = codes.to(device=self._device, dtype=torch.long)
+            codes_lengths[slot] = step_frames
+            exec_mask[slot] = True
+
+        slots = list(slot_codes)
+        with torch.no_grad():
+            self._state_adapter.set_exec_mask(exec_mask)
+            result = self._codec._decode_frame(codes_batch, codes_lengths)
+        audio = getattr(result, "audio", None)
+        audio_lengths = getattr(result, "audio_lengths", None)
+        if not isinstance(audio, torch.Tensor) or not isinstance(
+            audio_lengths, torch.Tensor
+        ):
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec did not return audio/audio_lengths"
+            )
+        if audio.ndim != 3 or int(audio.shape[0]) != self._batch_size:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec audio must have shape "
+                f"[{self._batch_size}, channels, samples]"
+            )
+        if int(audio.shape[1]) != 1:
+            raise RuntimeError(
+                f"MOSS-TTS-Realtime codec must emit mono audio, got {audio.shape[1]} channels"
+            )
+        if audio_lengths.ndim != 1 or int(audio_lengths.shape[0]) != self._batch_size:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec audio_lengths must match fixed slots"
+            )
+
+        audio_cpu = audio[slots].detach().to(device="cpu", dtype=torch.float32)
+        lengths_cpu = audio_lengths[slots].detach().to(device="cpu")
+        expected_samples = step_frames * self._samples_per_frame
+        decoded: dict[int, torch.Tensor] = {}
+        for index, slot in enumerate(slots):
+            samples = int(lengths_cpu[index])
+            if samples != expected_samples:
+                raise RuntimeError(
+                    "MOSS-TTS-Realtime codec returned an unexpected active length: "
+                    f"slot={slot} samples={samples} expected={expected_samples}"
+                )
+            decoded[slot] = audio_cpu[index, :, :samples].contiguous()
+        return decoded
+
+    def decode_borrowed(
+        self,
+        codes_list: list[torch.Tensor],
+        *,
+        max_step_frames: int,
+        max_batch_size: int,
+    ) -> list[torch.Tensor]:
+        """Decode offline utterances through currently free fixed slots."""
+        if not codes_list:
+            return []
+        borrow_count = min(
+            len(codes_list),
+            max(int(max_batch_size), 1),
+            self.free_slots,
+        )
+        if borrow_count < 1:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec has no free slot for offline decode"
+            )
+        borrowed = [self.acquire() for _ in range(borrow_count)]
+        wavs: list[torch.Tensor] = []
+        decode_succeeded = False
+        try:
+            for wave_start in range(0, len(codes_list), borrow_count):
+                wave = codes_list[wave_start : wave_start + borrow_count]
+                slots = borrowed[: len(wave)]
+                self._state_adapter.reset_slots(slots, batch_size=self._batch_size)
+                cursors = [0] * len(wave)
+                chunks: list[list[torch.Tensor]] = [[] for _ in wave]
+                while True:
+                    remaining = [
+                        int(codes.shape[1]) - cursor
+                        for codes, cursor in zip(wave, cursors)
+                    ]
+                    positive = [value for value in remaining if value > 0]
+                    if not positive:
+                        break
+                    if any(value >= max_step_frames for value in positive):
+                        step_frames = max_step_frames
+                    else:
+                        step_frames = min(positive)
+                    plan = {
+                        slots[index]: codes[
+                            :, cursors[index] : cursors[index] + step_frames
+                        ]
+                        for index, codes in enumerate(wave)
+                        if remaining[index] >= step_frames
+                    }
+                    decoded = self.step(plan)
+                    for index, slot in enumerate(slots):
+                        if slot not in plan:
+                            continue
+                        chunks[index].append(decoded[slot])
+                        cursors[index] += step_frames
+                wavs.extend(torch.cat(item, dim=-1) for item in chunks)
+            decode_succeeded = True
+        finally:
+            release_error: BaseException | None = None
+            for slot in borrowed:
+                try:
+                    self.release(slot)
+                except BaseException as exc:
+                    logger.exception(
+                        "MOSS-TTS-Realtime failed to reset borrowed codec slot %d; "
+                        "the slot is quarantined",
+                        slot,
+                    )
+                    release_error = release_error or exc
+            if decode_succeeded and release_error is not None:
+                raise release_error
+        return wavs
+
+
+@dataclass
+class _RealtimeStreamState:
+    slot: int | None
+    pending: list[torch.Tensor] = field(default_factory=list)
+    ramp_index: int = 0
+    next_chunk_frames: int = _CHUNK_RAMP[0]
+
+
+@dataclass(frozen=True)
+class _CoalescedStepPlan:
+    step_frames: int
+    slot_codes: dict[int, torch.Tensor]
+
+
+class MossTTSRealtimeStreamingVocoderScheduler(
+    StreamingVocoderBase[_RealtimeStreamState, _CoalescedStepPlan]
+):
+    """Decode generated 16-codebook frames in persistent request-owned slots."""
+
+    _can_batch_stream_chunks = True
+    _stream_chunk_batch_distinct_requests = True
+
+    def __init__(
+        self,
+        codec: Any,
+        *,
+        n_vq: int,
+        stream_slots: int = 16,
+        max_batch_size: int = 8,
+        max_batch_wait_ms: int = 2,
+    ) -> None:
+        if stream_slots < 1:
+            raise ValueError(f"stream_slots must be >= 1, got {stream_slots}")
+        missing = [
+            name
+            for name in ("streaming", "_decode_frame", "batch_decode", "apply")
+            if not callable(getattr(codec, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                f"MOSS-TTS-Realtime codec is incompatible; missing {sorted(missing)}"
+            )
+        config = getattr(codec, "config", None)
+        if config is None:
+            raise RuntimeError("MOSS-TTS-Realtime codec has no config")
+        sample_rate = int(
+            getattr(config, "sampling_rate", 0) or getattr(config, "sample_rate", 0)
+        )
+        downsample_rate = int(getattr(config, "downsample_rate", 0) or 0)
+        quantizer_kwargs = getattr(config, "quantizer_kwargs", {}) or {}
+        num_quantizers = int(quantizer_kwargs.get("num_quantizers", 0) or 0)
+        codebook_size = int(quantizer_kwargs.get("codebook_size", 0) or 0)
+        if sample_rate < 1 or downsample_rate < 1:
+            raise ValueError("MOSS-TTS-Realtime codec timing config must be positive")
+        self._n_vq = int(n_vq)
+        if self._n_vq < 1:
+            raise ValueError("MOSS-TTS-Realtime n_vq must be positive")
+        if num_quantizers < self._n_vq:
+            raise ValueError(
+                "MOSS-TTS-Realtime codec must expose at least "
+                f"{self._n_vq} quantizers"
+            )
+        if codebook_size < 1:
+            raise ValueError("MOSS-TTS-Realtime codec codebook_size must be positive")
+
+        self._codec = codec
+        self._sample_rate = sample_rate
+        self._samples_per_frame = downsample_rate
+        self._codebook_size = codebook_size
+        self._stream_slots = int(stream_slots)
+        self._stream_chunk_batch_max = self._stream_slots
+        self._max_batch_size = max(int(max_batch_size), 1)
+        self._session: _CodecStreamSession | None = None
+        self._resource_totals: Counter[str] = Counter()
+        self._active_slots_high_water = 0
+        self._pending_frames_high_water = 0
+        super().__init__(
+            self._vocode,
+            batch_compute_fn=self._vocode_batch,
+            sample_rate=self._sample_rate,
+            stream_source_hint=_SOURCE_HINT,
+            max_batch_size=self._max_batch_size,
+            max_batch_wait_ms=max_batch_wait_ms,
+        )
+
+    def _ensure_session(self) -> _CodecStreamSession:
+        if self._session is None:
+            self._session = _CodecStreamSession(
+                self._codec,
+                stream_slots=self._stream_slots,
+                n_vq=self._n_vq,
+                samples_per_frame=self._samples_per_frame,
+            )
+            logger.info(
+                "MOSS-TTS-Realtime codec session opened: slots=%d states=%d",
+                self._stream_slots,
+                self._session.streaming_state_count,
+            )
+            self._resource_totals["codec_session_open_total"] += 1
+        return self._session
+
+    def _emit_codec_event(
+        self,
+        request_id: str,
+        event_name: str,
+        **metadata: Any,
+    ) -> None:
+        _emit_event(
+            request_id=request_id,
+            stage=None,
+            event_name=f"moss_tts_realtime_codec_{event_name}",
+            metadata=metadata,
+        )
+
+    def resource_snapshot(self) -> dict[str, Any]:
+        session = self._session
+        active_slots = session.active_leases if session is not None else 0
+        quarantined_slots = session.quarantined_slots if session is not None else 0
+        free_slots = session.free_slots if session is not None else self._stream_slots
+        pending_frames = sum(
+            len(state.pending) for state in self._stream_states.values()
+        )
+        self._active_slots_high_water = max(
+            self._active_slots_high_water,
+            active_slots,
+        )
+        self._pending_frames_high_water = max(
+            self._pending_frames_high_water,
+            pending_frames,
+        )
+        totals = dict(sorted(self._resource_totals.items()))
+        return {
+            "codec_slot_capacity": self._stream_slots,
+            "codec_active_slots": active_slots,
+            "codec_free_slots": free_slots,
+            "codec_quarantined_slots": quarantined_slots,
+            "codec_active_slots_high_water": self._active_slots_high_water,
+            "codec_live_stream_states": len(self._stream_states),
+            "codec_pending_frames": pending_frames,
+            "codec_pending_frames_high_water": self._pending_frames_high_water,
+            "codec_streaming_state_count": (
+                session.streaming_state_count if session is not None else 0
+            ),
+            "codec_resource_totals": totals,
+            "codec_slot_acquire_total": totals.get("codec_slot_acquire_total", 0),
+            "codec_slot_release_total": totals.get("codec_slot_release_total", 0),
+            "codec_slot_reset_error_total": totals.get(
+                "codec_slot_reset_error_total",
+                0,
+            ),
+            "codec_slot_exhaustion_total": totals.get(
+                "codec_slot_exhaustion_total",
+                0,
+            ),
+        }
+
+    def admin(
+        self,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del payload
+        if action != "model_info":
+            return {
+                "success": True,
+                "message": f"unsupported admin action: {action}",
+                "data": {"skipped": True, "unsupported": True},
+            }
+        with self._state_lock:
+            return {
+                "success": True,
+                "message": "ok",
+                "data": self.resource_snapshot(),
+            }
+
+    def on_serving_stop(self) -> None:
+        if self._session is not None:
+            self._session.close()
+            self._session = None
+            self._resource_totals["codec_session_close_total"] += 1
+            self._emit_codec_event("codec-session", "session_close")
+
+    def create_stream_state(self, request_id: str) -> _RealtimeStreamState:
+        try:
+            slot = self._ensure_session().acquire()
+        except Exception as exc:
+            self._resource_totals["codec_slot_acquire_error_total"] += 1
+            if "exhausted" in str(exc).lower():
+                self._resource_totals["codec_slot_exhaustion_total"] += 1
+            self._emit_codec_event(
+                request_id,
+                "slot_acquire_error",
+                error=str(exc),
+            )
+            raise
+        self._resource_totals["codec_slot_acquire_total"] += 1
+        self._active_slots_high_water = max(
+            self._active_slots_high_water,
+            self._ensure_session().active_leases,
+        )
+        self._emit_codec_event(request_id, "slot_acquire", slot=slot)
+        return _RealtimeStreamState(slot=slot)
+
+    def latch_stream_contract(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+        source: StagePayload | Mapping[str, Any],
+        *,
+        origin: str,
+    ) -> None:
+        del state
+        if origin == "payload":
+            return
+        metadata: Mapping[str, Any] = source
+        n_vq = metadata.get("n_vq")
+        if n_vq is not None and int(n_vq) != self._n_vq:
+            raise ValueError(
+                f"MOSS-TTS-Realtime stream n_vq for {request_id!r} must be "
+                f"{self._n_vq}, got {n_vq}"
+            )
+        sample_rate = metadata.get("sample_rate")
+        if sample_rate is not None and int(sample_rate) != self._sample_rate:
+            raise ValueError(
+                f"MOSS-TTS-Realtime stream sample_rate for {request_id!r} must be "
+                f"{self._sample_rate}, got {sample_rate}"
+            )
+
+    def validate_chunk(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+        codes: torch.Tensor,
+    ) -> torch.Tensor:
+        del request_id, state
+        if (
+            codes.dtype == torch.bool
+            or torch.is_floating_point(codes)
+            or torch.is_complex(codes)
+        ):
+            raise TypeError("MOSS-TTS-Realtime stream codes must use an integer dtype")
+        if codes.ndim != 1 or int(codes.shape[0]) != self._n_vq:
+            raise ValueError(
+                "MOSS-TTS-Realtime stream chunk must have shape "
+                f"[{self._n_vq}], got {tuple(codes.shape)}"
+            )
+        codes = codes.detach().to(device="cpu", dtype=torch.long).contiguous()
+        if torch.any(codes < 0) or torch.any(codes >= self._codebook_size):
+            raise ValueError(
+                "MOSS-TTS-Realtime stream codes must be in "
+                f"[0, {self._codebook_size})"
+            )
+        return codes
+
+    def ingest(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+        codes: torch.Tensor,
+    ) -> None:
+        del request_id
+        if state.slot is None:
+            raise RuntimeError("MOSS-TTS-Realtime stream has no codec slot")
+        state.pending.append(codes)
+        pending_frames = sum(
+            len(stream_state.pending) for stream_state in self._stream_states.values()
+        )
+        self._pending_frames_high_water = max(
+            self._pending_frames_high_water,
+            pending_frames,
+        )
+
+    def select_step_participants(self) -> list[tuple[str, _RealtimeStreamState]]:
+        due = [
+            (request_id, state)
+            for request_id, state in self._stream_state_items()
+            if state.slot is not None and len(state.pending) >= state.next_chunk_frames
+        ]
+        if not due:
+            return []
+        step_frames = min(state.next_chunk_frames for _, state in due)
+        return [
+            (request_id, state)
+            for request_id, state in due
+            if state.next_chunk_frames == step_frames
+        ]
+
+    def build_step_plan(
+        self,
+        participants: list[tuple[str, _RealtimeStreamState]],
+    ) -> _CoalescedStepPlan:
+        if not participants:
+            raise ValueError("MOSS-TTS-Realtime codec step has no participants")
+        step_frames = participants[0][1].next_chunk_frames
+        if any(state.next_chunk_frames != step_frames for _, state in participants):
+            raise RuntimeError(
+                "MOSS-TTS-Realtime coalesced participants have different thresholds"
+            )
+        slot_codes: dict[int, torch.Tensor] = {}
+        for _, state in participants:
+            if state.slot is None:
+                raise RuntimeError("MOSS-TTS-Realtime participant lost its codec slot")
+            slot_codes[state.slot] = torch.stack(
+                state.pending[:step_frames],
+                dim=1,
+            )
+        return _CoalescedStepPlan(
+            step_frames=step_frames,
+            slot_codes=slot_codes,
+        )
+
+    def run_step(
+        self,
+        participants: list[tuple[str, _RealtimeStreamState]],
+        plan: _CoalescedStepPlan,
+    ) -> dict[str, torch.Tensor]:
+        decoded = self._ensure_session().step(plan.slot_codes)
+        self._resource_totals["codec_decode_step_total"] += 1
+        self._resource_totals["codec_decoded_frame_total"] += plan.step_frames * len(
+            participants
+        )
+        output: dict[str, torch.Tensor] = {}
+        for request_id, state in participants:
+            if state.slot is None:
+                raise RuntimeError("MOSS-TTS-Realtime participant lost its codec slot")
+            del state.pending[: plan.step_frames]
+            if state.ramp_index < len(_CHUNK_RAMP) - 1:
+                state.ramp_index += 1
+            state.next_chunk_frames = _CHUNK_RAMP[state.ramp_index]
+            output[request_id] = decoded[state.slot]
+        return output
+
+    def _release_state_slot(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+    ) -> None:
+        slot = state.slot
+        if slot is None:
+            return
+        state.slot = None
+        if self._session is not None:
+            try:
+                self._session.release(slot)
+            except Exception as exc:
+                self._resource_totals["codec_slot_release_error_total"] += 1
+                self._resource_totals["codec_slot_reset_error_total"] += 1
+                self._emit_codec_event(
+                    request_id,
+                    "slot_release_error",
+                    slot=slot,
+                    error=str(exc),
+                )
+                raise
+            self._resource_totals["codec_slot_release_total"] += 1
+            self._emit_codec_event(request_id, "slot_release", slot=slot)
+
+    def decode_delta(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+        *,
+        is_final: bool,
+    ) -> torch.Tensor | None:
+        if not is_final:
+            return None
+        audio_parts: list[torch.Tensor] = []
+        if state.pending:
+            if state.slot is None:
+                raise RuntimeError("MOSS-TTS-Realtime final flush has no codec slot")
+            session = self._ensure_session()
+            while state.pending:
+                step_frames = min(len(state.pending), _STEADY_CHUNK_FRAMES)
+                codes = torch.stack(state.pending[:step_frames], dim=1)
+                del state.pending[:step_frames]
+                audio_parts.append(session.step({state.slot: codes})[state.slot])
+        self._release_state_slot(request_id, state)
+        if not audio_parts:
+            return None
+        return torch.cat(audio_parts, dim=-1)
+
+    def stream_payload(self, request_id: str, waveform: torch.Tensor) -> dict[str, Any]:
+        del request_id
+        return audio_waveform_payload(
+            waveform,
+            sample_rate=self._sample_rate,
+            modality="audio",
+            source_hint=f"{_SOURCE_HINT} streaming",
+        )
+
+    def fallback_full_decode(
+        self,
+        request_id: str,
+        payload: StagePayload,
+        state: _RealtimeStreamState,
+    ) -> torch.Tensor | None:
+        del request_id, state
+        return self._decode_payload_codes(payload)
+
+    def final_result_data(
+        self,
+        request_id: str,
+        payload: StagePayload,
+        state: _RealtimeStreamState,
+    ) -> dict[str, Any]:
+        del request_id, state
+        result: dict[str, Any] = {
+            "modality": "audio",
+            "sample_rate": self._sample_rate,
+        }
+        usage = build_usage(MossTTSRealtimeState.from_dict(payload.data))
+        if usage is not None:
+            result["usage"] = usage
+        return result
+
+    def release_stream_resources(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+    ) -> None:
+        self._release_state_slot(request_id, state)
+
+    def _prepare_codes(
+        self,
+        payload: StagePayload,
+    ) -> tuple[MossTTSRealtimeState, torch.Tensor | None]:
+        state = MossTTSRealtimeState.from_dict(payload.data)
+        if state.audio_codes is None:
+            raise RuntimeError("MOSS-TTS-Realtime vocoder requires audio_codes")
+        codes = torch.as_tensor(state.audio_codes)
+        if codes.ndim != 2 or int(codes.shape[1]) != self._n_vq:
+            raise ValueError(
+                "MOSS-TTS-Realtime audio_codes must have shape " f"[T, {self._n_vq}]"
+            )
+        if (
+            codes.dtype == torch.bool
+            or torch.is_floating_point(codes)
+            or torch.is_complex(codes)
+        ):
+            raise TypeError("MOSS-TTS-Realtime audio_codes must use an integer dtype")
+        codes = codes.to(device="cpu", dtype=torch.long).contiguous()
+        if codes.numel() == 0:
+            return state, None
+        if torch.any(codes < 0) or torch.any(codes >= self._codebook_size):
+            raise ValueError(
+                "MOSS-TTS-Realtime audio_codes must be in "
+                f"[0, {self._codebook_size})"
+            )
+        return state, codes
+
+    def _decode_full_batch(self, codes_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        device = next(self._codec.parameters()).device
+        channels_first = [
+            codes.transpose(0, 1).contiguous().to(device=device, dtype=torch.long)
+            for codes in codes_list
+        ]
+        with torch.inference_mode():
+            result = self._codec.batch_decode(
+                channels_first,
+                num_quantizers=self._n_vq,
+            )
+        audio = getattr(result, "audio", None)
+        audio_lengths = getattr(result, "audio_lengths", None)
+        if not isinstance(audio, torch.Tensor) or not isinstance(
+            audio_lengths, torch.Tensor
+        ):
+            raise RuntimeError("MOSS-TTS-Realtime codec batch_decode returned no audio")
+        if audio.ndim != 3 or int(audio.shape[0]) != len(codes_list):
+            raise RuntimeError("MOSS-TTS-Realtime offline codec batch is misaligned")
+        if int(audio.shape[1]) != 1:
+            raise RuntimeError("MOSS-TTS-Realtime offline codec must emit mono audio")
+        audio_cpu = audio.detach().to(device="cpu", dtype=torch.float32)
+        lengths_cpu = audio_lengths.detach().to(device="cpu")
+        waveforms: list[torch.Tensor] = []
+        for index, codes in enumerate(codes_list):
+            samples = int(lengths_cpu[index])
+            expected = int(codes.shape[0]) * self._samples_per_frame
+            if samples != expected:
+                raise RuntimeError(
+                    "MOSS-TTS-Realtime offline codec length mismatch: "
+                    f"samples={samples} expected={expected}"
+                )
+            waveforms.append(audio_cpu[index, :, :samples].contiguous())
+        return waveforms
+
+    def _decode_codes_rows(self, codes_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        if not codes_list:
+            return []
+        channels_first = [codes.transpose(0, 1).contiguous() for codes in codes_list]
+        with self._state_lock:
+            if self._session is not None and self._session.active_leases == 0:
+                self._session.close()
+                self._session = None
+            if self._session is None:
+                return self._decode_full_batch(codes_list)
+            return self._session.decode_borrowed(
+                channels_first,
+                max_step_frames=_STEADY_CHUNK_FRAMES,
+                max_batch_size=self._max_batch_size,
+            )
+
+    def _decode_payload_codes(self, payload: StagePayload) -> torch.Tensor | None:
+        _, codes = self._prepare_codes(payload)
+        if codes is None:
+            return None
+        return self._decode_codes_rows([codes])[0]
+
+    def _store_result(
+        self,
+        payload: StagePayload,
+        state: MossTTSRealtimeState,
+        waveform: torch.Tensor,
+    ) -> StagePayload:
+        state.audio_codes = None
+        state.sample_rate = self._sample_rate
+        payload.data = state.to_dict()
+        payload.data.update(
+            audio_waveform_payload(
+                waveform,
+                sample_rate=self._sample_rate,
+                modality="audio",
+                source_hint=_SOURCE_HINT,
+            )
+        )
+        usage = build_usage(state)
+        if usage is not None:
+            payload.data["usage"] = usage
+        return payload
+
+    def _vocode_batch(self, payloads: list[StagePayload]) -> list[StagePayload]:
+        prepared = [self._prepare_codes(payload) for payload in payloads]
+        codes_list = [codes for _, codes in prepared if codes is not None]
+        decoded = iter(self._decode_codes_rows(codes_list)) if codes_list else iter(())
+        results: list[StagePayload] = []
+        for payload, (state, codes) in zip(payloads, prepared):
+            if codes is None:
+                state.audio_codes = None
+                payload.data = state.to_dict()
+                results.append(payload)
+                continue
+            results.append(self._store_result(payload, state, next(decoded)))
+        return results
+
+    def _vocode(self, payload: StagePayload) -> StagePayload:
+        return self._vocode_batch([payload])[0]
+
+
+__all__ = ["MossTTSRealtimeStreamingVocoderScheduler"]
