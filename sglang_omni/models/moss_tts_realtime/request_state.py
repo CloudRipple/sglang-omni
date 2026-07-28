@@ -94,7 +94,6 @@ class MossTTSRealtimeSessionConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: Literal["moss_tts_realtime"] = "moss_tts_realtime"
     response_format: Literal["pcm"] = "pcm"
     sample_rate: Literal[24000] = 24000
     voice: MossTTSRealtimeVoiceReference = Field(

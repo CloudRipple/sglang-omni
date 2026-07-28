@@ -8,7 +8,7 @@ import json
 import logging
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -54,23 +54,9 @@ SENTENCE_BOUNDARIES = frozenset(".!?。！？")
 CLAUSE_BOUNDARIES = frozenset(".!?。！？,，;；")
 SUPPORTED_SPLIT_GRANULARITIES = frozenset({"sentence", "clause"})
 
-SpeechWebSocketModeHandler = Callable[
-    [WebSocket, Client, SpeechRequestValidator, str, dict[str, Any]],
-    Awaitable[bool],
-]
-
 
 def new_speech_ws_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
-
-
-def _speech_websocket_explicit_mode(payload: dict[str, Any]) -> Any:
-    raw_config = payload.get("session")
-    if raw_config is None:
-        return payload.get("mode")
-    if isinstance(raw_config, dict):
-        return raw_config.get("mode")
-    return None
 
 
 async def _cancel_tasks(*tasks: asyncio.Task[Any]) -> None:
@@ -89,7 +75,6 @@ class SpeechWebSocketSession:
         *,
         client: Client,
         speech_service: SpeechRequestValidator,
-        mode_handlers: Mapping[str, SpeechWebSocketModeHandler] | None = None,
     ) -> None:
         self.websocket = websocket
         self.client = client
@@ -105,7 +90,6 @@ class SpeechWebSocketSession:
         self.buffered_receive_messages: deque[dict[str, Any]] = deque()
         self.buffered_receive_message_bytes = 0
         self.config_prepared_request: PreparedSpeechRequest | None = None
-        self.mode_handlers = dict(mode_handlers or {})
 
     async def run(self) -> None:
         try:
@@ -130,29 +114,6 @@ class SpeechWebSocketSession:
                         "first WebSocket message must be session.config",
                         param="type",
                     )
-                )
-                return False
-            explicit_mode = _speech_websocket_explicit_mode(payload)
-            if explicit_mode is not None:
-                handler = (
-                    self.mode_handlers.get(explicit_mode)
-                    if isinstance(explicit_mode, str)
-                    else None
-                )
-                if handler is None:
-                    await self._send_error(
-                        bad_request(
-                            f"unsupported speech WebSocket mode: {explicit_mode!r}",
-                            param="mode",
-                        )
-                    )
-                    return False
-                self.closed = await handler(
-                    self.websocket,
-                    self.client,
-                    self.speech_service,
-                    self.session_id,
-                    payload,
                 )
                 return False
             self.config = await self._parse_config(payload)

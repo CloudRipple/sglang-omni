@@ -11,10 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
 
 from sglang_omni.client import GenerateChunk
-from sglang_omni.models.moss_tts_realtime.protocol import (
-    MOSS_TTS_REALTIME_SPEECH_WS_MODE,
-    MossTTSRealtimeTurnStart,
-)
+from sglang_omni.models.moss_tts_realtime.protocol import MossTTSRealtimeTurnStart
 from sglang_omni.models.moss_tts_realtime.speech_ws import (
     MossTTSRealtimeSpeechWebSocketSession,
     create_moss_tts_realtime_speech_ws_handler,
@@ -44,19 +41,15 @@ class BoundaryTokenizer:
         return ids
 
 
-def _realtime_mode_handlers(
+def _realtime_handler(
     tokenizer: Any | None = None,
     *,
     realtime_input_stage: str | None = None,
-) -> dict[str, Any]:
-    return {
-        MOSS_TTS_REALTIME_SPEECH_WS_MODE: (
-            create_moss_tts_realtime_speech_ws_handler(
-                tokenizer=(tokenizer if tokenizer is not None else BoundaryTokenizer()),
-                realtime_input_stage=realtime_input_stage,
-            )
-        )
-    }
+) -> Any:
+    return create_moss_tts_realtime_speech_ws_handler(
+        tokenizer=(tokenizer if tokenizer is not None else BoundaryTokenizer()),
+        realtime_input_stage=realtime_input_stage,
+    )
 
 
 class _RealtimeSpeechHandle:
@@ -226,7 +219,6 @@ def test_turn_started_waits_for_backend_stream_submission() -> None:
 
 def _realtime_config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "mode": "moss_tts_realtime",
         "model": "tts",
         "response_format": "pcm",
         "stream_audio": True,
@@ -250,7 +242,26 @@ def _collect_until_turn_done(
     return events, audio_frames
 
 
-def test_realtime_mode_streams_two_turns_and_preserves_input_ids() -> None:
+def test_realtime_endpoint_requires_session_config_first() -> None:
+    client_impl = RealtimeSpeechClient()
+    client = TestClient(
+        create_app(
+            client_impl,
+            model_name="tts",
+            speech_realtime_handler=_realtime_handler(),
+        )
+    )
+
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
+        websocket.send_json({"type": "turn.start", "turn_id": "turn"})
+        error = websocket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["param"] == "type"
+    assert client_impl.requests == []
+
+
+def test_realtime_endpoint_streams_two_turns_and_preserves_input_ids() -> None:
     client_impl = RealtimeSpeechClient()
     tokenizer = BoundaryTokenizer()
     client = TestClient(
@@ -258,17 +269,16 @@ def test_realtime_mode_streams_two_turns_and_preserves_input_ids() -> None:
             client_impl,
             model_name="tts",
             architectures=["MossTTSRealtime"],
-            speech_ws_mode_handlers=_realtime_mode_handlers(tokenizer),
+            speech_realtime_handler=_realtime_handler(tokenizer),
         )
     )
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
         websocket.send_json(_realtime_config())
         configured = websocket.receive_json()
         assert configured == {
             "type": "session.configured",
             "session_id": configured["session_id"],
-            "mode": "moss_tts_realtime",
             "response_format": "pcm",
             "sample_rate": 24000,
             "stream_audio": True,
@@ -389,13 +399,13 @@ def test_realtime_custom_input_stage_is_used_for_updates_and_session_close() -> 
         create_app(
             client_impl,
             model_name="tts",
-            speech_ws_mode_handlers=_realtime_mode_handlers(
+            speech_realtime_handler=_realtime_handler(
                 realtime_input_stage=custom_stage
             ),
         )
     )
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
         websocket.send_json(_realtime_config())
         configured = websocket.receive_json()
         websocket.send_json({"type": "turn.start", "turn_id": "turn"})
@@ -435,11 +445,11 @@ def test_realtime_messages_before_turn_are_recoverable() -> None:
         create_app(
             client_impl,
             model_name="tts",
-            speech_ws_mode_handlers=_realtime_mode_handlers(),
+            speech_realtime_handler=_realtime_handler(),
         )
     )
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
         websocket.send_json(_realtime_config())
         assert websocket.receive_json()["type"] == "session.configured"
 
@@ -469,11 +479,11 @@ def test_realtime_rejects_mixed_modes_gaps_and_changed_retries() -> None:
         create_app(
             client_impl,
             model_name="tts",
-            speech_ws_mode_handlers=_realtime_mode_handlers(),
+            speech_realtime_handler=_realtime_handler(),
         )
     )
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
         websocket.send_json(_realtime_config())
         websocket.receive_json()
         websocket.send_json({"type": "turn.start", "turn_id": "turn"})
@@ -526,11 +536,11 @@ def test_realtime_config_requires_24khz_streamed_pcm(
         create_app(
             RealtimeSpeechClient(),
             model_name="tts",
-            speech_ws_mode_handlers=_realtime_mode_handlers(),
+            speech_realtime_handler=_realtime_handler(),
         )
     )
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
         websocket.send_json(_realtime_config(**overrides))
         error = websocket.receive_json()
 
@@ -545,11 +555,11 @@ def test_realtime_direct_tokens_are_strictly_validated(token_ids: list[Any]) -> 
         create_app(
             client_impl,
             model_name="tts",
-            speech_ws_mode_handlers=_realtime_mode_handlers(),
+            speech_realtime_handler=_realtime_handler(),
         )
     )
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
         websocket.send_json(_realtime_config())
         websocket.receive_json()
         websocket.send_json({"type": "turn.start", "turn_id": "turn"})

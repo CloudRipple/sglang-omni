@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Model-level realtime mode for the speech WebSocket endpoint."""
+"""Model-level implementation of the realtime speech WebSocket endpoint."""
 
 from __future__ import annotations
 
@@ -43,12 +43,16 @@ from sglang_omni.models.moss_tts_realtime.text_delta import (
 from sglang_omni.proto import InputUpdateMessage
 from sglang_omni.serve.speech_errors import SpeechAPIError, bad_request, internal_error
 from sglang_omni.serve.speech_service import (
+    MAX_REFERENCE_AUDIO_BYTES,
     PreparedSpeechRequest,
     SpeechRequestValidator,
 )
 
 logger = logging.getLogger(__name__)
 
+CONFIG_TIMEOUT_S = 10.0
+BASE64_ENCODED_REFERENCE_AUDIO_BYTES = ((MAX_REFERENCE_AUDIO_BYTES + 2) // 3) * 4
+MAX_CONFIG_MESSAGE_BYTES = BASE64_ENCODED_REFERENCE_AUDIO_BYTES + 1024 * 1024
 MOSS_TTS_REALTIME_INPUT_MODES = ("text", "tokens")
 
 
@@ -73,7 +77,7 @@ class _ActiveRealtimeTurn:
 
 
 class MossTTSRealtimeSpeechWebSocketSession:
-    """Own one explicitly configured MOSS-TTS-Realtime WebSocket session."""
+    """Own one ``/v1/audio/speech/realtime`` WebSocket session."""
 
     def __init__(
         self,
@@ -110,12 +114,32 @@ class MossTTSRealtimeSpeechWebSocketSession:
         self._teardown_complete = False
         self._backend_session_closed = False
 
-    async def run(self, initial_payload: dict[str, Any]) -> None:
-        """Configure from the already-received first frame and drive the session."""
+    async def run(self) -> None:
+        """Read configuration and drive one realtime speech session."""
 
         try:
-            await self._configure(initial_payload)
+            raw = await self._receive_text_frame(
+                timeout_s=CONFIG_TIMEOUT_S,
+                max_message_bytes=MAX_CONFIG_MESSAGE_BYTES,
+                message_kind="session",
+            )
+            payload = self._parse_message(raw)
+            if payload.get("type") != "session.config":
+                await self._send_error(
+                    bad_request(
+                        "first WebSocket message must be session.config",
+                        param="type",
+                    )
+                )
+                return
+            await self._configure(payload)
             await self._message_loop()
+        except asyncio.TimeoutError:
+            await self._send_error(
+                bad_request("session.config was not received before timeout")
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            await self._send_error(bad_request(str(exc)))
         except WebSocketDisconnect:
             self.disconnected = True
         finally:
@@ -153,7 +177,6 @@ class MossTTSRealtimeSpeechWebSocketSession:
             {
                 "type": "session.configured",
                 "session_id": self.session_id,
-                "mode": self.config.mode,
                 "response_format": self.config.response_format,
                 "sample_rate": self.config.sample_rate,
                 "stream_audio": self.config.stream_audio,
@@ -697,17 +720,27 @@ class MossTTSRealtimeSpeechWebSocketSession:
         config: MossTTSRealtimeSpeechSessionConfig,
     ) -> dict[str, Any]:
         payload = config.model_dump(
-            exclude={"mode", "sample_rate", "stream_audio", "repetition_window"},
+            exclude={"sample_rate", "stream_audio", "repetition_window"},
             exclude_none=True,
         )
         payload["input"] = "probe"
         payload["stream"] = True
         return payload
 
-    async def _receive_text_frame(self) -> str:
+    async def _receive_text_frame(
+        self,
+        *,
+        timeout_s: float | None = None,
+        max_message_bytes: int | None = None,
+        message_kind: str = "MOSS-TTS-Realtime",
+    ) -> str:
+        resolved_timeout_s = self.idle_timeout_s if timeout_s is None else timeout_s
+        resolved_max_bytes = (
+            self.max_message_bytes if max_message_bytes is None else max_message_bytes
+        )
         message = await asyncio.wait_for(
             self.websocket.receive(),
-            timeout=self.idle_timeout_s,
+            timeout=resolved_timeout_s,
         )
         message_type = message.get("type")
         if message_type == "websocket.disconnect":
@@ -721,17 +754,17 @@ class MossTTSRealtimeSpeechWebSocketSession:
             frame_bytes = message.get("bytes")
             if (
                 isinstance(frame_bytes, (bytes, bytearray, memoryview))
-                and len(frame_bytes) > self.max_message_bytes
+                and len(frame_bytes) > resolved_max_bytes
             ):
                 raise ValueError(
-                    "MOSS-TTS-Realtime WebSocket message exceeds "
-                    f"{self.max_message_bytes} bytes"
+                    f"{message_kind} WebSocket message exceeds "
+                    f"{resolved_max_bytes} bytes"
                 )
             raise ValueError("speech WebSocket client messages must be text frames")
-        if len(raw.encode("utf-8")) > self.max_message_bytes:
+        if len(raw.encode("utf-8")) > resolved_max_bytes:
             raise ValueError(
-                "MOSS-TTS-Realtime WebSocket message exceeds "
-                f"{self.max_message_bytes} bytes"
+                f"{message_kind} WebSocket message exceeds "
+                f"{resolved_max_bytes} bytes"
             )
         return raw
 
@@ -799,10 +832,10 @@ def create_moss_tts_realtime_speech_ws_handler(
     limits: MossTTSRealtimeResourceLimits | None = None,
     realtime_input_stage: str | None = None,
 ) -> Callable[
-    [WebSocket, Client, SpeechRequestValidator, str, dict[str, Any]],
-    Awaitable[bool],
+    [WebSocket, Client, SpeechRequestValidator, str],
+    Awaitable[None],
 ]:
-    """Bind model-owned dependencies to the generic speech WebSocket hook."""
+    """Bind model-owned dependencies to the realtime speech endpoint."""
 
     if not callable(getattr(tokenizer, "encode", None)):
         raise TypeError("tokenizer must implement encode()")
@@ -814,8 +847,7 @@ def create_moss_tts_realtime_speech_ws_handler(
         client: Client,
         speech_service: SpeechRequestValidator,
         session_id: str,
-        initial_payload: dict[str, Any],
-    ) -> bool:
+    ) -> None:
         session = MossTTSRealtimeSpeechWebSocketSession(
             websocket,
             client=client,
@@ -825,8 +857,7 @@ def create_moss_tts_realtime_speech_ws_handler(
             limits=resolved_limits,
             realtime_input_stage=resolved_input_stage,
         )
-        await session.run(initial_payload)
-        return session.closed
+        await session.run()
 
     return handle
 

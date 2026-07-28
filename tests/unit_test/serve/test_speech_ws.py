@@ -421,17 +421,12 @@ def test_speech_websocket_rejects_missing_initial_config() -> None:
     assert event["param"] == "type"
 
 
-def test_unknown_explicit_speech_mode_does_not_fall_back_to_legacy() -> None:
-    client_impl = StreamingSpeechClient()
-    client = TestClient(create_app(client_impl, model_name="tts"))
+def test_realtime_speech_endpoint_is_not_mounted_without_handler() -> None:
+    client = TestClient(create_app(StreamingSpeechClient(), model_name="tts"))
 
-    with client.websocket_connect("/v1/audio/speech/stream") as websocket:
-        websocket.send_json({"type": "session.config", "session": {"mode": "unknown"}})
-        error = websocket.receive_json()
-
-    assert error["type"] == "error"
-    assert error["param"] == "mode"
-    assert client_impl.generated_prompts == []
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/v1/audio/speech/realtime"):
+            pass
 
 
 def test_speech_websocket_rejects_binary_client_frames() -> None:

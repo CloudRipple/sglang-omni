@@ -664,9 +664,9 @@ class PipelineConfig(BaseModel):
         """Return whether this pipeline can serve /v1/audio/translations."""
         return False
 
-    def build_speech_websocket_mode_handlers(self) -> dict[str, Any]:
-        """Build optional model-specific speech WebSocket mode handlers."""
-        return {}
+    def build_speech_realtime_handler(self) -> Any | None:
+        """Build an optional model-specific realtime speech handler."""
+        return None
 
     @property
     def gpu_placement(self) -> dict[str, int | list[int]]:

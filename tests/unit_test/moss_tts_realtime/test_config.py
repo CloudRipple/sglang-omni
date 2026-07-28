@@ -13,9 +13,6 @@ from sglang_omni.models.moss_tts_realtime.config import (
     MossTTSRealtimeResourceLimits,
     MossTTSRealtimeSplitPipelineConfig,
 )
-from sglang_omni.models.moss_tts_realtime.protocol import (
-    MOSS_TTS_REALTIME_SPEECH_WS_MODE,
-)
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.pipeline.realtime_coordinator import RealtimeCoordinator
 from sglang_omni.utils.imports import import_string
@@ -105,11 +102,10 @@ def test_pipeline_builds_model_owned_speech_websocket_handler(monkeypatch) -> No
     monkeypatch.setattr(text_delta, "load_moss_tts_realtime_text_tokenizer", _load)
     config = MossTTSRealtimePipelineConfig(model_path="fake-model")
 
-    handlers = config.build_speech_websocket_mode_handlers()
+    handler = config.build_speech_realtime_handler()
 
     assert loaded_paths == ["fake-model"]
-    assert list(handlers) == [MOSS_TTS_REALTIME_SPEECH_WS_MODE]
-    assert callable(handlers[MOSS_TTS_REALTIME_SPEECH_WS_MODE])
+    assert callable(handler)
 
 
 def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> None:

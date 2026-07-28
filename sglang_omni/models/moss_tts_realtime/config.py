@@ -205,10 +205,7 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
     def supports_uploaded_voice_references(self) -> bool:
         return True
 
-    def build_speech_websocket_mode_handlers(self) -> dict[str, Any]:
-        from sglang_omni.models.moss_tts_realtime.protocol import (
-            MOSS_TTS_REALTIME_SPEECH_WS_MODE,
-        )
+    def build_speech_realtime_handler(self) -> Any:
         from sglang_omni.models.moss_tts_realtime.speech_ws import (
             create_moss_tts_realtime_speech_ws_handler,
         )
@@ -217,15 +214,11 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         )
 
         tokenizer = load_moss_tts_realtime_text_tokenizer(self.model_path)
-        return {
-            MOSS_TTS_REALTIME_SPEECH_WS_MODE: (
-                create_moss_tts_realtime_speech_ws_handler(
-                    tokenizer=tokenizer,
-                    limits=self.limits,
-                    realtime_input_stage=self.realtime_input_stage,
-                )
-            )
-        }
+        return create_moss_tts_realtime_speech_ws_handler(
+            tokenizer=tokenizer,
+            limits=self.limits,
+            realtime_input_stage=self.realtime_input_stage,
+        )
 
 
 class MossTTSRealtimeColocatedPipelineConfig(MossTTSRealtimePipelineConfig):

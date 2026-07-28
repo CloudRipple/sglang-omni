@@ -18,33 +18,31 @@ from sglang_omni.models.moss_tts_realtime.protocol import (
 def test_session_config_payload_accepts_flat_and_nested_forms() -> None:
     flat = {
         "type": "session.config",
-        "mode": "moss_tts_realtime",
         "sample_rate": 24000,
     }
     nested = {
         "type": "session.config",
         "session": {
-            "mode": "moss_tts_realtime",
             "sample_rate": 24000,
         },
     }
 
     assert speech_websocket_session_config_payload(flat) == {
-        "mode": "moss_tts_realtime",
         "sample_rate": 24000,
     }
     assert speech_websocket_session_config_payload(nested) == nested["session"]
 
 
 def test_session_config_enforces_realtime_pcm_contract() -> None:
-    config = MossTTSRealtimeSpeechSessionConfig(mode="moss_tts_realtime")
+    config = MossTTSRealtimeSpeechSessionConfig()
 
     assert config.response_format == "pcm"
     assert config.stream_audio is True
     assert config.sample_rate == 24000
     with pytest.raises(ValidationError):
+        MossTTSRealtimeSpeechSessionConfig(mode="moss_tts_realtime")
+    with pytest.raises(ValidationError):
         MossTTSRealtimeSpeechSessionConfig(
-            mode="moss_tts_realtime",
             sample_rate=16000,
         )
 

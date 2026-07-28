@@ -18,15 +18,13 @@ from pydantic import (
 
 from sglang_omni.serve.protocol import SpeechReference
 
-MOSS_TTS_REALTIME_SPEECH_WS_MODE = "moss_tts_realtime"
-
 
 class _StrictWireModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class MossTTSRealtimeSpeechSessionConfig(_StrictWireModel):
-    """Strict public configuration for the realtime speech mode."""
+    """Strict public configuration for the realtime speech endpoint."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -34,7 +32,6 @@ class MossTTSRealtimeSpeechSessionConfig(_StrictWireModel):
         populate_by_name=True,
     )
 
-    mode: Literal["moss_tts_realtime"]
     model: str | None = None
     voice: str = Field(
         default="default",
@@ -165,7 +162,7 @@ MOSS_TTS_REALTIME_CLIENT_EVENT_TYPES: dict[str, type[MossTTSRealtimeClientEvent]
 def speech_websocket_session_config_payload(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return the flat config object accepted by both speech WS modes."""
+    """Return the flat config object accepted by the realtime endpoint."""
 
     raw_config = payload.get("session")
     if raw_config is None:
@@ -208,7 +205,6 @@ def moss_tts_realtime_event_fingerprint(
 
 __all__ = [
     "MOSS_TTS_REALTIME_CLIENT_EVENT_TYPES",
-    "MOSS_TTS_REALTIME_SPEECH_WS_MODE",
     "MossTTSRealtimeClientEvent",
     "MossTTSRealtimeInputDone",
     "MossTTSRealtimeInputEvent",
