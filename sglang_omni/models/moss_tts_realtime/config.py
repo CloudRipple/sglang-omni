@@ -148,6 +148,9 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
 
     codec_model_path: str = DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
     realtime_input_stage: str = "tts_engine"
+    cuda_graph: bool = True
+    cuda_graph_frames: list[int] | None = None
+    cuda_graph_min_free_gb: float = 3.0
     limits: MossTTSRealtimeResourceLimits = Field(
         default_factory=MossTTSRealtimeResourceLimits
     )
@@ -159,6 +162,17 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         super().model_post_init(__context)
         if not self.codec_model_path.strip():
             raise ValueError("codec_model_path must not be empty")
+        if self.cuda_graph_min_free_gb < 0:
+            raise ValueError("cuda_graph_min_free_gb must be non-negative")
+        if self.cuda_graph_frames is not None:
+            if not self.cuda_graph_frames:
+                raise ValueError("cuda_graph_frames must not be empty")
+            invalid = [frame for frame in self.cuda_graph_frames if frame < 1]
+            if invalid:
+                raise ValueError(
+                    "cuda_graph_frames entries must be positive integers, "
+                    f"got {invalid}"
+                )
         stage_by_name = {stage.name: stage for stage in self.stages}
         input_stage = stage_by_name.get(self.realtime_input_stage)
         if input_stage is None:
@@ -199,6 +213,11 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
             elif stage.factory.endswith("create_vocoder_executor"):
                 stage.factory_args["codec_model_path"] = self.codec_model_path
                 stage.factory_args["stream_slots"] = self.limits.max_active_turns
+                stage.factory_args["cuda_graph"] = self.cuda_graph
+                stage.factory_args["cuda_graph_frames"] = self.cuda_graph_frames
+                stage.factory_args["cuda_graph_min_free_gb"] = (
+                    self.cuda_graph_min_free_gb
+                )
 
     def supports_uploaded_voice_references(self) -> bool:
         return True

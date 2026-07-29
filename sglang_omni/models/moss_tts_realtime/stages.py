@@ -456,6 +456,9 @@ def create_vocoder_executor(
     stream_slots: int = 16,
     max_batch_size: int = 8,
     max_batch_wait_ms: int = 2,
+    cuda_graph: bool = True,
+    cuda_graph_frames: list[int] | None = None,
+    cuda_graph_min_free_gb: float = 3.0,
 ) -> MossTTSRealtimeStreamingVocoderScheduler:
     resolved_device = _resolve_codec_device(device, gpu_id)
     processor = load_moss_tts_realtime_processor(model_path)
@@ -464,10 +467,15 @@ def create_vocoder_executor(
         component="decoder",
         device=resolved_device,
     )
-    return MossTTSRealtimeStreamingVocoderScheduler(
+    scheduler = MossTTSRealtimeStreamingVocoderScheduler(
         codec,
         n_vq=int(processor.model_config.rvq),
         stream_slots=stream_slots,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
+        cuda_graph=cuda_graph,
+        cuda_graph_frames=cuda_graph_frames,
+        cuda_graph_min_free_gb=cuda_graph_min_free_gb,
     )
+    scheduler.warmup_now()
+    return scheduler

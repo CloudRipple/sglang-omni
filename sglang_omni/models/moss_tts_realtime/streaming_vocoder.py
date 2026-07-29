@@ -96,6 +96,11 @@ class _CodecStreamSession:
         self._leased_slots: set[int] = set()
         self._quarantined_slots: set[int] = set()
         self._closed = False
+        self._cg_runner: Any | None = None
+        self.warmup_attempted = False
+        self._cg_graph_frames: Counter[int] = Counter()
+        self._cg_eager_frames: Counter[int] = Counter()
+        self._cg_total_steps = 0
         self._exit_stack = contextlib.ExitStack()
         try:
             with torch.no_grad():
@@ -123,6 +128,54 @@ class _CodecStreamSession:
     @property
     def quarantined_slots(self) -> int:
         return len(self._quarantined_slots)
+
+    def warmup_cuda_graph(
+        self,
+        frames: list[int],
+        *,
+        min_free_gb: float = 3.0,
+    ) -> list[int]:
+        if self.warmup_attempted:
+            return self.captured_frames()
+        self.warmup_attempted = True
+        if self._closed or not frames:
+            return []
+
+        from sglang_omni.models.moss_tts_realtime.vocoder_cuda_graph import (
+            MossTTSRealtimeVocoderCudaGraphRunner,
+        )
+
+        self._cg_runner = MossTTSRealtimeVocoderCudaGraphRunner(
+            self._codec,
+            self._state_adapter,
+            batch_size=self._batch_size,
+            n_vq=self._n_vq,
+            max_frames=max(frames),
+            min_free_gb=min_free_gb,
+        )
+        try:
+            try:
+                self._cg_runner.warmup(frames)
+            finally:
+                self._state_adapter.reset_slots(
+                    list(range(self._batch_size)),
+                    batch_size=self._batch_size,
+                )
+        except Exception:
+            self._cg_runner = None
+            raise
+        captured = self._cg_runner.captured_frames()
+        if not captured:
+            self._cg_runner = None
+        return captured
+
+    def has_cuda_graph_runner(self) -> bool:
+        return bool(self._cg_runner and self._cg_runner.captured_frames())
+
+    def captured_frames(self) -> list[int]:
+        if self._cg_runner is None:
+            return []
+        return self._cg_runner.captured_frames()
 
     def acquire(self) -> int:
         if self._closed:
@@ -155,9 +208,26 @@ class _CodecStreamSession:
     def close(self) -> None:
         if self._closed:
             return
+        self._log_cuda_graph_stats()
         with torch.no_grad():
             self._exit_stack.close()
         self._closed = True
+
+    def _log_cuda_graph_stats(self) -> None:
+        graphed = sum(self._cg_graph_frames.values())
+        eager = sum(self._cg_eager_frames.values())
+        total = graphed + eager
+        if total == 0:
+            return
+        logger.info(
+            "MOSS-TTS-Realtime vocoder CUDA graph stats: %d/%d steps "
+            "graphed (%.1f%%); graph T=%s eager T=%s",
+            graphed,
+            total,
+            100.0 * graphed / total,
+            dict(sorted(self._cg_graph_frames.items())),
+            dict(sorted(self._cg_eager_frames.items())),
+        )
 
     def step(self, slot_codes: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
         if not slot_codes:
@@ -207,43 +277,83 @@ class _CodecStreamSession:
             exec_mask[slot] = True
 
         slots = list(slot_codes)
-        with torch.no_grad():
-            self._state_adapter.set_exec_mask(exec_mask)
-            result = self._codec._decode_frame(codes_batch, codes_lengths)
-        audio = getattr(result, "audio", None)
-        audio_lengths = getattr(result, "audio_lengths", None)
-        if not isinstance(audio, torch.Tensor) or not isinstance(
-            audio_lengths, torch.Tensor
-        ):
-            raise RuntimeError(
-                "MOSS-TTS-Realtime codec did not return audio/audio_lengths"
-            )
-        if audio.ndim != 3 or int(audio.shape[0]) != self._batch_size:
-            raise RuntimeError(
-                "MOSS-TTS-Realtime codec audio must have shape "
-                f"[{self._batch_size}, channels, samples]"
-            )
-        if int(audio.shape[1]) != 1:
-            raise RuntimeError(
-                f"MOSS-TTS-Realtime codec must emit mono audio, got {audio.shape[1]} channels"
-            )
-        if audio_lengths.ndim != 1 or int(audio_lengths.shape[0]) != self._batch_size:
-            raise RuntimeError(
-                "MOSS-TTS-Realtime codec audio_lengths must match fixed slots"
-            )
-
-        audio_cpu = audio[slots].detach().to(device="cpu", dtype=torch.float32)
-        lengths_cpu = audio_lengths[slots].detach().to(device="cpu")
-        expected_samples = step_frames * self._samples_per_frame
-        decoded: dict[int, torch.Tensor] = {}
-        for index, slot in enumerate(slots):
-            samples = int(lengths_cpu[index])
-            if samples != expected_samples:
+        graphed: tuple[torch.Tensor, torch.Tensor] | None = None
+        graph_failed = False
+        try:
+            with torch.no_grad():
+                if self._cg_runner is not None:
+                    try:
+                        graphed = self._cg_runner.decode_step(codes_batch, exec_mask)
+                    except Exception:
+                        graph_failed = True
+                        raise
+                if graphed is not None:
+                    audio, audio_lengths = graphed
+                else:
+                    self._state_adapter.set_exec_mask(exec_mask)
+                    result = self._codec._decode_frame(codes_batch, codes_lengths)
+                    audio = getattr(result, "audio", None)
+                    audio_lengths = getattr(result, "audio_lengths", None)
+            if not isinstance(audio, torch.Tensor) or not isinstance(
+                audio_lengths, torch.Tensor
+            ):
                 raise RuntimeError(
-                    "MOSS-TTS-Realtime codec returned an unexpected active length: "
-                    f"slot={slot} samples={samples} expected={expected_samples}"
+                    "MOSS-TTS-Realtime codec did not return audio/audio_lengths"
                 )
-            decoded[slot] = audio_cpu[index, :, :samples].contiguous()
+            if audio.ndim != 3 or int(audio.shape[0]) != self._batch_size:
+                raise RuntimeError(
+                    "MOSS-TTS-Realtime codec audio must have shape "
+                    f"[{self._batch_size}, channels, samples]"
+                )
+            if int(audio.shape[1]) != 1:
+                raise RuntimeError(
+                    "MOSS-TTS-Realtime codec must emit mono audio, got "
+                    f"{audio.shape[1]} channels"
+                )
+            if (
+                audio_lengths.ndim != 1
+                or int(audio_lengths.shape[0]) != self._batch_size
+            ):
+                raise RuntimeError(
+                    "MOSS-TTS-Realtime codec audio_lengths must match fixed slots"
+                )
+            audio_cpu = (
+                audio[slots]
+                .detach()
+                .to(
+                    device="cpu",
+                    dtype=torch.float32,
+                )
+            )
+            lengths_cpu = audio_lengths[slots].detach().to(device="cpu")
+            expected_samples = step_frames * self._samples_per_frame
+            decoded: dict[int, torch.Tensor] = {}
+            for index, slot in enumerate(slots):
+                samples = int(lengths_cpu[index])
+                if samples != expected_samples:
+                    raise RuntimeError(
+                        "MOSS-TTS-Realtime codec returned an unexpected active "
+                        f"length: slot={slot} samples={samples} "
+                        f"expected={expected_samples}"
+                    )
+                decoded[slot] = audio_cpu[index, :, :samples].contiguous()
+        except Exception:
+            if self._cg_runner is not None and (graph_failed or graphed is not None):
+                logger.exception(
+                    "MOSS-TTS-Realtime vocoder CUDA graph replay failed; "
+                    "disabling graphs for this codec session"
+                )
+                self._cg_runner = None
+            raise
+
+        if self._cg_runner is not None:
+            if graphed is None:
+                self._cg_eager_frames[step_frames] += 1
+            else:
+                self._cg_graph_frames[step_frames] += 1
+            self._cg_total_steps += 1
+            if self._cg_total_steps % 2000 == 0:
+                self._log_cuda_graph_stats()
         return decoded
 
     def decode_borrowed(
@@ -349,6 +459,9 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         stream_slots: int = 16,
         max_batch_size: int = 8,
         max_batch_wait_ms: int = 2,
+        cuda_graph: bool = True,
+        cuda_graph_frames: list[int] | None = None,
+        cuda_graph_min_free_gb: float = 3.0,
     ) -> None:
         if stream_slots < 1:
             raise ValueError(f"stream_slots must be >= 1, got {stream_slots}")
@@ -391,6 +504,28 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         self._stream_chunk_batch_max = self._stream_slots
         self._max_batch_size = max(int(max_batch_size), 1)
         self._session: _CodecStreamSession | None = None
+        self._cuda_graph = bool(cuda_graph)
+        self._cuda_graph_frames = (
+            [int(frame) for frame in cuda_graph_frames]
+            if cuda_graph_frames is not None
+            else None
+        )
+        self._cuda_graph_min_free_gb = float(cuda_graph_min_free_gb)
+        if self._cuda_graph_min_free_gb < 0:
+            raise ValueError("cuda_graph_min_free_gb must be non-negative")
+        if self._cuda_graph_frames is not None:
+            if not self._cuda_graph_frames:
+                raise ValueError("cuda_graph_frames must not be empty")
+            invalid = [
+                frame
+                for frame in self._cuda_graph_frames
+                if not 1 <= frame <= _STEADY_CHUNK_FRAMES
+            ]
+            if invalid:
+                raise ValueError(
+                    "cuda_graph_frames must be within the realtime codec step "
+                    f"range [1, {_STEADY_CHUNK_FRAMES}], got {invalid}"
+                )
         self._resource_totals: Counter[str] = Counter()
         self._active_slots_high_water = 0
         self._pending_frames_high_water = 0
@@ -418,6 +553,53 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             )
             self._resource_totals["codec_session_open_total"] += 1
         return self._session
+
+    def _cuda_graph_capture_frames(self) -> list[int]:
+        if self._cuda_graph_frames is not None:
+            return sorted(set(self._cuda_graph_frames))
+        return sorted(set(_CHUNK_RAMP))
+
+    def _codec_on_cuda(self) -> bool:
+        try:
+            return next(self._codec.parameters()).device.type == "cuda"
+        except StopIteration:
+            return False
+
+    def _ensure_session_graphed(self) -> _CodecStreamSession:
+        with self._state_lock:
+            session = self._ensure_session()
+            if (
+                self._cuda_graph
+                and not session.warmup_attempted
+                and self._codec_on_cuda()
+            ):
+                try:
+                    session.warmup_cuda_graph(
+                        self._cuda_graph_capture_frames(),
+                        min_free_gb=self._cuda_graph_min_free_gb,
+                    )
+                except Exception:
+                    logger.exception(
+                        "MOSS-TTS-Realtime vocoder CUDA graph capture failed; "
+                        "serving eager from this codec session"
+                    )
+            return session
+
+    def warmup_now(self) -> None:
+        """Capture codec graphs before the vocoder stage reports ready."""
+        if not self._cuda_graph or not self._codec_on_cuda():
+            return
+        session = self._ensure_session_graphed()
+        if session.has_cuda_graph_runner():
+            logger.info(
+                "MOSS-TTS-Realtime vocoder CUDA graphs captured at startup: T=%s",
+                session.captured_frames(),
+            )
+        else:
+            logger.warning(
+                "MOSS-TTS-Realtime vocoder CUDA graph startup capture produced no "
+                "graphs; serving eager"
+            )
 
     def _emit_codec_event(
         self,
@@ -461,6 +643,13 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             "codec_streaming_state_count": (
                 session.streaming_state_count if session is not None else 0
             ),
+            "codec_cuda_graph_enabled": self._cuda_graph,
+            "codec_cuda_graph_warmup_attempted": (
+                session.warmup_attempted if session is not None else False
+            ),
+            "codec_cuda_graph_captured_frames": (
+                session.captured_frames() if session is not None else []
+            ),
             "codec_resource_totals": totals,
             "codec_slot_acquire_total": totals.get("codec_slot_acquire_total", 0),
             "codec_slot_release_total": totals.get("codec_slot_release_total", 0),
@@ -494,7 +683,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             }
 
     def on_serving_start(self) -> None:
-        self._ensure_session()
+        self._ensure_session_graphed()
 
     def on_serving_stop(self) -> None:
         if self._session is not None:
@@ -505,7 +694,8 @@ class MossTTSRealtimeStreamingVocoderScheduler(
 
     def create_stream_state(self, request_id: str) -> _RealtimeStreamState:
         try:
-            slot = self._ensure_session().acquire()
+            session = self._ensure_session_graphed()
+            slot = session.acquire()
         except Exception as exc:
             self._resource_totals["codec_slot_acquire_error_total"] += 1
             if "exhausted" in str(exc).lower():
@@ -519,7 +709,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         self._resource_totals["codec_slot_acquire_total"] += 1
         self._active_slots_high_water = max(
             self._active_slots_high_water,
-            self._ensure_session().active_leases,
+            session.active_leases,
         )
         self._emit_codec_event(request_id, "slot_acquire", slot=slot)
         return _RealtimeStreamState(slot=slot)

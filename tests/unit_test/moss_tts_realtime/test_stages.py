@@ -693,7 +693,12 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
     calls: dict[str, Any] = {}
     codec = object()
     processor = SimpleNamespace(model_config=SimpleNamespace(rvq=16))
-    scheduler = object()
+
+    class FakeVocoderScheduler:
+        def warmup_now(self) -> None:
+            calls["warmup"] = calls.get("warmup", 0) + 1
+
+    scheduler = FakeVocoderScheduler()
 
     def fake_load_codec(
         model_path: str,
@@ -731,6 +736,9 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
         stream_slots=4,
         max_batch_size=3,
         max_batch_wait_ms=7,
+        cuda_graph=False,
+        cuda_graph_frames=[1, 3],
+        cuda_graph_min_free_gb=5.0,
     )
 
     assert result is scheduler
@@ -744,6 +752,10 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
                 "stream_slots": 4,
                 "max_batch_size": 3,
                 "max_batch_wait_ms": 7,
+                "cuda_graph": False,
+                "cuda_graph_frames": [1, 3],
+                "cuda_graph_min_free_gb": 5.0,
             },
         ),
+        "warmup": 1,
     }

@@ -16,6 +16,7 @@ from torch import nn
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
 from sglang_omni.models.moss_tts_realtime.streaming_vocoder import (
     MossTTSRealtimeStreamingVocoderScheduler,
+    _CodecStreamSession,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
@@ -140,6 +141,45 @@ class FakeLegacyCodec(nn.Module):
             batch[:, index, :frames] = codes[:num_quantizers]
             lengths[index] = frames
         return self._decode_frame(batch, lengths)
+
+
+class _FakeCudaGraphRunner:
+    def __init__(
+        self,
+        frames: list[int],
+        *,
+        fail: bool = False,
+        length_delta: int = 0,
+    ) -> None:
+        self._frames = sorted(set(frames))
+        self._fail = fail
+        self._length_delta = int(length_delta)
+        self.decode_calls: list[int] = []
+
+    def captured_frames(self) -> list[int]:
+        return list(self._frames)
+
+    def decode_step(
+        self,
+        codes: torch.Tensor,
+        exec_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        frame_count = int(codes.shape[2])
+        self.decode_calls.append(frame_count)
+        if self._fail:
+            raise RuntimeError("injected graph replay failure")
+        if frame_count not in self._frames:
+            return None
+        batch_size = int(codes.shape[1])
+        audio = torch.zeros(
+            batch_size,
+            1,
+            frame_count * SAMPLES_PER_FRAME,
+        )
+        audio_lengths = exec_mask.to(dtype=torch.long) * (
+            frame_count * SAMPLES_PER_FRAME + self._length_delta
+        )
+        return audio, audio_lengths
 
 
 def _rows(frames: int, *, seed: int) -> torch.Tensor:
@@ -532,6 +572,170 @@ def test_serving_start_opens_fixed_slot_codec_session() -> None:
     assert scheduler._session.free_slots == 3
     assert codec.streaming_batch_sizes == [3]
     scheduler.on_serving_stop()
+
+
+def test_codec_session_routes_captured_shapes_and_falls_back_to_eager() -> None:
+    codec = FakeLegacyCodec()
+    session = _CodecStreamSession(
+        codec,
+        stream_slots=1,
+        n_vq=N_VQ,
+        samples_per_frame=SAMPLES_PER_FRAME,
+    )
+    slot = session.acquire()
+    graph = _FakeCudaGraphRunner([1])
+    session._cg_runner = graph
+
+    graphed = session.step({slot: _rows(1, seed=91).transpose(0, 1)})[slot]
+    eager = session.step({slot: _rows(2, seed=92).transpose(0, 1)})[slot]
+
+    assert graphed.shape == (1, SAMPLES_PER_FRAME)
+    assert eager.shape == (1, 2 * SAMPLES_PER_FRAME)
+    assert graph.decode_calls == [1, 2]
+    assert codec.frame_calls == [((slot,), 2)]
+    assert session._cg_graph_frames == {1: 1}
+    assert session._cg_eager_frames == {2: 1}
+    session.release(slot)
+    session.close()
+
+
+def test_codec_session_disables_graph_after_replay_failure() -> None:
+    codec = FakeLegacyCodec()
+    session = _CodecStreamSession(
+        codec,
+        stream_slots=1,
+        n_vq=N_VQ,
+        samples_per_frame=SAMPLES_PER_FRAME,
+    )
+    slot = session.acquire()
+    session._cg_runner = _FakeCudaGraphRunner([1], fail=True)
+    codes = _rows(1, seed=93).transpose(0, 1)
+
+    with pytest.raises(RuntimeError, match="graph replay failure"):
+        session.step({slot: codes})
+
+    assert session._cg_runner is None
+    decoded = session.step({slot: codes})[slot]
+    assert decoded.shape == (1, SAMPLES_PER_FRAME)
+    assert codec.frame_calls == [((slot,), 1)]
+    session.release(slot)
+    session.close()
+
+
+def test_codec_session_disables_graph_after_invalid_replay_output() -> None:
+    codec = FakeLegacyCodec()
+    session = _CodecStreamSession(
+        codec,
+        stream_slots=1,
+        n_vq=N_VQ,
+        samples_per_frame=SAMPLES_PER_FRAME,
+    )
+    slot = session.acquire()
+    session._cg_runner = _FakeCudaGraphRunner([1], length_delta=1)
+
+    with pytest.raises(RuntimeError, match="unexpected active length"):
+        session.step({slot: _rows(1, seed=95).transpose(0, 1)})
+
+    assert session._cg_runner is None
+    session.release(slot)
+    session.close()
+
+
+def test_codec_session_attempts_cuda_graph_warmup_once(monkeypatch) -> None:
+    from sglang_omni.models.moss_tts_realtime import vocoder_cuda_graph
+
+    calls: list[tuple[list[int], float]] = []
+
+    class FakeCaptureRunner:
+        def __init__(self, *args: Any, min_free_gb: float, **kwargs: Any) -> None:
+            del args, kwargs
+            self._min_free_gb = min_free_gb
+            self._frames: list[int] = []
+
+        def warmup(self, frames: list[int]) -> None:
+            calls.append((list(frames), self._min_free_gb))
+            self._frames = list(frames)
+
+        def captured_frames(self) -> list[int]:
+            return list(self._frames)
+
+    monkeypatch.setattr(
+        vocoder_cuda_graph,
+        "MossTTSRealtimeVocoderCudaGraphRunner",
+        FakeCaptureRunner,
+    )
+    codec = FakeLegacyCodec()
+    session = _CodecStreamSession(
+        codec,
+        stream_slots=2,
+        n_vq=N_VQ,
+        samples_per_frame=SAMPLES_PER_FRAME,
+    )
+    slot = session.acquire()
+    session.step({slot: _rows(1, seed=94).transpose(0, 1)})
+
+    assert session.warmup_cuda_graph([1, 2], min_free_gb=4.5) == [1, 2]
+    assert session.warmup_cuda_graph([3], min_free_gb=8.0) == [1, 2]
+    assert calls == [([1, 2], 4.5)]
+    for module in codec.state_modules:
+        state = module._streaming_state
+        assert state is not None
+        assert torch.equal(state.offsets, torch.zeros(2, dtype=torch.long))
+    session.release(slot)
+    session.close()
+
+
+def test_scheduler_default_cuda_graph_frames_match_realtime_ramp(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[int], float]] = []
+    monkeypatch.setattr(
+        MossTTSRealtimeStreamingVocoderScheduler,
+        "_codec_on_cuda",
+        lambda self: True,
+    )
+
+    def fake_warmup(
+        self: _CodecStreamSession,
+        frames: list[int],
+        *,
+        min_free_gb: float = 3.0,
+    ) -> list[int]:
+        self.warmup_attempted = True
+        calls.append((list(frames), min_free_gb))
+        return []
+
+    monkeypatch.setattr(_CodecStreamSession, "warmup_cuda_graph", fake_warmup)
+    scheduler, _ = _scheduler(stream_slots=1)
+
+    scheduler.warmup_now()
+    scheduler.warmup_now()
+
+    assert calls == [([1, 2, 3], 3.0)]
+    assert scheduler._session is not None
+    assert scheduler._session.warmup_attempted
+    scheduler.on_serving_stop()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"cuda_graph_frames": []}, "must not be empty"),
+        ({"cuda_graph_frames": [0]}, "step range"),
+        ({"cuda_graph_frames": [4]}, "step range"),
+        ({"cuda_graph_min_free_gb": -1.0}, "non-negative"),
+    ],
+)
+def test_scheduler_rejects_invalid_cuda_graph_settings(
+    kwargs: dict[str, Any],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        MossTTSRealtimeStreamingVocoderScheduler(
+            FakeLegacyCodec(),
+            n_vq=N_VQ,
+            **kwargs,
+        )
 
 
 def test_idle_offline_batch_uses_full_batch_decode() -> None:

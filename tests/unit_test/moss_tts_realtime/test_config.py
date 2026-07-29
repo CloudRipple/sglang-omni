@@ -44,6 +44,9 @@ def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     assert stages["tts_engine"].factory_args["max_active_turns"] == 16
     assert stages["tts_engine"].factory_args["session_idle_ttl_s"] == 300.0
     assert stages["vocoder"].factory_args["stream_slots"] == 16
+    assert stages["vocoder"].factory_args["cuda_graph"] is True
+    assert stages["vocoder"].factory_args["cuda_graph_frames"] is None
+    assert stages["vocoder"].factory_args["cuda_graph_min_free_gb"] == 3.0
 
 
 def test_realtime_coordinator_factory_is_model_scoped() -> None:
@@ -199,6 +202,36 @@ def test_pipeline_rejects_empty_codec_path() -> None:
             model_path="fake-model",
             codec_model_path=" ",
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"cuda_graph_frames": []}, "must not be empty"),
+        ({"cuda_graph_frames": [0]}, "positive integers"),
+        ({"cuda_graph_min_free_gb": -1.0}, "non-negative"),
+    ],
+)
+def test_pipeline_rejects_invalid_codec_cuda_graph_settings(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(ValidationError, match=match):
+        MossTTSRealtimePipelineConfig(model_path="fake-model", **kwargs)
+
+
+def test_pipeline_threads_codec_cuda_graph_settings() -> None:
+    config = MossTTSRealtimePipelineConfig(
+        model_path="fake-model",
+        cuda_graph=False,
+        cuda_graph_frames=[1, 3],
+        cuda_graph_min_free_gb=5.5,
+    )
+    vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
+
+    assert vocoder.factory_args["cuda_graph"] is False
+    assert vocoder.factory_args["cuda_graph_frames"] == [1, 3]
+    assert vocoder.factory_args["cuda_graph_min_free_gb"] == 5.5
 
 
 def test_pipeline_realtime_input_stage_must_exist_and_accept_early_updates() -> None:
