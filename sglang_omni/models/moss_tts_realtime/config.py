@@ -21,6 +21,8 @@ DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
 
 _COLOCATED_TOTAL_GPU_MEMORY_FRACTION = 0.90
 _AR_MEM_FRACTION_STATIC = 0.85
+_REF_AUDIO_CACHE_MAX_ITEMS = 8192
+_REF_AUDIO_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 
 class MossTTSRealtimeResourceLimits(BaseModel):
@@ -151,6 +153,9 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
     cuda_graph: bool = True
     cuda_graph_frames: list[int] | None = None
     cuda_graph_min_free_gb: float = 3.0
+    ref_audio_cache: bool = True
+    ref_audio_cache_max_items: int = _REF_AUDIO_CACHE_MAX_ITEMS
+    ref_audio_cache_max_bytes: int = _REF_AUDIO_CACHE_MAX_BYTES
     limits: MossTTSRealtimeResourceLimits = Field(
         default_factory=MossTTSRealtimeResourceLimits
     )
@@ -162,6 +167,16 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         super().model_post_init(__context)
         if not self.codec_model_path.strip():
             raise ValueError("codec_model_path must not be empty")
+        if self.ref_audio_cache_max_items < 1:
+            raise ValueError(
+                "ref_audio_cache_max_items must be >= 1; got "
+                f"{self.ref_audio_cache_max_items}"
+            )
+        if self.ref_audio_cache_max_bytes < 1:
+            raise ValueError(
+                "ref_audio_cache_max_bytes must be >= 1; got "
+                f"{self.ref_audio_cache_max_bytes}"
+            )
         if self.cuda_graph_min_free_gb < 0:
             raise ValueError("cuda_graph_min_free_gb must be non-negative")
         if self.cuda_graph_frames is not None:
@@ -188,6 +203,13 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         for stage in self.stages:
             if stage.factory.endswith("create_preprocessing_executor"):
                 stage.factory_args["codec_model_path"] = self.codec_model_path
+                stage.factory_args.setdefault("ref_audio_cache", self.ref_audio_cache)
+                stage.factory_args.setdefault(
+                    "ref_audio_cache_max_items", self.ref_audio_cache_max_items
+                )
+                stage.factory_args.setdefault(
+                    "ref_audio_cache_max_bytes", self.ref_audio_cache_max_bytes
+                )
             elif stage.factory.endswith("create_sglang_tts_engine_executor"):
                 stage.factory_args["codec_model_path"] = self.codec_model_path
                 for key in (

@@ -7,7 +7,6 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-import numpy as np
 import pytest
 import torch
 
@@ -107,64 +106,6 @@ def test_engine_pre_infra_reuses_processor_model_config(monkeypatch) -> None:
 
     assert builder.processor is processor
     assert builder.context_length == 2048
-
-
-def test_audio_encoder_uses_codec_tensor_contract() -> None:
-    calls: list[tuple[torch.Tensor, dict[str, Any]]] = []
-    output = SimpleNamespace(audio_codes=torch.zeros((32, 1, 4), dtype=torch.long))
-
-    class FakeCodec:
-        config = SimpleNamespace(sampling_rate=24000)
-
-        def encode(self, values: torch.Tensor, **kwargs: Any) -> Any:
-            calls.append((values.detach().clone(), kwargs))
-            return output
-
-    encoder = stages.MossTTSRealtimeAudioEncoder(FakeCodec(), device="cpu")
-    stereo = np.stack([np.ones(32, dtype=np.float32), np.zeros(32, dtype=np.float32)])
-
-    result = encoder.encode(stereo)
-
-    assert result is output
-    assert len(calls) == 1
-    values, kwargs = calls[0]
-    assert values.shape == (1, 32)
-    assert values.dtype == torch.float32
-    assert torch.equal(values, torch.full((1, 32), 0.5))
-    assert kwargs == {"return_dict": True}
-
-
-def test_audio_encoder_normalizes_base64_mapping(monkeypatch) -> None:
-    seen: dict[str, Any] = {}
-
-    def fake_load_audio(source: Any, **kwargs: Any) -> np.ndarray:
-        seen["source"] = source
-        seen["kwargs"] = kwargs
-        return np.arange(12, dtype=np.float32)
-
-    class FakeCodec:
-        config = SimpleNamespace(sampling_rate=24000)
-
-        def encode(self, values: torch.Tensor, **kwargs: Any) -> Any:
-            seen["values"] = values.detach().clone()
-            seen["encode_kwargs"] = kwargs
-            return SimpleNamespace(
-                audio_codes=torch.zeros((32, 1, 1), dtype=torch.long)
-            )
-
-    monkeypatch.setattr(stages, "load_audio", fake_load_audio)
-    encoder = stages.MossTTSRealtimeAudioEncoder(FakeCodec(), device="cpu")
-
-    encoder.encode({"base64": "ZmFrZQ==", "media_type": "audio/flac"})
-
-    assert seen["source"] == "data:audio/flac;base64,ZmFrZQ=="
-    assert seen["kwargs"] == {
-        "source_name": "MOSS-TTS-Realtime reference",
-        "target_sample_rate": 24000,
-        "mono": True,
-    }
-    assert seen["values"].shape == (1, 12)
-    assert seen["encode_kwargs"] == {"return_dict": True}
 
 
 @pytest.mark.parametrize(
@@ -336,9 +277,11 @@ def test_codec_memory_estimate_scales_streaming_state_with_active_turns(
 
 def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> None:
     calls: dict[str, Any] = {}
-    processor = object()
+    processor = SimpleNamespace(model_config=SimpleNamespace(rvq=16))
     codec = object()
-    encoder = object()
+    codec_encoder = object()
+    audio_encoder = object()
+    reference_cache = object()
 
     def fake_load_processor(model_path: str) -> object:
         calls["processor_path"] = model_path
@@ -360,15 +303,66 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
         return codec
 
     class FakeAudioEncoder:
-        def __new__(cls, loaded_codec: Any, *, device: str) -> object:
-            calls["encoder"] = (loaded_codec, device)
-            return encoder
+        def __new__(
+            cls,
+            loaded_codec: Any,
+            *,
+            device: str,
+            num_quantizers: int,
+        ) -> object:
+            calls["encoder"] = (loaded_codec, device, num_quantizers)
+            return codec_encoder
 
-    def fake_set_context(*, processor: Any, audio_encoder: Any) -> None:
-        calls["context"] = (processor, audio_encoder)
+    class FakeBatchedEncoder:
+        def __new__(
+            cls,
+            loaded_encoder: Any,
+            *,
+            max_batch_size: int,
+            max_batch_wait_ms: int,
+        ) -> object:
+            calls["batched"] = (
+                loaded_encoder,
+                max_batch_size,
+                max_batch_wait_ms,
+            )
+            return audio_encoder
+
+    class FakeReferenceEncoder:
+        def __new__(
+            cls,
+            loaded_encoder: Any,
+            **kwargs: Any,
+        ) -> object:
+            calls["reference_cache"] = (loaded_encoder, kwargs)
+            return reference_cache
+
+    def fake_set_context(
+        *,
+        processor: Any,
+        audio_encoder: Any,
+        reference_encoder: Any,
+    ) -> None:
+        calls["context"] = (processor, audio_encoder, reference_encoder)
 
     monkeypatch.setattr(stages, "load_moss_tts_realtime_codec", fake_load_codec)
     monkeypatch.setattr(stages, "MossTTSRealtimeAudioEncoder", FakeAudioEncoder)
+    monkeypatch.setattr(
+        stages,
+        "BatchedMossTTSRealtimeAudioEncoder",
+        FakeBatchedEncoder,
+    )
+    monkeypatch.setattr(
+        stages,
+        "MossTTSRealtimeReferenceEncoder",
+        FakeReferenceEncoder,
+    )
+
+    def fake_resolve_codec(model_path: str) -> str:
+        calls["codec_source"] = model_path
+        return "/resolved-codec"
+
+    monkeypatch.setattr(stages, "resolve_moss_checkpoint", fake_resolve_codec)
     monkeypatch.setattr(
         stages,
         "set_moss_tts_realtime_preprocessing_context",
@@ -381,6 +375,10 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
         gpu_id=3,
         codec_model_path="codec",
         max_concurrency=6,
+        encode_batch_size=4,
+        encode_batch_wait_ms=7,
+        ref_audio_cache_max_items=17,
+        ref_audio_cache_max_bytes=4096,
     )
 
     assert isinstance(scheduler, SimpleScheduler)
@@ -392,10 +390,78 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
     assert scheduler._max_concurrency == 6
     assert calls == {
         "processor_path": "model",
-        "codec": ("codec", "encoder", "cuda:3"),
-        "encoder": (codec, "cuda:3"),
-        "context": (processor, encoder),
+        "codec_source": "codec",
+        "codec": ("/resolved-codec", "encoder", "cuda:3"),
+        "encoder": (codec, "cuda:3", 16),
+        "batched": (codec_encoder, 4, 7),
+        "reference_cache": (
+            audio_encoder,
+            {
+                "model_revision": "/resolved-codec",
+                "num_quantizers": 16,
+                "max_items": 17,
+                "max_bytes": 4096,
+            },
+        ),
+        "context": (processor, audio_encoder, reference_cache),
     }
+
+
+def test_create_preprocessing_executor_reference_cache_kill_switch(
+    monkeypatch,
+) -> None:
+    processor = SimpleNamespace(model_config=SimpleNamespace(rvq=16))
+    audio_encoder = object()
+    contexts: list[tuple[Any, Any]] = []
+    cache_calls = 0
+
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_realtime_processor",
+        lambda _: processor,
+    )
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_realtime_codec",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda path: path)
+    monkeypatch.setattr(
+        stages,
+        "MossTTSRealtimeAudioEncoder",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        stages,
+        "BatchedMossTTSRealtimeAudioEncoder",
+        lambda *args, **kwargs: audio_encoder,
+    )
+
+    def create_cache(*args: Any, **kwargs: Any) -> object:
+        nonlocal cache_calls
+        cache_calls += 1
+        return object()
+
+    monkeypatch.setattr(stages, "MossTTSRealtimeReferenceEncoder", create_cache)
+    monkeypatch.setattr(
+        stages,
+        "set_moss_tts_realtime_preprocessing_context",
+        lambda *, processor, audio_encoder, reference_encoder: contexts.append(
+            (audio_encoder, reference_encoder)
+        ),
+    )
+
+    stages.create_preprocessing_executor(
+        "model",
+        device="cpu",
+        ref_audio_cache=False,
+    )
+    assert contexts[-1] == (audio_encoder, audio_encoder)
+
+    monkeypatch.setenv("MOSS_REF_AUDIO_CACHE", "0")
+    stages.create_preprocessing_executor("model", device="cpu")
+    assert contexts[-1] == (audio_encoder, audio_encoder)
+    assert cache_calls == 0
 
 
 def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(

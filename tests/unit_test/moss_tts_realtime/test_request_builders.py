@@ -321,9 +321,88 @@ def test_raw_waveform_is_encoded_instead_of_misclassified_as_codes() -> None:
     assert prepared.voice_codes.shape == (5, N_VQ)
 
 
+def test_voice_reference_and_user_audio_use_distinct_encoders() -> None:
+    processor = FakeProcessor()
+    reference_encoder = RecordingAudioEncoder(frames=3)
+    audio_encoder = RecordingAudioEncoder(frames=2)
+    state = MossTTSRealtimeState(
+        session_id="session",
+        turn_id="turn",
+        ref_audio="voice.wav",
+        user_text="user context",
+        user_audio="user.wav",
+        initial_token_ids=[1],
+    )
+
+    prepared = rb.prepare_moss_tts_realtime_state(
+        state,
+        processor=processor,
+        audio_encoder=audio_encoder,
+        reference_encoder=reference_encoder,
+    )
+
+    assert reference_encoder.calls == ["voice.wav"]
+    assert audio_encoder.calls == ["user.wav"]
+    assert prepared.voice_codes is not None
+    assert prepared.voice_codes.shape == (3, N_VQ)
+    assert prepared.user_audio_codes is not None
+    assert prepared.user_audio_codes.shape == (2, N_VQ)
+
+
+def test_falsey_reference_encoder_is_not_replaced() -> None:
+    class FalseyAudioEncoder(RecordingAudioEncoder):
+        def __bool__(self) -> bool:
+            return False
+
+    processor = FakeProcessor()
+    reference_encoder = FalseyAudioEncoder(frames=3)
+    audio_encoder = RecordingAudioEncoder(frames=2)
+    state = MossTTSRealtimeState(
+        session_id="session",
+        turn_id="turn",
+        ref_audio="voice.wav",
+        initial_token_ids=[1],
+    )
+
+    prepared = rb.prepare_moss_tts_realtime_state(
+        state,
+        processor=processor,
+        audio_encoder=audio_encoder,
+        reference_encoder=reference_encoder,
+    )
+
+    assert reference_encoder.calls == ["voice.wav"]
+    assert audio_encoder.calls == []
+    assert prepared.voice_codes is not None
+    assert prepared.voice_codes.shape == (3, N_VQ)
+
+
+def test_later_turn_skips_unused_voice_reference_encode() -> None:
+    processor = FakeProcessor()
+    reference_encoder = RecordingAudioEncoder()
+    state = MossTTSRealtimeState(
+        session_id="session",
+        turn_id="turn-2",
+        turn_index=1,
+        ref_audio="voice.wav",
+        initial_token_ids=[1],
+    )
+
+    prepared = rb.prepare_moss_tts_realtime_state(
+        state,
+        processor=processor,
+        reference_encoder=reference_encoder,
+    )
+
+    assert reference_encoder.calls == []
+    assert prepared.voice_codes is None
+    assert prepared.include_system_prompt is False
+
+
 def test_preencoded_nested_codes_bypass_audio_encoder() -> None:
     processor = FakeProcessor()
     encoder = RecordingAudioEncoder()
+    reference_encoder = RecordingAudioEncoder()
     state = MossTTSRealtimeState(
         session_id="session",
         turn_id="turn",
@@ -335,9 +414,11 @@ def test_preencoded_nested_codes_bypass_audio_encoder() -> None:
         state,
         processor=processor,
         audio_encoder=encoder,
+        reference_encoder=reference_encoder,
     )
 
     assert encoder.calls == []
+    assert reference_encoder.calls == []
     assert prepared.voice_codes is not None
     np.testing.assert_array_equal(prepared.voice_codes.numpy(), _codes(3))
 
@@ -549,8 +630,9 @@ def test_abort_or_context_reset_during_preprocessing_leaves_no_stale_marker(
         *,
         processor: object,
         audio_encoder: object = None,
+        reference_encoder: object = None,
     ) -> rb.MossTTSRealtimePreparedRequest:
-        del processor, audio_encoder
+        del processor, audio_encoder, reference_encoder
         rb.cleanup_prepared_moss_tts_realtime_request(payload.request_id)
         rows = torch.full((1, ROW_WIDTH), MOSS_TTS_REALTIME_AUDIO_PAD_TOKEN_ID)
         rows[0, 0] = 1
@@ -581,8 +663,9 @@ def test_abort_or_context_reset_during_preprocessing_leaves_no_stale_marker(
         *,
         processor: object,
         audio_encoder: object = None,
+        reference_encoder: object = None,
     ) -> rb.MossTTSRealtimePreparedRequest:
-        del payload, processor, audio_encoder
+        del payload, processor, audio_encoder, reference_encoder
         rb.clear_moss_tts_realtime_preprocessing_context()
         return fake_prepare_result()
 

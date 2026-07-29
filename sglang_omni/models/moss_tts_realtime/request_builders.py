@@ -50,6 +50,7 @@ def _processor_model_config(processor: Any) -> Any:
 class MossTTSRealtimePreprocessingContext:
     processor: Any
     audio_encoder: Any | None = None
+    reference_encoder: Any | None = None
 
 
 @dataclass
@@ -202,7 +203,10 @@ def _validate_processor_contract(processor: Any) -> None:
 
 
 def set_moss_tts_realtime_preprocessing_context(
-    *, processor: Any, audio_encoder: Any | None = None
+    *,
+    processor: Any,
+    audio_encoder: Any | None = None,
+    reference_encoder: Any | None = None,
 ) -> None:
     """Install the process-local processor/encoder used by prepared handoff."""
 
@@ -212,6 +216,7 @@ def set_moss_tts_realtime_preprocessing_context(
         MossTTSRealtimePreprocessingContext(
             processor=processor,
             audio_encoder=audio_encoder,
+            reference_encoder=reference_encoder,
         )
     )
 
@@ -562,7 +567,7 @@ def normalize_moss_tts_realtime_audio_codes(
         raise ValueError("audio codes must have rank 2 or rank 3")
 
     if codes.ndim != 2 or codes.shape[1] != num_codebooks:
-        raise ValueError("audio codes must normalize to shape " f"[T, {num_codebooks}]")
+        raise ValueError(f"audio codes must normalize to shape [T, {num_codebooks}]")
     if codes.shape[0] == 0:
         raise ValueError("audio codes must contain at least one frame")
     codes = np.ascontiguousarray(codes, dtype=np.int64)
@@ -853,6 +858,7 @@ def prepare_moss_tts_realtime_state(
     *,
     processor: Any,
     audio_encoder: Any | None = None,
+    reference_encoder: Any | None = None,
 ) -> MossTTSRealtimePreparedRequest:
     """Pure heavy-lowering step, separated for parity tests and worker use."""
 
@@ -866,12 +872,19 @@ def prepare_moss_tts_realtime_state(
     if state.initial_text is not None and not isinstance(state.initial_text, str):
         raise TypeError("initial_text must be a string")
 
-    voice_codes_np = _resolve_audio_codes(
-        state.ref_audio,
-        audio_encoder=audio_encoder,
-        num_codebooks=int(model_config.rvq),
-        codebook_size=int(model_config.audio_pad_token),
-        name="voice reference",
+    include_system_prompt = turn_index == 0
+    voice_codes_np = (
+        _resolve_audio_codes(
+            state.ref_audio,
+            audio_encoder=(
+                reference_encoder if reference_encoder is not None else audio_encoder
+            ),
+            num_codebooks=int(model_config.rvq),
+            codebook_size=int(model_config.audio_pad_token),
+            name="voice reference",
+        )
+        if include_system_prompt
+        else None
     )
     user_codes_np = _resolve_audio_codes(
         state.user_audio,
@@ -880,7 +893,6 @@ def prepare_moss_tts_realtime_state(
         codebook_size=int(model_config.audio_pad_token),
         name="user audio",
     )
-    include_system_prompt = turn_index == 0
     prompt_rows_np = build_moss_tts_realtime_turn_prompt(
         processor=processor,
         voice_codes=voice_codes_np,
@@ -933,6 +945,7 @@ def prepare_moss_tts_realtime_request(
     *,
     processor: Any,
     audio_encoder: Any | None = None,
+    reference_encoder: Any | None = None,
 ) -> MossTTSRealtimePreparedRequest:
     model_config = _processor_model_config(processor)
     state = build_moss_tts_realtime_state(
@@ -943,6 +956,7 @@ def prepare_moss_tts_realtime_request(
         state,
         processor=processor,
         audio_encoder=audio_encoder,
+        reference_encoder=reference_encoder,
     )
 
 
@@ -962,6 +976,7 @@ def preprocess_moss_tts_realtime_payload(payload: StagePayload) -> StagePayload:
             payload,
             processor=context.processor,
             audio_encoder=context.audio_encoder,
+            reference_encoder=context.reference_encoder,
         )
     except BaseException:
         _QUEUE.fail_inflight(request_id)

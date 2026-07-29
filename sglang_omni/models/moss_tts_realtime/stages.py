@@ -4,13 +4,12 @@
 from __future__ import annotations
 
 import logging
-import threading
+import os
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from numbers import Integral
 from typing import Any, Literal
 
-import numpy as np
 import torch
 
 from sglang_omni.models.moss_tts.hf_loading import (
@@ -20,6 +19,11 @@ from sglang_omni.models.moss_tts.hf_loading import (
 from sglang_omni.models.moss_tts_realtime.config import (
     DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
     MossTTSRealtimeResourceLimits,
+)
+from sglang_omni.models.moss_tts_realtime.reference_encoder import (
+    BatchedMossTTSRealtimeAudioEncoder,
+    MossTTSRealtimeAudioEncoder,
+    MossTTSRealtimeReferenceEncoder,
 )
 from sglang_omni.models.moss_tts_realtime.request_builders import (
     cleanup_prepared_moss_tts_realtime_request,
@@ -31,7 +35,6 @@ from sglang_omni.models.moss_tts_realtime.streaming_vocoder import (
 )
 from sglang_omni.models.weight_loader import load_module
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
-from sglang_omni.utils.audio import load_audio
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,6 @@ _INSTALL_HINT = (
     "MOSS-TTS-Realtime requires the trusted custom code published with the "
     "model and OpenMOSS-Team/MOSS-Audio-Tokenizer."
 )
-_MAX_REFERENCE_SECONDS = 100.0
 _DEFAULT_LIMITS = MossTTSRealtimeResourceLimits()
 
 
@@ -294,79 +296,6 @@ def load_moss_tts_realtime_processor(model_path: str) -> Any:
     return processor
 
 
-def _normalize_audio_source(value: Any) -> Any:
-    if not isinstance(value, Mapping):
-        return value
-    for key in ("audio", "audio_path", "path", "bytes"):
-        candidate = value.get(key)
-        if candidate is not None:
-            return candidate
-    encoded = value.get("base64") or value.get("data")
-    if encoded is not None:
-        if isinstance(encoded, str) and encoded.startswith("data:"):
-            return encoded
-        media_type = value.get("media_type") or "audio/wav"
-        return f"data:{media_type};base64,{encoded}"
-    raise ValueError("audio reference mapping contains no supported audio source")
-
-
-class MossTTSRealtimeAudioEncoder:
-    """Serialize reference encoding through the checkpoint's legacy codec."""
-
-    def __init__(self, codec: Any, *, device: str) -> None:
-        self.codec = codec
-        self.device = torch.device(device)
-        self._lock = threading.Lock()
-        config = getattr(codec, "config", None)
-        if config is None:
-            raise ValueError("MOSS-TTS-Realtime codec must expose config")
-        self.sample_rate = int(
-            getattr(config, "sampling_rate", 0) or getattr(config, "sample_rate", 0)
-        )
-        if self.sample_rate < 1:
-            raise ValueError("MOSS-TTS-Realtime codec sample rate must be positive")
-
-    def _waveform(self, value: Any) -> torch.Tensor:
-        source = _normalize_audio_source(value)
-        if isinstance(source, torch.Tensor):
-            waveform = source.detach().to(dtype=torch.float32, device="cpu")
-        elif isinstance(source, np.ndarray):
-            waveform = torch.from_numpy(np.ascontiguousarray(source, dtype=np.float32))
-        else:
-            waveform = torch.from_numpy(
-                load_audio(
-                    source,
-                    source_name="MOSS-TTS-Realtime reference",
-                    target_sample_rate=self.sample_rate,
-                    mono=True,
-                )
-            )
-        if waveform.ndim == 2:
-            waveform = (
-                waveform.mean(dim=0) if waveform.shape[0] > 1 else waveform.squeeze(0)
-            )
-        if waveform.ndim != 1:
-            raise ValueError("reference waveform must normalize to mono rank 1")
-        waveform = waveform.contiguous().to(dtype=torch.float32)
-        if waveform.numel() == 0:
-            raise ValueError("reference waveform must not be empty")
-        duration_s = waveform.numel() / self.sample_rate
-        if duration_s > _MAX_REFERENCE_SECONDS:
-            raise ValueError(
-                f"reference audio is {duration_s:.1f}s long, limit is "
-                f"{_MAX_REFERENCE_SECONDS:.0f}s"
-            )
-        return waveform
-
-    def encode(self, value: Any) -> Any:
-        waveform = self._waveform(value).to(self.device)
-        with self._lock, torch.inference_mode():
-            return self.codec.encode(
-                waveform.unsqueeze(0),
-                return_dict=True,
-            )
-
-
 def create_preprocessing_executor(
     model_path: str,
     *,
@@ -374,18 +303,55 @@ def create_preprocessing_executor(
     gpu_id: int | None = None,
     codec_model_path: str | None = None,
     max_concurrency: int = 8,
+    encode_batch_size: int = 8,
+    encode_batch_wait_ms: int = 4,
+    ref_audio_cache: bool = True,
+    ref_audio_cache_max_items: int = 8192,
+    ref_audio_cache_max_bytes: int = 64 * 1024 * 1024,
 ) -> SimpleScheduler:
+    # Ops kill switch / A-B toggle; unset preserves the config value.
+    env_toggle = os.environ.get("MOSS_REF_AUDIO_CACHE")
+    if env_toggle is not None:
+        ref_audio_cache = env_toggle.strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+            "",
+        )
     resolved_device = _resolve_codec_device(device, gpu_id)
     processor = load_moss_tts_realtime_processor(model_path)
+    codec_source = codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
+    codec_checkpoint = str(resolve_moss_checkpoint(codec_source))
     codec = load_moss_tts_realtime_codec(
-        codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
+        codec_checkpoint,
         component="encoder",
         device=resolved_device,
     )
-    audio_encoder = MossTTSRealtimeAudioEncoder(codec, device=resolved_device)
+    num_quantizers = int(processor.model_config.rvq)
+    codec_encoder = MossTTSRealtimeAudioEncoder(
+        codec,
+        device=resolved_device,
+        num_quantizers=num_quantizers,
+    )
+    audio_encoder = BatchedMossTTSRealtimeAudioEncoder(
+        codec_encoder,
+        max_batch_size=encode_batch_size,
+        max_batch_wait_ms=encode_batch_wait_ms,
+    )
+    reference_encoder: Any = audio_encoder
+    if ref_audio_cache:
+        reference_encoder = MossTTSRealtimeReferenceEncoder(
+            audio_encoder,
+            model_revision=codec_checkpoint,
+            num_quantizers=num_quantizers,
+            max_items=ref_audio_cache_max_items,
+            max_bytes=ref_audio_cache_max_bytes,
+        )
     set_moss_tts_realtime_preprocessing_context(
         processor=processor,
         audio_encoder=audio_encoder,
+        reference_encoder=reference_encoder,
     )
     return SimpleScheduler(
         preprocess_moss_tts_realtime_payload,

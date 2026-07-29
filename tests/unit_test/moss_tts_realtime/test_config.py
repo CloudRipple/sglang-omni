@@ -39,6 +39,12 @@ def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     assert stages["preprocessing"].factory_args["codec_model_path"] == (
         DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
     )
+    assert stages["preprocessing"].factory_args["ref_audio_cache"] is True
+    assert stages["preprocessing"].factory_args["ref_audio_cache_max_items"] == 8192
+    assert (
+        stages["preprocessing"].factory_args["ref_audio_cache_max_bytes"]
+        == 64 * 1024 * 1024
+    )
     assert stages["tts_engine"].factory_args["codec_model_path"] == (
         DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
     )
@@ -106,6 +112,39 @@ def test_codec_model_path_is_shared_by_all_codec_consumers() -> None:
     for stage in config.stages:
         if stage.name in {"preprocessing", "tts_engine", "vocoder"}:
             assert stage.factory_args["codec_model_path"] == "custom-codec"
+
+
+def test_pipeline_threads_reference_cache_settings() -> None:
+    config = MossTTSRealtimePipelineConfig(
+        model_path="fake-model",
+        ref_audio_cache=False,
+        ref_audio_cache_max_items=17,
+        ref_audio_cache_max_bytes=4096,
+    )
+    preprocessing = next(
+        stage
+        for stage in config.stages
+        if stage.factory.endswith("create_preprocessing_executor")
+    )
+
+    assert preprocessing.factory_args["ref_audio_cache"] is False
+    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 17
+    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 4096
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"ref_audio_cache_max_items": 0}, "ref_audio_cache_max_items"),
+        ({"ref_audio_cache_max_bytes": 0}, "ref_audio_cache_max_bytes"),
+    ],
+)
+def test_pipeline_rejects_invalid_reference_cache_settings(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(ValidationError, match=match):
+        MossTTSRealtimePipelineConfig(model_path="fake-model", **kwargs)
 
 
 def test_pipeline_builds_model_owned_speech_websocket_handler(monkeypatch) -> None:
