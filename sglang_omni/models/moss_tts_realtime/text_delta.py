@@ -6,9 +6,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from numbers import Integral
 from typing import Any
 
 DEFAULT_MOSS_TTS_REALTIME_TOKEN_HOLDBACK = 3
+
+# One MOSS-TTS-Realtime tokenizer is loaded per server process.
+_TOKENIZER_VOCAB_SIZE: int | None = None
 
 
 def moss_tts_realtime_tokenizer_size(tokenizer: Any) -> int | None:
@@ -16,17 +20,36 @@ def moss_tts_realtime_tokenizer_size(tokenizer: Any) -> int | None:
 
     try:
         size = len(tokenizer)
-    except (TypeError, AttributeError):
+    except (AttributeError, TypeError, NotImplementedError):
         size = getattr(tokenizer, "vocab_size", None)
-    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+    if isinstance(size, bool) or not isinstance(size, Integral) or int(size) < 1:
         return None
-    return size
+    return int(size)
+
+
+def initialize_moss_tts_realtime_tokenizer_vocab_size(tokenizer: Any) -> int:
+    """Record the process-wide tokenizer size once during service startup."""
+
+    global _TOKENIZER_VOCAB_SIZE
+    if _TOKENIZER_VOCAB_SIZE is None:
+        vocab_size = moss_tts_realtime_tokenizer_size(tokenizer)
+        if vocab_size is None:
+            raise ValueError("tokenizer must expose a positive vocabulary size")
+        _TOKENIZER_VOCAB_SIZE = vocab_size
+    return _TOKENIZER_VOCAB_SIZE
+
+
+def get_moss_tts_realtime_tokenizer_vocab_size() -> int:
+    """Return the vocabulary size initialized for this server process."""
+
+    if _TOKENIZER_VOCAB_SIZE is None:
+        raise RuntimeError("MOSS-TTS-Realtime tokenizer size is not initialized")
+    return _TOKENIZER_VOCAB_SIZE
 
 
 def validate_moss_tts_realtime_text_token_ids(
     token_ids: Sequence[Any],
     *,
-    tokenizer: Any,
     allow_empty: bool = False,
     name: str = "token_ids",
 ) -> tuple[int, ...]:
@@ -40,13 +63,13 @@ def validate_moss_tts_realtime_text_token_ids(
     if not normalized and not allow_empty:
         raise ValueError(f"{name} must not be empty")
 
-    vocab_size = moss_tts_realtime_tokenizer_size(tokenizer)
+    vocab_size = get_moss_tts_realtime_tokenizer_vocab_size()
     for index, token_id in enumerate(normalized):
         if isinstance(token_id, bool) or not isinstance(token_id, int):
             raise TypeError(f"{name}[{index}] must be an integer")
         if token_id < 0:
             raise ValueError(f"{name}[{index}] must be non-negative")
-        if vocab_size is not None and token_id >= vocab_size:
+        if token_id >= vocab_size:
             raise ValueError(
                 f"{name}[{index}]={token_id} exceeds tokenizer size {vocab_size}"
             )
@@ -105,6 +128,7 @@ class MossTTSRealtimeTextDeltaTokenizer:
                 raise ValueError(f"{name} must be positive")
 
         self.tokenizer = tokenizer
+        initialize_moss_tts_realtime_tokenizer_vocab_size(tokenizer)
         self.hold_back = hold_back
         self.max_text_bytes = max_text_bytes
         self.max_token_ids = max_token_ids
@@ -205,7 +229,6 @@ class MossTTSRealtimeTextDeltaTokenizer:
         raw_ids = self.tokenizer.encode(text, add_special_tokens=False)
         token_ids = validate_moss_tts_realtime_text_token_ids(
             raw_ids,
-            tokenizer=self.tokenizer,
             allow_empty=True,
             name="encoded token_ids",
         )

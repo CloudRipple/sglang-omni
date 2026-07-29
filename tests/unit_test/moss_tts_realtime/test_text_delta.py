@@ -6,6 +6,7 @@ import itertools
 
 import pytest
 
+from sglang_omni.models.moss_tts_realtime import text_delta
 from sglang_omni.models.moss_tts_realtime.text_delta import (
     MossTTSRealtimeTextDeltaTokenizer,
     validate_moss_tts_realtime_text_token_ids,
@@ -17,7 +18,11 @@ class BoundaryTokenizer:
 
     vocab_size = 10000
 
+    def __init__(self) -> None:
+        self.len_calls = 0
+
     def __len__(self) -> int:
+        self.len_calls += 1
         return self.vocab_size
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
@@ -33,6 +38,11 @@ class BoundaryTokenizer:
             ids.append(1 + ord(text[index]) % 4999)
             index += 1
         return ids
+
+
+@pytest.fixture(autouse=True)
+def _clear_tokenizer_vocab_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_delta, "_TOKENIZER_VOCAB_SIZE", None)
 
 
 def _stream_ids(text: str, chunks: list[str]) -> tuple[int, ...]:
@@ -102,6 +112,21 @@ def test_bytes_wait_for_the_next_stable_token_update() -> None:
     assert result.byte_count == len("abcdef".encode())
 
 
+def test_delta_tokenizer_reuses_cached_vocab_size() -> None:
+    tokenizer = BoundaryTokenizer()
+    delta = MossTTSRealtimeTextDeltaTokenizer(
+        tokenizer,
+        max_text_bytes=100,
+        max_token_ids=100,
+    )
+
+    delta.push_delta("ab")
+    delta.push_delta("cd")
+    delta.flush()
+
+    assert tokenizer.len_calls == 1
+
+
 def test_snapshot_restores_tokenizer_state_after_failed_admission() -> None:
     delta = MossTTSRealtimeTextDeltaTokenizer(
         BoundaryTokenizer(),
@@ -163,17 +188,13 @@ def test_delta_limits_are_transactional() -> None:
     ],
 )
 def test_direct_token_validation_is_strict(token_ids: list[int], error: str) -> None:
+    text_delta.initialize_moss_tts_realtime_tokenizer_vocab_size(BoundaryTokenizer())
     with pytest.raises((TypeError, ValueError), match=error):
-        validate_moss_tts_realtime_text_token_ids(
-            token_ids,
-            tokenizer=BoundaryTokenizer(),
-        )
+        validate_moss_tts_realtime_text_token_ids(token_ids)
 
 
 def test_direct_token_validation_preserves_ids_exactly() -> None:
     token_ids = [1, 9999, 42]
+    text_delta.initialize_moss_tts_realtime_tokenizer_vocab_size(BoundaryTokenizer())
 
-    assert validate_moss_tts_realtime_text_token_ids(
-        token_ids,
-        tokenizer=BoundaryTokenizer(),
-    ) == tuple(token_ids)
+    assert validate_moss_tts_realtime_text_token_ids(token_ids) == tuple(token_ids)

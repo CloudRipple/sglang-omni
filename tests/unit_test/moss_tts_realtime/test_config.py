@@ -18,6 +18,11 @@ from sglang_omni.pipeline.realtime_coordinator import RealtimeCoordinator
 from sglang_omni.utils.imports import import_string
 
 
+@pytest.fixture(autouse=True)
+def _clear_tokenizer_vocab_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_delta, "_TOKENIZER_VOCAB_SIZE", None)
+
+
 def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     config = MossTTSRealtimePipelineConfig(model_path="fake-model")
     stages = {stage.name: stage for stage in config.stages}
@@ -107,6 +112,8 @@ def test_pipeline_builds_model_owned_speech_websocket_handler(monkeypatch) -> No
     loaded_paths: list[str] = []
 
     class _Tokenizer:
+        vocab_size = 100
+
         def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
             del text, add_special_tokens
             return []

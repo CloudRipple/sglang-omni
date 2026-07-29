@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
 
 from sglang_omni.client import GenerateChunk
+from sglang_omni.models.moss_tts_realtime import text_delta
 from sglang_omni.models.moss_tts_realtime.protocol import MossTTSRealtimeTurnStart
 from sglang_omni.models.moss_tts_realtime.speech_ws import (
     MossTTSRealtimeSpeechWebSocketSession,
@@ -23,7 +24,11 @@ from sglang_omni.serve import create_app
 class BoundaryTokenizer:
     vocab_size = 10000
 
+    def __init__(self) -> None:
+        self.len_calls = 0
+
     def __len__(self) -> int:
+        self.len_calls += 1
         return self.vocab_size
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
@@ -39,6 +44,11 @@ class BoundaryTokenizer:
             ids.append(1 + ord(text[index]) % 8999)
             index += 1
         return ids
+
+
+@pytest.fixture(autouse=True)
+def _clear_tokenizer_vocab_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_delta, "_TOKENIZER_VOCAB_SIZE", None)
 
 
 def _realtime_handler(
@@ -264,12 +274,14 @@ def test_realtime_endpoint_requires_session_config_first() -> None:
 def test_realtime_endpoint_streams_two_turns_and_preserves_input_ids() -> None:
     client_impl = RealtimeSpeechClient()
     tokenizer = BoundaryTokenizer()
+    handler = _realtime_handler(tokenizer)
+    assert tokenizer.len_calls == 1
     client = TestClient(
         create_app(
             client_impl,
             model_name="tts",
             architectures=["MossTTSRealtime"],
-            speech_realtime_handler=_realtime_handler(tokenizer),
+            speech_realtime_handler=handler,
         )
     )
 
@@ -390,6 +402,7 @@ def test_realtime_endpoint_streams_two_turns_and_preserves_input_ids() -> None:
     assert len(client_impl.requests) == 2
     assert len(client_impl.closed_sessions) == 1
     assert client_impl.closed_sessions[0][1] == "tts_engine"
+    assert tokenizer.len_calls == 1
 
 
 def test_realtime_custom_input_stage_is_used_for_updates_and_session_close() -> None:

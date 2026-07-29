@@ -38,6 +38,7 @@ from sglang_omni.models.moss_tts_realtime.request_state import (
 from sglang_omni.models.moss_tts_realtime.text_delta import (
     MossTTSRealtimeTextDeltaSnapshot,
     MossTTSRealtimeTextDeltaTokenizer,
+    initialize_moss_tts_realtime_tokenizer_vocab_size,
     validate_moss_tts_realtime_text_token_ids,
 )
 from sglang_omni.proto import InputUpdateMessage
@@ -99,6 +100,7 @@ class MossTTSRealtimeSpeechWebSocketSession:
         if not callable(getattr(tokenizer, "encode", None)):
             raise TypeError("tokenizer must implement encode()")
         self.tokenizer = tokenizer
+        initialize_moss_tts_realtime_tokenizer_vocab_size(tokenizer)
         self.limits = limits or MossTTSRealtimeResourceLimits()
         self.realtime_input_stage = realtime_input_stage or "tts_engine"
         self.idle_timeout_s = idle_timeout_s
@@ -350,7 +352,6 @@ class MossTTSRealtimeSpeechWebSocketSession:
                 new_mode = "tokens"
                 token_ids = validate_moss_tts_realtime_text_token_ids(
                     event.token_ids,
-                    tokenizer=self.tokenizer,
                 )
                 if len(token_ids) > self.limits.max_pending_text_tokens:
                     raise bad_request(
@@ -839,6 +840,7 @@ def create_moss_tts_realtime_speech_ws_handler(
 
     if not callable(getattr(tokenizer, "encode", None)):
         raise TypeError("tokenizer must implement encode()")
+    initialize_moss_tts_realtime_tokenizer_vocab_size(tokenizer)
     resolved_limits = limits or MossTTSRealtimeResourceLimits()
     resolved_input_stage = realtime_input_stage or "tts_engine"
 

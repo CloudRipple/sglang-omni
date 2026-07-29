@@ -19,6 +19,10 @@ from sglang_omni.models.moss_tts_realtime.request_state import (
     MossTTSRealtimeRequestData,
     MossTTSRealtimeTurnPhase,
 )
+from sglang_omni.models.moss_tts_realtime.text_delta import (
+    get_moss_tts_realtime_tokenizer_vocab_size,
+    initialize_moss_tts_realtime_tokenizer_vocab_size,
+)
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.prepared_request_queue import (
     PreparedRequestQueue,
@@ -143,30 +147,18 @@ def _normalize_token_ids(value: Any, name: str) -> list[int]:
     ]
 
 
-def _tokenizer_size(tokenizer: Any) -> int | None:
-    try:
-        size = len(tokenizer)
-    except (AttributeError, TypeError, NotImplementedError):
-        size = getattr(tokenizer, "vocab_size", None)
-    if isinstance(size, bool) or not isinstance(size, Integral) or int(size) <= 0:
-        return None
-    return int(size)
-
-
 def _validate_tokenizer_token_ids(
     token_ids: Sequence[int],
     *,
-    tokenizer: Any,
     name: str,
 ) -> tuple[int, ...]:
     normalized = tuple(_normalize_token_ids(token_ids, name))
-    vocab_size = _tokenizer_size(tokenizer)
-    if vocab_size is not None:
-        for index, token_id in enumerate(normalized):
-            if token_id >= vocab_size:
-                raise ValueError(
-                    f"{name}[{index}]={token_id} exceeds tokenizer size {vocab_size}"
-                )
+    vocab_size = get_moss_tts_realtime_tokenizer_vocab_size()
+    for index, token_id in enumerate(normalized):
+        if token_id >= vocab_size:
+            raise ValueError(
+                f"{name}[{index}]={token_id} exceeds tokenizer size {vocab_size}"
+            )
     return normalized
 
 
@@ -215,6 +207,7 @@ def set_moss_tts_realtime_preprocessing_context(
     """Install the process-local processor/encoder used by prepared handoff."""
 
     _validate_processor_contract(processor)
+    initialize_moss_tts_realtime_tokenizer_vocab_size(processor.tokenizer)
     _QUEUE.set_context(
         MossTTSRealtimePreprocessingContext(
             processor=processor,
@@ -693,7 +686,6 @@ def _normalize_processor_rows(
 def _assistant_prefix_rows(processor: Any) -> np.ndarray:
     token_ids = _validate_tokenizer_token_ids(
         processor.tokenizer.encode(_ASSISTANT_TURN_PREFIX),
-        tokenizer=processor.tokenizer,
         name="assistant prefix token ids",
     )
     rows = np.full(
@@ -716,6 +708,7 @@ def build_moss_tts_realtime_turn_prompt(
     """Build the exact HF turn suffix before assistant-text prefill rows."""
 
     _validate_processor_contract(processor)
+    initialize_moss_tts_realtime_tokenizer_vocab_size(processor.tokenizer)
     include_system_prompt = _strict_bool(
         include_system_prompt,
         "include_system_prompt",
@@ -902,13 +895,11 @@ def prepare_moss_tts_realtime_state(
                 state.initial_text,
                 add_special_tokens=False,
             ),
-            tokenizer=processor.tokenizer,
             name="initial text token ids",
         )
     else:
         initial_token_ids = _validate_tokenizer_token_ids(
             state.initial_token_ids,
-            tokenizer=processor.tokenizer,
             name="initial_token_ids",
         )
 

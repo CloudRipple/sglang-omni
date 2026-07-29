@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from sglang_omni.models.moss_tts_realtime import request_builders as rb
+from sglang_omni.models.moss_tts_realtime import text_delta
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
 from sglang_omni.proto import OmniRequest, StagePayload
 from tests.unit_test.moss_tts_realtime.runtime_config import (
@@ -36,9 +37,11 @@ CODEBOOK_SIZE = int(MODEL_CONFIG.audio_pad_token)
 class FakeTokenizer:
     def __init__(self, *, size: int = 200_000) -> None:
         self.size = size
+        self.len_calls = 0
         self.calls: list[tuple[str, bool | None]] = []
 
     def __len__(self) -> int:
+        self.len_calls += 1
         return self.size
 
     def encode(
@@ -143,7 +146,8 @@ def _payload(
 
 
 @pytest.fixture(autouse=True)
-def _clear_prepared_queue() -> None:
+def _clear_prepared_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_delta, "_TOKENIZER_VOCAB_SIZE", None)
     rb.clear_moss_tts_realtime_preprocessing_context()
     yield
     rb.clear_moss_tts_realtime_preprocessing_context()
@@ -419,6 +423,53 @@ def test_prepare_uses_text_tokenization_or_preserves_direct_tokens() -> None:
     assert direct_prepared.initial_token_ids == (7, 8)
     assert text_prepared.include_system_prompt is True
     assert direct_prepared.include_system_prompt is False
+
+
+def test_prepare_resolves_tokenizer_size_once() -> None:
+    processor = FakeProcessor()
+
+    rb.prepare_moss_tts_realtime_state(
+        MossTTSRealtimeState(
+            session_id="session",
+            turn_id="turn",
+            initial_text="hello",
+        ),
+        processor=processor,
+    )
+
+    assert processor.tokenizer.len_calls == 1
+
+
+def test_preprocessing_reuses_process_global_tokenizer_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = FakeProcessor()
+    rb.set_moss_tts_realtime_preprocessing_context(processor=processor)
+
+    initial_size = processor.tokenizer.size
+    assert text_delta.get_moss_tts_realtime_tokenizer_vocab_size() == initial_size
+    assert processor.tokenizer.len_calls == 1
+
+    for request_id in ("first", "second"):
+        output = rb.preprocess_moss_tts_realtime_payload(
+            _payload("hello", request_id=request_id)
+        )
+        rb.cleanup_prepared_moss_tts_realtime_request(output.request_id)
+
+    assert processor.tokenizer.len_calls == 1
+
+    processor.tokenizer.size += 1
+    rb.set_moss_tts_realtime_preprocessing_context(processor=processor)
+    assert processor.tokenizer.len_calls == 1
+    assert text_delta.get_moss_tts_realtime_tokenizer_vocab_size() == initial_size
+
+    monkeypatch.setattr(text_delta, "_TOKENIZER_VOCAB_SIZE", None)
+    rb.set_moss_tts_realtime_preprocessing_context(processor=processor)
+    assert processor.tokenizer.len_calls == 2
+    assert (
+        text_delta.get_moss_tts_realtime_tokenizer_vocab_size()
+        == processor.tokenizer.size
+    )
 
 
 def test_prepare_rejects_direct_token_outside_tokenizer() -> None:
