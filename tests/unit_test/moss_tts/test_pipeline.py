@@ -972,10 +972,10 @@ def test_moss_tts_preprocessing_loads_separate_codec(
         ),
     )
     codec = SimpleNamespace()
-    loaded: list[tuple[str, str, str]] = []
+    loaded: list[tuple[str, str, str, str]] = []
 
-    def load_codec(model_path, *, device, dtype):
-        loaded.append((model_path, device, dtype))
+    def load_codec(model_path, *, device, dtype, component):
+        loaded.append((model_path, device, dtype, component))
         return codec
 
     monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
@@ -997,7 +997,7 @@ def test_moss_tts_preprocessing_loads_separate_codec(
     finally:
         rb.clear_moss_tts_preprocessing_context()
 
-    assert loaded == [("codec-from-model-config", "cpu", "float32")]
+    assert loaded == [("codec-from-model-config", "cpu", "float32", "encoder")]
 
 
 def test_moss_tts_preprocessing_uses_placement_gpu_id(
@@ -1014,10 +1014,10 @@ def test_moss_tts_preprocessing_uses_placement_gpu_id(
         ),
     )
     codec = SimpleNamespace()
-    loaded: list[tuple[str, str, str]] = []
+    loaded: list[tuple[str, str, str, str]] = []
 
-    def load_codec(model_path, *, device, dtype):
-        loaded.append((model_path, device, dtype))
+    def load_codec(model_path, *, device, dtype, component):
+        loaded.append((model_path, device, dtype, component))
         return codec
 
     monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
@@ -1046,8 +1046,8 @@ def test_moss_tts_preprocessing_uses_placement_gpu_id(
         rb.clear_moss_tts_preprocessing_context()
 
     assert loaded == [
-        ("codec", "cuda:2", "float32"),
-        ("codec", "cpu", "float32"),
+        ("codec", "cuda:2", "float32", "encoder"),
+        ("codec", "cpu", "float32", "encoder"),
     ]
 
 
@@ -1556,10 +1556,10 @@ def test_moss_tts_vocoder_honors_explicit_codec_path(
         model_config=SimpleNamespace(audio_pad_code=1024, sampling_rate=24000),
     )
     codec = SimpleNamespace(sample_rate=24000)
-    loaded: list[tuple[str, str, str]] = []
+    loaded: list[tuple[str, str, str, str]] = []
 
-    def load_codec(model_path, *, device, dtype):
-        loaded.append((model_path, device, dtype))
+    def load_codec(model_path, *, device, dtype, component):
+        loaded.append((model_path, device, dtype, component))
         return codec
 
     monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
@@ -1572,7 +1572,7 @@ def test_moss_tts_vocoder_honors_explicit_codec_path(
     )
 
     assert processor.audio_tokenizer is None
-    assert loaded == [("explicit-codec", "cpu", "float32")]
+    assert loaded == [("explicit-codec", "cpu", "float32", "decoder")]
 
 
 def test_moss_tts_audio_tokenizer_preserves_processor_code_layout() -> None:

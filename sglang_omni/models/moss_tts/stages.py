@@ -557,6 +557,7 @@ def create_preprocessing_executor(
         resolved_codec_model_path,
         device=device,
         dtype=dtype,
+        component="encoder",
     )
     if str(device).startswith("cuda"):
         reference_encoder: Any = _BatchedReferenceEncoder(
@@ -931,6 +932,7 @@ def create_vocoder_executor(
         _resolve_audio_tokenizer_model_path(processor, codec_model_path),
         device=device,
         dtype=dtype,
+        component="decoder",
     )
 
     decoder_dtype = (

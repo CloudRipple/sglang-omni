@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import torch
+import torch.nn as nn
 import torchaudio
-from transformers import AutoModel
+from accelerate import init_empty_weights
+from transformers import AutoConfig, AutoModel
 
 from sglang_omni.models.moss_tts.hf_loading import moss_transformers_processor_compat
+from sglang_omni.models.weight_loader import load_module
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +21,101 @@ DEFAULT_MOSS_TTS_AUDIO_TOKENIZER = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
 _LOUDNESS_TARGET_DBFS = -20.0
 _LOUDNESS_GAIN_MIN_DB = -3.0
 _LOUDNESS_GAIN_MAX_DB = 3.0
+_CODEC_COMPONENTS = ("encoder", "decoder")
+
+CodecComponent = Literal["encoder", "decoder"]
 
 
 def _torch_dtype(dtype: str | torch.dtype) -> torch.dtype:
     return getattr(torch, dtype) if isinstance(dtype, str) else dtype
+
+
+def _validate_component_model(model: nn.Module) -> None:
+    for name in (*_CODEC_COMPONENTS, "quantizer"):
+        if not isinstance(getattr(model, name, None), nn.Module):
+            raise RuntimeError(
+                f"MOSS-TTS audio tokenizer does not expose a {name!r} module"
+            )
+
+
+def _raise_for_meta_state(model: nn.Module) -> None:
+    meta_state = [
+        name
+        for name, tensor in (
+            *model.named_parameters(),
+            *model.named_buffers(),
+        )
+        if tensor.is_meta
+    ]
+    if meta_state:
+        preview = ", ".join(meta_state[:8])
+        if len(meta_state) > 8:
+            preview += f", ... ({len(meta_state)} total)"
+        raise RuntimeError(
+            "MOSS-TTS component codec has unmaterialized state outside the "
+            f"supported component prefixes: {preview}"
+        )
+
+
+def _state_nbytes(model: nn.Module) -> int:
+    return sum(
+        tensor.numel() * tensor.element_size()
+        for tensor in (*model.parameters(), *model.buffers())
+    )
+
+
+def _load_component_model(
+    model_path: str,
+    *,
+    component: CodecComponent,
+    device: str,
+    dtype: str | torch.dtype,
+) -> nn.Module:
+    config = AutoConfig.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+    )
+    with init_empty_weights(include_buffers=True):
+        model = AutoModel.from_config(
+            config,
+            trust_remote_code=True,
+        )
+    _validate_component_model(model)
+
+    unused_component = "decoder" if component == "encoder" else "encoder"
+    setattr(model, unused_component, nn.ModuleList())
+
+    load_dtype = None
+    if torch.device(device).type != "cpu":
+        load_dtype = _torch_dtype(dtype)
+    setattr(
+        model,
+        component,
+        load_module(
+            getattr(model, component),
+            model_path,
+            prefix=f"{component}.",
+            dtype=load_dtype,
+            device=device,
+            strict=True,
+        ),
+    )
+    model.quantizer = load_module(
+        model.quantizer,
+        model_path,
+        prefix="quantizer.",
+        dtype=load_dtype,
+        device=device,
+        strict=True,
+    )
+    model.eval()
+    _raise_for_meta_state(model)
+    logger.info(
+        "Loaded MOSS-TTS audio tokenizer component=%s (%.3f GiB)",
+        component,
+        _state_nbytes(model) / (1024**3),
+    )
+    return model
 
 
 class MossTTSAudioTokenizer:
@@ -179,21 +273,41 @@ def load_moss_tts_audio_tokenizer(
     *,
     device: str = "cpu",
     dtype: str | torch.dtype = "float32",
+    component: CodecComponent | None = None,
 ) -> MossTTSAudioTokenizer:
-    logger.info(f"Loading MOSS-TTS audio tokenizer from {model_path} on {device}")
+    if component is not None and component not in _CODEC_COMPONENTS:
+        raise ValueError(
+            f"component must be one of {_CODEC_COMPONENTS!r} or None; got {component!r}"
+        )
+    logger.info(
+        "Loading MOSS-TTS audio tokenizer from %s on %s (component=%s)",
+        model_path,
+        device,
+        component or "full",
+    )
     try:
         with moss_transformers_processor_compat():
-            model = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
+            if component is None:
+                model = AutoModel.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
+            else:
+                model = _load_component_model(
+                    model_path,
+                    component=component,
+                    device=device,
+                    dtype=dtype,
+                )
     except Exception as exc:
         raise RuntimeError(
-            "MOSS-TTS support requires OpenMOSS-Team/MOSS-Audio-Tokenizer"
+            "MOSS-TTS support requires OpenMOSS-Team/MOSS-Audio-Tokenizer; "
+            f"failed to load component {component or 'full'!r}: {exc}"
         ) from exc
-    model.eval()
-    move_kwargs: dict[str, Any] = {"device": device}
-    if device != "cpu":
-        move_kwargs["dtype"] = _torch_dtype(dtype)
-    model.to(**move_kwargs)
+    if component is None:
+        model.eval()
+        move_kwargs: dict[str, Any] = {"device": device}
+        if torch.device(device).type != "cpu":
+            move_kwargs["dtype"] = _torch_dtype(dtype)
+        model.to(**move_kwargs)
     return MossTTSAudioTokenizer(model, device=device)
