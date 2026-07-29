@@ -427,3 +427,92 @@ def test_ordinary_stream_path_does_not_require_realtime_configuration() -> None:
         assert coordinator._realtime_requests == {}
 
     asyncio.run(_run())
+
+
+class _BlockingAbortControlPlane(RecordingCoordinatorControlPlane):
+    def __init__(self) -> None:
+        super().__init__()
+        self.abort_started = asyncio.Event()
+        self.release_abort = asyncio.Event()
+
+    async def broadcast_abort(self, msg: Any) -> None:
+        self.aborts.append(msg)
+        self.abort_started.set()
+        await self.release_abort.wait()
+
+
+def test_realtime_abort_reserves_request_id_until_broadcast_completes() -> None:
+    async def _run() -> None:
+        control_plane = _BlockingAbortControlPlane()
+        coordinator = _coordinator(control_plane)
+        handle = await _open_realtime(coordinator)
+
+        close_task = asyncio.create_task(handle.aclose())
+        await control_plane.abort_started.wait()
+
+        assert "request-1" in coordinator._realtime_requests
+        assert "request-1" in coordinator._abort_tasks
+        with pytest.raises(ValueError, match="already exists"):
+            await _open_realtime(coordinator)
+        with pytest.raises(ValueError, match="already exists"):
+            await coordinator._submit_request("request-1", _request())
+
+        control_plane.release_abort.set()
+        await close_task
+        assert coordinator._realtime_requests == {}
+        assert coordinator._abort_tasks == {}
+
+    asyncio.run(_run())
+
+
+def test_realtime_close_cancellation_does_not_cancel_abort_broadcast() -> None:
+    async def _run() -> None:
+        control_plane = _BlockingAbortControlPlane()
+        coordinator = _coordinator(control_plane)
+        handle = await _open_realtime(coordinator)
+
+        close_task = asyncio.create_task(handle.aclose())
+        await control_plane.abort_started.wait()
+        abort_task = coordinator._abort_tasks["request-1"]
+
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+        assert abort_task.cancelled() is False
+        assert "request-1" in coordinator._realtime_requests
+
+        control_plane.release_abort.set()
+        assert await abort_task is True
+        await asyncio.sleep(0)
+        assert coordinator._realtime_requests == {}
+        assert coordinator._abort_tasks == {}
+        assert [message.request_id for message in control_plane.aborts] == ["request-1"]
+
+    asyncio.run(_run())
+
+
+def test_completed_ordinary_stream_reserves_id_against_realtime_until_closed() -> None:
+    async def _run() -> None:
+        coordinator = _coordinator()
+        stream = coordinator.stream("request-1", _request())
+        terminal = asyncio.create_task(anext(stream))
+        for _ in range(100):
+            if "request-1" in coordinator._requests:
+                break
+            await asyncio.sleep(0)
+
+        await coordinator._handle_completion(
+            CompleteMessage("request-1", "vocoder", True, result={"ok": True})
+        )
+        assert (await terminal).result == {"ok": True}
+        assert "request-1" not in coordinator._requests
+        assert "request-1" in coordinator._stream_queues
+
+        with pytest.raises(ValueError, match="already exists"):
+            await _open_realtime(coordinator)
+
+        await stream.aclose()
+        handle = await _open_realtime(coordinator)
+        await handle.aclose()
+
+    asyncio.run(_run())

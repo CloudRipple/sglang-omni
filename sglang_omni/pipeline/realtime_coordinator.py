@@ -192,7 +192,7 @@ class RealtimeCoordinator(Coordinator):
                 raise ValueError(f"{name} must be a non-empty string")
         if self._fatal_error is not None:
             raise RuntimeError(self._fatal_error)
-        if request_id in self._realtime_requests or request_id in self._requests:
+        if self._request_id_is_reserved(request_id):
             raise ValueError(f"Request {request_id} already exists")
         if self.entry_stage not in self._stages:
             raise ValueError(f"Entry stage {self.entry_stage} not registered")
@@ -261,11 +261,22 @@ class RealtimeCoordinator(Coordinator):
         )
 
     async def _submit_request(
-        self, request_id: str, request: OmniRequest | Any
+        self,
+        request_id: str,
+        request: OmniRequest | Any,
+        *,
+        stream_queue: asyncio.Queue[CompleteMessage | StreamMessage] | None = None,
     ) -> None:
-        if request_id in self._realtime_requests:
-            raise ValueError(f"Request {request_id} already exists")
-        await super()._submit_request(request_id, request)
+        await super()._submit_request(
+            request_id,
+            request,
+            stream_queue=stream_queue,
+        )
+
+    def _request_id_is_reserved(self, request_id: str) -> bool:
+        return request_id in self._realtime_requests or super()._request_id_is_reserved(
+            request_id
+        )
 
     async def abort(self, request_id: str) -> bool:
         context = self._realtime_requests.get(request_id)
@@ -390,13 +401,38 @@ class RealtimeCoordinator(Coordinator):
         return status
 
     async def _abort_realtime_context(self, context: _RealtimeRequestContext) -> bool:
+        request_id = context.request_id
+        abort_task = self._abort_tasks.get(request_id)
+        if abort_task is not None:
+            return await asyncio.shield(abort_task)
         if (
-            self._realtime_requests.get(context.request_id) is not context
+            self._realtime_requests.get(request_id) is not context
             or not context.is_running
         ):
             return False
 
+        abort_task = asyncio.create_task(
+            self._run_realtime_abort(context),
+            name=f"realtime-coordinator-abort-{request_id}",
+        )
+        self._abort_tasks[request_id] = abort_task
+        abort_task.add_done_callback(
+            lambda done, rid=request_id: self._on_abort_task_done(rid, done)
+        )
+        return await asyncio.shield(abort_task)
+
+    async def _run_realtime_abort(
+        self,
+        context: _RealtimeRequestContext,
+    ) -> bool:
         request_id = context.request_id
+        await self.control_plane.broadcast_abort(AbortMessage(request_id=request_id))
+        if (
+            self._realtime_requests.get(request_id) is not context
+            or not context.is_running
+        ):
+            return False
+
         context.abort(
             CompleteMessage(
                 request_id=request_id,
@@ -406,7 +442,6 @@ class RealtimeCoordinator(Coordinator):
             )
         )
         self._release_realtime_context(context)
-        await self.control_plane.broadcast_abort(AbortMessage(request_id=request_id))
         logger.info("RealtimeCoordinator aborted req=%s", request_id)
         return True
 
