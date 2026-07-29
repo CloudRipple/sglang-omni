@@ -56,6 +56,7 @@ class MossTTSRealtimeState(DeclarativeStateBase):
     initial_text: str | None = None
     initial_token_ids: list[int] = wire(default_factory=list, codec="list")
     input_done: bool = wire(False, codec="bool")
+    keep_session: bool = wire(True, codec="bool")
     generation_kwargs: dict[str, Any] = wire(default_factory=dict, codec="dict")
     prompt_rows: Any | None = wire(None, codec="tensor_cpu")
     audio_codes: Any | None = wire(None, codec="tensor_cpu")
@@ -79,6 +80,8 @@ class MossTTSRealtimeState(DeclarativeStateBase):
             )
         if not isinstance(self.input_done, bool):
             raise TypeError("input_done must be a boolean")
+        if not isinstance(self.keep_session, bool):
+            raise TypeError("keep_session must be a boolean")
         if not isinstance(self.generation_kwargs, dict):
             raise TypeError("generation_kwargs must be a dictionary")
         if not isinstance(self.stream_metadata, dict):

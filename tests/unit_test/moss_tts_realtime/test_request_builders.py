@@ -11,6 +11,13 @@ import torch
 from sglang_omni.models.moss_tts_realtime import request_builders as rb
 from sglang_omni.models.moss_tts_realtime import text_delta
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
+from sglang_omni.models.moss_tts_realtime.request_state import (
+    MossTTSRealtimePendingInput,
+    MossTTSRealtimeRequestData,
+    MossTTSRealtimeTurnLedger,
+    MossTTSRealtimeTurnPhase,
+    MossTTSRealtimeTurnState,
+)
 from sglang_omni.proto import OmniRequest, StagePayload
 from tests.unit_test.moss_tts_realtime.runtime_config import (
     AUDIO_BOS_TOKEN_ID as MOSS_TTS_REALTIME_AUDIO_BOS_TOKEN_ID,
@@ -187,7 +194,8 @@ def test_offline_state_defaults_match_hf_sampling_contract() -> None:
     assert state.turn_id == "offline"
     assert state.initial_text == "hello"
     assert state.initial_token_ids == []
-    assert state.input_done is False
+    assert state.input_done is True
+    assert state.keep_session is False
     assert state.generation_kwargs == {
         "max_new_tokens": 1000,
         "temperature": 0.8,
@@ -204,6 +212,25 @@ def test_offline_state_defaults_match_hf_sampling_contract() -> None:
     }
 
 
+def test_offline_state_preserves_explicit_open_input() -> None:
+    state = rb.build_moss_tts_realtime_state(
+        _payload("hello", params={"input_done": False}),
+        num_codebooks=N_VQ,
+    )
+
+    assert state.input_done is False
+
+
+def test_offline_state_keeps_an_explicit_session() -> None:
+    state = rb.build_moss_tts_realtime_state(
+        _payload({"text": "hello", "session_id": "session-1"}),
+        num_codebooks=N_VQ,
+    )
+
+    assert state.session_id == "session-1"
+    assert state.keep_session is True
+
+
 def test_state_payload_round_trip_preserves_new_realtime_fields() -> None:
     original = MossTTSRealtimeState(
         session_id="session",
@@ -213,6 +240,7 @@ def test_state_payload_round_trip_preserves_new_realtime_fields() -> None:
         user_audio={"audio_path": "user.wav"},
         initial_token_ids=[10, 11],
         input_done=True,
+        keep_session=False,
         generation_kwargs={"temperature": 0.0, "do_sample": False},
     )
 
@@ -228,6 +256,7 @@ def test_state_payload_round_trip_preserves_new_realtime_fields() -> None:
     assert restored.initial_token_ids == [10, 11]
     assert restored.initial_text is None
     assert restored.input_done is True
+    assert restored.keep_session is False
     assert restored.generation_kwargs["temperature"] == 0.0
     assert restored.generation_kwargs["do_sample"] is False
 
@@ -744,3 +773,39 @@ def test_prepared_payload_exposes_tokenized_readiness_and_worker_safe_data() -> 
         data.prompt_rows
     )
     assert not rb.moss_tts_realtime_prepared_snapshot().prepared
+
+
+def test_terminal_result_drops_internal_prompt_rows() -> None:
+    generated_row = (77, *tuple(range(1, N_VQ + 1)))
+    state = MossTTSRealtimeState(
+        session_id="session",
+        turn_id="turn",
+        prompt_rows=torch.tensor([generated_row], dtype=torch.long),
+    )
+    turn = MossTTSRealtimeTurnState(
+        session_id="session",
+        turn_id="turn",
+        request_id="request",
+        pending_input=MossTTSRealtimePendingInput(
+            max_tokens=1,
+            max_bytes=1,
+            max_updates=1,
+            input_done=True,
+        ),
+        ledger=MossTTSRealtimeTurnLedger(
+            model_config=MODEL_CONFIG,
+            appended_rows=[generated_row],
+        ),
+        phase=MossTTSRealtimeTurnPhase.COMPLETED,
+    )
+    data = MossTTSRealtimeRequestData(
+        state=state,
+        turn_state=turn,
+        model_config=MODEL_CONFIG,
+        generation_row_start=0,
+    )
+
+    result = rb.apply_moss_tts_realtime_result(_payload("ignored"), data)
+
+    assert "prompt_rows" not in result.data
+    assert result.data["audio_codes"].shape == (1, N_VQ)

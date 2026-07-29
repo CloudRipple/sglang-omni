@@ -256,6 +256,7 @@ def _request_data(
     initial_token_ids: tuple[int, ...],
     *,
     input_done: bool,
+    keep_session: bool = True,
     session_id: str = "session-1",
     turn_id: str = "turn-1",
     turn_index: int = 0,
@@ -268,6 +269,7 @@ def _request_data(
         turn_index=turn_index,
         initial_token_ids=list(initial_token_ids),
         input_done=input_done,
+        keep_session=keep_session,
         generation_kwargs={"max_new_tokens": 32},
     )
     return MossTTSRealtimeRequestData(

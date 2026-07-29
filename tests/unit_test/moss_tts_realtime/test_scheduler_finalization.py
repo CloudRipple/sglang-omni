@@ -122,6 +122,48 @@ def test_audio_eos_completes_turn_without_materializing_terminal_frame() -> None
     assert output.data == {"phase": "completed"}
 
 
+def test_ephemeral_offline_turns_release_sessions_after_success() -> None:
+    scheduler = _scheduler()
+
+    for index in range(65):
+        request_id = f"request-{index}"
+        session_id = f"offline:{request_id}"
+        data = _request_data(
+            tuple(range(12)),
+            input_done=True,
+            keep_session=False,
+            session_id=session_id,
+            turn_id=request_id,
+        )
+        scheduler._finalize_built_request(
+            _payload(
+                tuple(range(12)),
+                input_done=True,
+                request_id=request_id,
+            ),
+            False,
+            data,
+        )
+        req = _cache_finished_realtime_request(
+            scheduler,
+            data,
+            audio_eos=True,
+        )
+
+        scheduler.stream_output([req])
+
+        assert data.lifecycle_finalized is True
+        assert data.session_state.closed is True
+        assert scheduler._moss_tts_realtime_sessions == {}
+        assert scheduler.session_controller.sessions == {}
+        assert scheduler.tree_cache.slots == {}
+        output = scheduler.outbox.get_nowait()
+        assert output.type == "result"
+        assert output.data == {"phase": "completed"}
+
+    assert scheduler._resource_totals["session_ephemeral_close_total"] == 65
+
+
 def test_terminal_commit_includes_materialized_rows() -> None:
     scheduler = _scheduler()
     data = _request_data(tuple(range(12)), input_done=True)

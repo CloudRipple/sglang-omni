@@ -2900,6 +2900,8 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             self._bump_resource_total("session_explicit_close_total")
         elif reason == "shutdown":
             self._bump_resource_total("session_shutdown_close_total")
+        elif reason == "ephemeral":
+            self._bump_resource_total("session_ephemeral_close_total")
         self._emit_realtime_event(
             request_id or session_state.session_id,
             "host_session_close",
@@ -3181,6 +3183,15 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 turn,
                 warm_session_id=session_id,
             )
+            if not data.state.keep_session and not self._finalize_host_session_close(
+                session_state,
+                physical_session_ids=(session_id,),
+                reason="ephemeral",
+                request_id=req.rid,
+            ):
+                raise RuntimeError(
+                    "failed to close ephemeral MOSS-TTS-Realtime session"
+                )
         except Exception:
             snapshot.restore(session_state)
             self._finalize_unsuccessful_turn(

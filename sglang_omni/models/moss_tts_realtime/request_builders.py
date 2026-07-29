@@ -409,16 +409,14 @@ def build_moss_tts_realtime_state(
     }
     generation_kwargs = _normalize_generation_kwargs(generation_source)
 
-    session_id = (
-        _optional_text(
-            _first_not_none(
-                input_data.get("session_id"),
-                options.get("session_id"),
-                metadata.get("session_id"),
-            )
+    explicit_session_id = _optional_text(
+        _first_not_none(
+            input_data.get("session_id"),
+            options.get("session_id"),
+            metadata.get("session_id"),
         )
-        or f"offline:{payload.request_id}"
     )
+    session_id = explicit_session_id or f"offline:{payload.request_id}"
     turn_id = _optional_text(
         _first_not_none(
             input_data.get("turn_id"),
@@ -439,7 +437,7 @@ def build_moss_tts_realtime_state(
         input_data.get("input_done"),
         options.get("input_done"),
         params.get("input_done"),
-        False,
+        True,
     )
     raw_input_done = _strict_bool(raw_input_done, "input_done")
 
@@ -496,6 +494,7 @@ def build_moss_tts_realtime_state(
         initial_text=initial_text,
         initial_token_ids=initial_token_ids,
         input_done=raw_input_done,
+        keep_session=explicit_session_id is not None,
         generation_kwargs=generation_kwargs,
         stream_metadata=(
             {
@@ -1063,6 +1062,7 @@ def apply_moss_tts_realtime_result(
             (0, int(data.model_config.rvq)),
             dtype=torch.long,
         )
+    data.state.prompt_rows = None
     data.state.input_done = turn.pending_input.input_done
     return StagePayload(
         request_id=payload.request_id,
