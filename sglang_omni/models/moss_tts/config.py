@@ -62,6 +62,8 @@ class MossTTSPipelineConfig(PipelineConfig):
     ref_audio_cache_max_bytes: int = _REF_AUDIO_CACHE_MAX_BYTES
     optimized_vocoder: bool = True
     optimized_vocoder_dtype: Literal["float16", "bfloat16"] = "bfloat16"
+    vocoder_cuda_graph: bool = True
+    vocoder_cuda_graph_max_frames: int = 128
     stages: list[StageConfig] = [
         StageConfig(
             name="preprocessing",
@@ -108,6 +110,11 @@ class MossTTSPipelineConfig(PipelineConfig):
                 "ref_audio_cache_max_bytes must be >= 1; got "
                 f"{self.ref_audio_cache_max_bytes}"
             )
+        if self.vocoder_cuda_graph_max_frames < 1:
+            raise ValueError(
+                "vocoder_cuda_graph_max_frames must be >= 1; got "
+                f"{self.vocoder_cuda_graph_max_frames}"
+            )
         for stage_index, stage in enumerate(self.stages):
             if stage.factory.endswith("create_preprocessing_executor"):
                 cache_args = {
@@ -133,6 +140,10 @@ class MossTTSPipelineConfig(PipelineConfig):
                     "optimized_decoder_dtype": (
                         self.optimized_vocoder_dtype if self.optimized_vocoder else None
                     ),
+                    "cuda_graph": (
+                        self.vocoder_cuda_graph if self.optimized_vocoder else False
+                    ),
+                    "cuda_graph_max_frames": self.vocoder_cuda_graph_max_frames,
                 }
                 merged_sources = {
                     "optimized": {"optimized_vocoder"},
@@ -140,6 +151,11 @@ class MossTTSPipelineConfig(PipelineConfig):
                         "optimized_vocoder",
                         "optimized_vocoder_dtype",
                     },
+                    "cuda_graph": {
+                        "optimized_vocoder",
+                        "vocoder_cuda_graph",
+                    },
+                    "cuda_graph_max_frames": {"vocoder_cuda_graph_max_frames"},
                 }
                 for name, value in optimized_args.items():
                     stage_override_merged = bool(

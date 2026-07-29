@@ -81,6 +81,29 @@ class _LocalCausalFlashPlan:
     context: int
 
 
+@dataclass(frozen=True)
+class _StaticPackedTransformerPlan:
+    batch_size: int
+    max_seqlen: int
+    cu_seqlens: torch.Tensor
+    position_ids: torch.Tensor
+    local_flash_plan: _LocalCausalFlashPlan | None
+
+
+@dataclass(frozen=True)
+class _StaticPackedDecoderStagePlan:
+    transformer: _StaticPackedTransformerPlan | None
+    input_lengths: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class MossVocoderStaticPackedPlan:
+    batch_size: int
+    input_frames: int
+    output_frames: int
+    stages: tuple[_StaticPackedDecoderStagePlan, ...]
+
+
 def _build_local_causal_flash_plan(
     cu_seqlens: torch.Tensor,
     *,
@@ -704,6 +727,66 @@ class MossTTSLocalProjectedTransformer(nn.Module):
     ) -> bool:
         return self.transformer.supports_packed_flash(device, dtype)
 
+    def build_static_packed_plan(
+        self,
+        *,
+        batch_size: int,
+        max_seqlen: int,
+        device: torch.device,
+    ) -> _StaticPackedTransformerPlan:
+        if batch_size < 1 or max_seqlen < 1:
+            raise ValueError(
+                "static packed vocoder plan requires positive batch and frames"
+            )
+        cu_seqlens = torch.arange(
+            0,
+            (batch_size + 1) * max_seqlen,
+            max_seqlen,
+            device=device,
+            dtype=torch.int32,
+        )
+        position_ids = torch.arange(
+            max_seqlen,
+            device=device,
+            dtype=torch.long,
+        ).repeat(batch_size)
+        first_attention = self.transformer.layers[0].self_attn
+        local_flash_plan = None
+        if first_attention.causal and first_attention.context is not None:
+            local_flash_plan = _build_local_causal_flash_plan(
+                cu_seqlens,
+                context=int(first_attention.context),
+            )
+        return _StaticPackedTransformerPlan(
+            batch_size=batch_size,
+            max_seqlen=max_seqlen,
+            cu_seqlens=cu_seqlens,
+            position_ids=position_ids,
+            local_flash_plan=local_flash_plan,
+        )
+
+    def forward_static_packed(
+        self,
+        x: torch.Tensor,
+        plan: _StaticPackedTransformerPlan,
+    ) -> torch.Tensor:
+        x = self.input_proj(x.transpose(1, 2))
+        if x.shape[0] != plan.batch_size or x.shape[1] != plan.max_seqlen:
+            raise ValueError(
+                "static packed vocoder input shape does not match its plan: "
+                f"input={tuple(x.shape[:2])} "
+                f"plan={(plan.batch_size, plan.max_seqlen)}"
+            )
+        packed_x = self.transformer(
+            x.reshape(plan.batch_size * plan.max_seqlen, x.shape[-1]),
+            cu_seqlens=plan.cu_seqlens,
+            max_seqlen=plan.max_seqlen,
+            position_ids=plan.position_ids,
+            local_flash_plan=plan.local_flash_plan,
+        )
+        x = packed_x.reshape(plan.batch_size, plan.max_seqlen, -1)
+        return self.output_proj(x).transpose(1, 2)
+
 
 class MossTTSLocalVocoderDecoder(nn.Module):
     """Iterable MOSS vocoder decoder with patched projected transformers."""
@@ -751,6 +834,102 @@ class MossTTSLocalVocoderDecoder(nn.Module):
         return bool(transformer_stages) and all(
             stage.supports_packed_flash(device, dtype) for stage in transformer_stages
         )
+
+    def input_dimension(self) -> int:
+        for stage in self.stages:
+            if not isinstance(stage, MossTTSLocalProjectedTransformer):
+                continue
+            source_dimension = getattr(stage.source, "input_dimension", None)
+            if source_dimension is not None:
+                return int(source_dimension)
+            in_features = getattr(stage.input_proj, "in_features", None)
+            if in_features is not None:
+                return int(in_features)
+        raise RuntimeError("unable to infer MOSS vocoder decoder input dimension")
+
+    def build_static_packed_plan(
+        self,
+        *,
+        batch_size: int,
+        input_frames: int,
+        device: str | torch.device,
+    ) -> MossVocoderStaticPackedPlan:
+        if batch_size < 1 or input_frames < 1:
+            raise ValueError(
+                "static packed vocoder plan requires positive batch and frames"
+            )
+        device = torch.device(device)
+        frames = input_frames
+        stage_plans: list[_StaticPackedDecoderStagePlan] = []
+        for stage in self.stages:
+            if isinstance(stage, MossTTSLocalProjectedTransformer):
+                stage_plans.append(
+                    _StaticPackedDecoderStagePlan(
+                        transformer=stage.build_static_packed_plan(
+                            batch_size=batch_size,
+                            max_seqlen=frames,
+                            device=device,
+                        ),
+                        input_lengths=None,
+                    )
+                )
+                continue
+
+            input_lengths = torch.full(
+                (batch_size,),
+                frames,
+                device=device,
+                dtype=torch.long,
+            )
+            stage_plans.append(
+                _StaticPackedDecoderStagePlan(
+                    transformer=None,
+                    input_lengths=input_lengths,
+                )
+            )
+            patch_size = int(getattr(stage, "patch_size", 0))
+            if patch_size < 1:
+                raise ValueError(
+                    f"MOSS vocoder patch stage has invalid patch_size={patch_size}"
+                )
+            if bool(getattr(stage, "is_downsample", False)):
+                if frames % patch_size:
+                    raise ValueError(
+                        "static packed vocoder downsample requires divisible frames: "
+                        f"frames={frames} patch_size={patch_size}"
+                    )
+                frames //= patch_size
+            else:
+                frames *= patch_size
+
+        return MossVocoderStaticPackedPlan(
+            batch_size=batch_size,
+            input_frames=input_frames,
+            output_frames=frames,
+            stages=tuple(stage_plans),
+        )
+
+    def forward_static_packed(
+        self,
+        x: torch.Tensor,
+        plan: MossVocoderStaticPackedPlan,
+    ) -> torch.Tensor:
+        if len(plan.stages) != len(self.stages):
+            raise ValueError("static packed vocoder plan does not match decoder stages")
+        if x.shape[0] != plan.batch_size or x.shape[-1] != plan.input_frames:
+            raise ValueError(
+                "static packed vocoder input shape does not match its plan: "
+                f"input={(x.shape[0], x.shape[-1])} "
+                f"plan={(plan.batch_size, plan.input_frames)}"
+            )
+        for stage, stage_plan in zip(self.stages, plan.stages):
+            if stage_plan.transformer is not None:
+                assert isinstance(stage, MossTTSLocalProjectedTransformer)
+                x = stage.forward_static_packed(x, stage_plan.transformer)
+            else:
+                assert stage_plan.input_lengths is not None
+                x, _ = stage(x, stage_plan.input_lengths)
+        return x
 
     def forward(
         self,

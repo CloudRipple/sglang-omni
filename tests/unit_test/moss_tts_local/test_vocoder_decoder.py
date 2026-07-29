@@ -752,6 +752,45 @@ def test_vocoder_decoder_requires_packed_flash_for_every_transformer() -> None:
     assert not local.supports_packed_flash("cuda", torch.float16)
 
 
+def test_vocoder_decoder_static_packed_plan_matches_full_length_eager() -> None:
+    source = _LegacyProjectedStage()
+    wrapped = MossTTSLocalVocoderDecoder(nn.ModuleList([source]))
+    attention = wrapped[0].transformer.layers[0].self_attn
+    attention._can_run_packed_flash = lambda _: True
+
+    def fake_flash_attn(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_q: torch.Tensor,
+        cu_k: torch.Tensor,
+        max_q: int,
+        max_k: int,
+        *,
+        causal: bool,
+        window_size: tuple[int, int],
+    ) -> torch.Tensor:
+        del k, v, cu_q, cu_k, max_q, max_k, causal, window_size
+        return q
+
+    attention._flash_attn_varlen = fake_flash_attn
+    x = torch.randn(2, 3, 4)
+    lengths = torch.full((2,), 4, dtype=torch.long)
+
+    eager, _ = wrapped(x, lengths)
+    plan = wrapped.build_static_packed_plan(
+        batch_size=2,
+        input_frames=4,
+        device="cpu",
+    )
+    static = wrapped.forward_static_packed(x, plan)
+
+    assert wrapped.input_dimension() == 3
+    assert plan.input_frames == 4
+    assert plan.output_frames == 4
+    torch.testing.assert_close(static, eager)
+
+
 def test_vocoder_decoder_wraps_legacy_moss_audio_tokenizer_fields() -> None:
     source = _LegacyProjectedStage()
     wrapped = MossTTSLocalVocoderDecoder(nn.ModuleList([source]))

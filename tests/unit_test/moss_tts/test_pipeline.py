@@ -165,6 +165,8 @@ def test_moss_tts_config_and_registry_contracts() -> None:
     vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
     assert vocoder.factory_args["optimized"] is True
     assert vocoder.factory_args["optimized_decoder_dtype"] == "bfloat16"
+    assert vocoder.factory_args["cuda_graph"] is True
+    assert vocoder.factory_args["cuda_graph_max_frames"] == 128
 
 
 def test_moss_tts_config_injects_reference_cache_factory_args() -> None:
@@ -230,6 +232,7 @@ def test_moss_tts_config_merges_optimized_vocoder_factory_args() -> None:
     assert disabled.optimized_vocoder is False
     assert vocoder.factory_args["optimized"] is False
     assert vocoder.factory_args["optimized_decoder_dtype"] is None
+    assert vocoder.factory_args["cuda_graph"] is False
 
     fp16 = ConfigManager(disabled).merge_config(
         {
@@ -243,12 +246,27 @@ def test_moss_tts_config_merges_optimized_vocoder_factory_args() -> None:
     assert fp16.optimized_vocoder_dtype == "float16"
     assert vocoder.factory_args["optimized"] is True
     assert vocoder.factory_args["optimized_decoder_dtype"] == "float16"
+    assert vocoder.factory_args["cuda_graph"] is True
+
+    no_graph = ConfigManager(fp16).merge_config(
+        {
+            "vocoder_cuda_graph": False,
+            "vocoder_cuda_graph_max_frames": 96,
+        }
+    )
+    vocoder = next(stage for stage in no_graph.stages if stage.name == "vocoder")
+
+    assert no_graph.vocoder_cuda_graph is False
+    assert no_graph.vocoder_cuda_graph_max_frames == 96
+    assert vocoder.factory_args["cuda_graph"] is False
+    assert vocoder.factory_args["cuda_graph_max_frames"] == 96
 
     explicit_stage_override = ConfigManager(config).merge_config(
         {
             "optimized_vocoder": False,
             "stages.vocoder.factory_args.optimized": True,
             "stages.vocoder.factory_args.optimized_decoder_dtype": "bfloat16",
+            "stages.vocoder.factory_args.cuda_graph": True,
         }
     )
     vocoder = next(
@@ -258,6 +276,7 @@ def test_moss_tts_config_merges_optimized_vocoder_factory_args() -> None:
     assert explicit_stage_override.optimized_vocoder is False
     assert vocoder.factory_args["optimized"] is True
     assert vocoder.factory_args["optimized_decoder_dtype"] == "bfloat16"
+    assert vocoder.factory_args["cuda_graph"] is True
 
 
 def test_moss_tts_preprocessing_factory_receives_placement_gpu_id() -> None:
@@ -286,6 +305,7 @@ def test_moss_tts_preprocessing_factory_receives_placement_gpu_id() -> None:
     [
         ({"ref_audio_cache_max_items": 0}, "ref_audio_cache_max_items"),
         ({"ref_audio_cache_max_bytes": 0}, "ref_audio_cache_max_bytes"),
+        ({"vocoder_cuda_graph_max_frames": 0}, "vocoder_cuda_graph_max_frames"),
     ],
 )
 def test_moss_tts_config_rejects_invalid_reference_cache_settings(
@@ -855,6 +875,87 @@ def test_moss_tts_vocoder_can_disable_optimized_decode(
         1.0,
         1.0,
     ]
+
+
+def test_moss_tts_vocoder_builds_cuda_graph_runner_for_packed_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import stages
+
+    build_args = []
+
+    class FakeCodec(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = torch.nn.Parameter(torch.zeros(()))
+            self.quantizer = torch.nn.Identity()
+            self.quantizer.decode_codes = lambda codes: codes.float()
+            decoder_stage = torch.nn.Identity()
+            decoder_stage.module_type = "PatchedPretransform"
+            self.decoder = torch.nn.ModuleList([decoder_stage])
+
+    class FakePackedDecoder(_AlwaysPackedVocoderDecoder):
+        def input_dimension(self) -> int:
+            return 8
+
+    class FakeGraphRunner:
+        @classmethod
+        def build(cls, decoder, **kwargs):
+            build_args.append((decoder, kwargs))
+            return cls()
+
+        def run(self, hidden_states, input_lengths):
+            del hidden_states, input_lengths
+            return None
+
+    audio_tokenizer = SimpleNamespace(
+        model=FakeCodec(),
+        sample_rate=16000,
+        decode_codes=lambda segments: [torch.ones(2) for _ in segments],
+    )
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(audio_pad_code=1024, sampling_rate=16000)
+    )
+    monkeypatch.setattr(stages, "_load_moss_processor", lambda *args: processor)
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_audio_tokenizer",
+        lambda *args, **kwargs: audio_tokenizer,
+    )
+    monkeypatch.setattr(
+        stages,
+        "MossAudioTokenizerVocoderDecoder",
+        FakePackedDecoder,
+    )
+    monkeypatch.setattr(
+        stages,
+        "MossTTSDelayVocoderCudaGraphRunner",
+        FakeGraphRunner,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_codec_device",
+        lambda codec, fallback: torch.device("cuda:3"),
+    )
+
+    stages.create_vocoder_executor(
+        "model",
+        device="cpu",
+        max_batch_size=4,
+        optimized_decoder_dtype="bfloat16",
+        cuda_graph=True,
+        cuda_graph_max_frames=96,
+    )
+
+    assert len(build_args) == 1
+    _, kwargs = build_args[0]
+    assert kwargs == {
+        "device": torch.device("cuda:3"),
+        "autocast_dtype": torch.bfloat16,
+        "max_batch_size": 4,
+        "max_frames": 96,
+        "min_free_gb": 8.0,
+    }
 
 
 def test_moss_tts_preprocessing_loads_separate_codec(

@@ -39,6 +39,9 @@ from sglang_omni.models.moss_tts.request_builders import (
     set_moss_tts_preprocessing_context,
 )
 from sglang_omni.models.moss_tts.streaming_vocoder import MossStreamingVocoderScheduler
+from sglang_omni.models.moss_tts.vocoder_cuda_graph import (
+    MossTTSDelayVocoderCudaGraphRunner,
+)
 from sglang_omni.models.moss_tts_local.vocoder_decoder import (
     MossAudioTokenizerVocoderDecoder,
 )
@@ -616,9 +619,12 @@ class _MossTTSVocoder(BatchVocoderBase):
         audio_tokenizer: MossTTSAudioTokenizer,
         device: str,
         *,
-        optimized_decoder_dtype: torch.dtype | None,
-        max_segment_batch_size: int,
-        optimized: bool,
+        optimized_decoder_dtype: torch.dtype | None = None,
+        max_segment_batch_size: int = 8,
+        optimized: bool = False,
+        cuda_graph: bool = False,
+        cuda_graph_max_frames: int = 128,
+        cuda_graph_min_free_gb: float = 8.0,
     ) -> None:
         self._processor = processor
         self._audio_tokenizer = audio_tokenizer
@@ -628,6 +634,7 @@ class _MossTTSVocoder(BatchVocoderBase):
         self._codec = getattr(audio_tokenizer, "model", None) if optimized else None
         self._quantizer = getattr(self._codec, "quantizer", None)
         self._nonstream_decoder = None
+        self._cuda_graph_runner = None
         if (
             self._codec is not None
             and callable(getattr(self._quantizer, "decode_codes", None))
@@ -650,6 +657,24 @@ class _MossTTSVocoder(BatchVocoderBase):
                         len(self._nonstream_decoder),
                         self._optimized_decoder_dtype,
                     )
+                    if cuda_graph and codec_device.type == "cuda":
+                        try:
+                            self._cuda_graph_runner = (
+                                MossTTSDelayVocoderCudaGraphRunner.build(
+                                    self._nonstream_decoder,
+                                    device=codec_device,
+                                    autocast_dtype=self._optimized_decoder_dtype,
+                                    max_batch_size=self._max_segment_batch_size,
+                                    max_frames=cuda_graph_max_frames,
+                                    min_free_gb=cuda_graph_min_free_gb,
+                                )
+                            )
+                        except Exception:
+                            logger.exception(
+                                "MOSS-TTS Delay vocoder CUDA graph capture "
+                                "failed; keeping eager packed decode"
+                            )
+                            self._cuda_graph_runner = None
                 else:
                     logger.info(
                         "MOSS-TTS Delay packed decoder is unavailable for "
@@ -755,15 +780,26 @@ class _MossTTSVocoder(BatchVocoderBase):
             autocast_enabled = (
                 device.type == "cuda" and self._optimized_decoder_dtype is not None
             )
-            with torch.autocast(
-                device_type="cuda",
-                dtype=self._optimized_decoder_dtype or torch.bfloat16,
-                enabled=autocast_enabled,
-            ):
-                audio, audio_lengths = self._nonstream_decoder(
+            graphed = (
+                None
+                if self._cuda_graph_runner is None
+                else self._cuda_graph_runner.run(
                     decoder_hidden_states,
                     input_lengths,
                 )
+            )
+            if graphed is None:
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=self._optimized_decoder_dtype or torch.bfloat16,
+                    enabled=autocast_enabled,
+                ):
+                    audio, audio_lengths = self._nonstream_decoder(
+                        decoder_hidden_states,
+                        input_lengths,
+                    )
+            else:
+                audio, audio_lengths = graphed
         if audio is None or audio_lengths is None:
             raise RuntimeError(
                 "MOSS-TTS Delay audio tokenizer returned empty audio/audio_lengths"
@@ -884,6 +920,9 @@ def create_vocoder_executor(
     initial_chunk_frames: int = 0,
     optimized_decoder_dtype: str | torch.dtype | None = "bfloat16",
     optimized: bool = True,
+    cuda_graph: bool = True,
+    cuda_graph_max_frames: int = 128,
+    cuda_graph_min_free_gb: float = 8.0,
 ) -> MossStreamingVocoderScheduler:
     if gpu_id is not None:
         device = f"cuda:{gpu_id}"
@@ -904,6 +943,14 @@ def create_vocoder_executor(
             "optimized_decoder_dtype must be float16, bfloat16, or null; got "
             f"{optimized_decoder_dtype!r}"
         )
+    if cuda_graph_max_frames < 1:
+        raise ValueError(
+            f"cuda_graph_max_frames must be >= 1; got {cuda_graph_max_frames}"
+        )
+    if cuda_graph_min_free_gb < 0:
+        raise ValueError(
+            f"cuda_graph_min_free_gb must be >= 0; got {cuda_graph_min_free_gb}"
+        )
 
     vocoder = _MossTTSVocoder(
         processor,
@@ -912,6 +959,9 @@ def create_vocoder_executor(
         optimized_decoder_dtype=decoder_dtype,
         max_segment_batch_size=max_batch_size,
         optimized=optimized,
+        cuda_graph=cuda_graph,
+        cuda_graph_max_frames=cuda_graph_max_frames,
+        cuda_graph_min_free_gb=cuda_graph_min_free_gb,
     )
     return MossStreamingVocoderScheduler(
         vocoder,
