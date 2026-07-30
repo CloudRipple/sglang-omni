@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import weakref
 
 import pytest
 import torch
@@ -695,10 +696,56 @@ def test_cached_packed_rope_matches_moss_interleaved_reference() -> None:
 
     assert torch.equal(out_q, ref_q)
     assert torch.equal(out_k, ref_k)
-    assert cache._cos is not None
-    cos_ptr = cache._cos.data_ptr()
-    _ = cache.get(device=q.device, head_dim=q.shape[-1], max_positions=3)
-    assert cache._cos.data_ptr() == cos_ptr
+
+
+def test_packed_rope_cache_reuses_capacity_and_returns_prefix() -> None:
+    cache = vocoder_decoder._MossPackedRopeCache(max_period=10000.0)
+
+    cos_five, sin_five = cache.get(
+        device=torch.device("cpu"),
+        head_dim=6,
+        max_positions=5,
+    )
+    cos_eight, sin_eight = cache.get(
+        device=torch.device("cpu"),
+        head_dim=6,
+        max_positions=8,
+    )
+
+    assert cos_five.shape == sin_five.shape == (5, 3)
+    assert cos_eight.shape == sin_eight.shape == (8, 3)
+    assert cos_five.data_ptr() == cos_eight.data_ptr()
+    assert sin_five.data_ptr() == sin_eight.data_ptr()
+    assert torch.equal(cos_five, cos_eight[:5])
+    assert torch.equal(sin_five, sin_eight[:5])
+
+
+def test_packed_rope_cache_keeps_old_capacity_allocations_alive() -> None:
+    cache = vocoder_decoder._MossPackedRopeCache(max_period=10000.0)
+    old_cos, old_sin = cache.get(
+        device=torch.device("cpu"),
+        head_dim=6,
+        max_positions=8,
+    )
+    old_entry = next(iter(cache._entries.values()))
+    old_cos_ref = weakref.ref(old_entry[0])
+    old_sin_ref = weakref.ref(old_entry[1])
+    old_cos_ptr = old_cos.data_ptr()
+    old_sin_ptr = old_sin.data_ptr()
+    del old_entry, old_cos, old_sin
+
+    new_cos, new_sin = cache.get(
+        device=torch.device("cpu"),
+        head_dim=6,
+        max_positions=9,
+    )
+
+    assert len(cache._entries) == 2
+    assert new_cos.shape == new_sin.shape == (9, 3)
+    assert new_cos.data_ptr() != old_cos_ptr
+    assert new_sin.data_ptr() != old_sin_ptr
+    assert old_cos_ref() is not None
+    assert old_sin_ref() is not None
 
 
 def test_transformer_layer_uses_source_modules_for_primitive_ops() -> None:

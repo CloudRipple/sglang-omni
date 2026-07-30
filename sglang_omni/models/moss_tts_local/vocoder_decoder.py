@@ -255,10 +255,12 @@ def _unpack_unpadded_sequence(
 class _MossPackedRopeCache:
     def __init__(self, *, max_period: float) -> None:
         self.max_period = float(max_period)
-        self._device: torch.device | None = None
-        self._head_dim = 0
-        self._cos: torch.Tensor | None = None
-        self._sin: torch.Tensor | None = None
+        # CUDA graphs retain these storage addresses. Keep old capacities alive;
+        # power-of-two growth bounds retained storage below 2x the largest table.
+        self._entries: dict[
+            tuple[str, int | None, int, int],
+            tuple[torch.Tensor, torch.Tensor],
+        ] = {}
 
     def get(
         self,
@@ -271,27 +273,21 @@ class _MossPackedRopeCache:
             raise ValueError(f"max_positions must be positive, got {max_positions}")
         if head_dim <= 0 or head_dim % 2 != 0:
             raise ValueError(f"RoPE requires an even head_dim, got {head_dim}")
-        if (
-            self._cos is not None
-            and self._sin is not None
-            and self._device == device
-            and self._head_dim == head_dim
-            and self._cos.shape[0] >= max_positions
-        ):
-            return self._cos[:max_positions], self._sin[:max_positions]
-
-        half_dim = head_dim // 2
-        ds = torch.arange(half_dim, device=device, dtype=torch.float32)
-        freqs = torch.exp(ds * (-math.log(self.max_period) * 2 / head_dim))
-        positions = torch.arange(
-            max_positions, device=device, dtype=torch.float32
-        ).view(-1, 1)
-        phase = positions * freqs.view(1, -1)
-        self._device = device
-        self._head_dim = head_dim
-        self._cos = torch.cos(phase)
-        self._sin = torch.sin(phase)
-        return self._cos, self._sin
+        capacity = 1 << (max_positions - 1).bit_length()
+        key = (device.type, device.index, head_dim, capacity)
+        entry = self._entries.get(key)
+        if entry is None:
+            half_dim = head_dim // 2
+            ds = torch.arange(half_dim, device=device, dtype=torch.float32)
+            freqs = torch.exp(ds * (-math.log(self.max_period) * 2 / head_dim))
+            positions = torch.arange(capacity, device=device, dtype=torch.float32).view(
+                -1, 1
+            )
+            phase = positions * freqs.view(1, -1)
+            entry = (torch.cos(phase), torch.sin(phase))
+            self._entries[key] = entry
+        cos, sin = entry
+        return cos[:max_positions], sin[:max_positions]
 
 
 def _apply_cached_packed_rope(
