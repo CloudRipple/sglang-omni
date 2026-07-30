@@ -6,14 +6,25 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
+from sglang.srt.utils.hf_transformers import (
+    get_config,
+    get_context_length,
+    get_hf_text_config,
+)
+
 from sglang_omni.models.moss_tts import request_builders
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
+
+_MAX_PREFILL_TOKENS = 8192
 
 
 class MossTtsEngineBuilder(TtsEngineBuilder):
     model_name = "MOSS-TTS"
-    context_length = 8192
     model_arch_override = "MossTTSDelaySGLangModel"
+
+    def resolve_context_length(self, checkpoint_dir: str) -> int:
+        config = get_config(checkpoint_dir, trust_remote_code=True)
+        return int(get_context_length(get_hf_text_config(config)))
 
     def generation_defaults(
         self,
@@ -26,7 +37,7 @@ class MossTtsEngineBuilder(TtsEngineBuilder):
             "disable_cuda_graph": False,
             "disable_overlap_schedule": True,
             "enable_torch_compile": False,
-            "max_prefill_tokens": 8192,
+            "max_prefill_tokens": min(self.context_length, _MAX_PREFILL_TOKENS),
             "sampling_backend": "pytorch",
             "trust_remote_code": True,
         }

@@ -110,7 +110,10 @@ from sglang_omni.serve.speech_errors import (
     openai_error_payload,
     speech_error_response,
 )
-from sglang_omni.serve.speech_service import SpeechRequestValidator
+from sglang_omni.serve.speech_service import (
+    MAX_SPEECH_INPUT_CHARS,
+    SpeechRequestValidator,
+)
 from sglang_omni.serve.speech_voices import MAX_VOICE_UPLOAD_BYTES, SpeakerSampleStore
 from sglang_omni.serve.speech_ws import SpeechWebSocketSession
 from sglang_omni.serve.transcription_adapters import resolve_adapter
@@ -215,6 +218,7 @@ def create_app(
     required_speech_reference_count: int | None = None,
     speech_reference_text_required: bool = False,
     additional_speech_languages: frozenset[str] = frozenset(),
+    max_speech_input_chars: int | None = MAX_SPEECH_INPUT_CHARS,
     enable_realtime: bool = False,
     supports_realtime_audio_output: bool = False,
     allowed_local_media_path: str | None = None,
@@ -237,6 +241,8 @@ def create_app(
         speech_reference_text_required: Whether each speech reference requires
             a transcript.
         additional_speech_languages: Pipeline-specific accepted languages.
+        max_speech_input_chars: Maximum accepted input characters, or ``None``
+            to defer length validation to model-specific context checks.
         enable_realtime: If True, mount the WebSocket ``/v1/realtime``
             endpoint (OpenAI Realtime API).
         supports_realtime_audio_output: Whether the mounted realtime endpoint
@@ -281,6 +287,7 @@ def create_app(
         required_speech_reference_count=required_speech_reference_count,
         speech_reference_text_required=speech_reference_text_required,
         additional_speech_languages=additional_speech_languages,
+        max_speech_input_chars=max_speech_input_chars,
         allowed_local_media_path=allowed_local_media_path,
         allowed_media_domains=allowed_media_domains,
         voice_store=app.state.speaker_sample_store,

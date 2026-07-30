@@ -42,6 +42,13 @@ class TtsEngineBuilder(ABC):
         self.dtype = dtype
 
         self.pre_infra_setup(checkpoint_dir)
+        context_length = int(self.resolve_context_length(checkpoint_dir))
+        if context_length <= 0:
+            raise ValueError(
+                f"{self.model_name} resolved an invalid context length: "
+                f"{context_length}"
+            )
+        self.context_length = context_length
 
         overrides = build_generation_batch_overrides(
             server_args_overrides=server_args_overrides,
@@ -131,6 +138,10 @@ class TtsEngineBuilder(ABC):
 
     def pre_infra_setup(self, checkpoint_dir: str) -> None:
         del checkpoint_dir
+
+    def resolve_context_length(self, checkpoint_dir: str) -> int:
+        del checkpoint_dir
+        return self.context_length
 
     def adjust_overrides(self, overrides: dict[str, Any]) -> None:
         del overrides

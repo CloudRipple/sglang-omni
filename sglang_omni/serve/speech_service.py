@@ -86,6 +86,7 @@ class SpeechRequestValidator:
         required_speech_reference_count: int | None = None,
         speech_reference_text_required: bool = False,
         additional_speech_languages: frozenset[str] = frozenset(),
+        max_speech_input_chars: int | None = MAX_SPEECH_INPUT_CHARS,
         allowed_local_media_path: str | Path | None = None,
         allowed_media_domains: list[str] | None = None,
         voice_store: "SpeakerSampleStore | None" = None,
@@ -98,6 +99,14 @@ class SpeechRequestValidator:
             and required_speech_reference_count < 1
         ):
             raise ValueError("required_speech_reference_count must be greater than 0")
+        if max_speech_input_chars is not None and (
+            isinstance(max_speech_input_chars, bool)
+            or not isinstance(max_speech_input_chars, int)
+            or max_speech_input_chars < 1
+        ):
+            raise ValueError(
+                "max_speech_input_chars must be a positive integer or None"
+            )
         self.default_model = default_model
         self.requires_uploaded_voice_for_named_voice = (
             requires_uploaded_voice_for_named_voice
@@ -108,6 +117,7 @@ class SpeechRequestValidator:
         )
         self.required_speech_reference_count = required_speech_reference_count
         self.speech_reference_text_required = speech_reference_text_required
+        self.max_speech_input_chars = max_speech_input_chars
         supported_languages = SUPPORTED_TTS_LANGUAGES | frozenset(
             additional_speech_languages
         )
@@ -206,9 +216,10 @@ class SpeechRequestValidator:
     def validate_input_text(self, input_text: str) -> None:
         if not isinstance(input_text, str) or not input_text.strip():
             raise bad_request("input must be a non-empty string", param="input")
-        if len(input_text) > MAX_SPEECH_INPUT_CHARS:
+        limit = self.max_speech_input_chars
+        if limit is not None and len(input_text) > limit:
             raise bad_request(
-                f"input must be at most {MAX_SPEECH_INPUT_CHARS} characters",
+                f"input must be at most {limit} characters",
                 param="input",
             )
 

@@ -7,6 +7,8 @@ import inspect
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from tests.unit_test.fakes import FakeServerArgs
 
 TEST_MAX_TOTAL_TOKENS = 82000
@@ -66,6 +68,14 @@ def test_tts_engine_builder_hook_contract_is_narrow() -> None:
 
     adjust_overrides_signature = inspect.signature(TtsEngineBuilder.adjust_overrides)
     assert list(adjust_overrides_signature.parameters) == ["self", "overrides"]
+
+    resolve_context_length_signature = inspect.signature(
+        TtsEngineBuilder.resolve_context_length
+    )
+    assert list(resolve_context_length_signature.parameters) == [
+        "self",
+        "checkpoint_dir",
+    ]
 
 
 def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> None:
@@ -162,7 +172,7 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
 
     class RecordingBuilder(TtsEngineBuilder):
         model_name = "Test TTS"
-        context_length = 123
+        context_length = 1
         model_arch_override = "TestArch"
 
         def resolve_checkpoint(self, model_path: str) -> str:
@@ -172,6 +182,12 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
         def pre_infra_setup(self, checkpoint_dir: str) -> None:
             events.append("pre_infra_setup")
             assert checkpoint_dir == "model-resolved"
+            self.context_length = 123
+
+        def resolve_context_length(self, checkpoint_dir: str) -> int:
+            events.append("resolve_context_length")
+            assert checkpoint_dir == "model-resolved"
+            return super().resolve_context_length(checkpoint_dir)
 
         def generation_defaults(
             self,
@@ -264,6 +280,7 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
     assert events == [
         "resolve_checkpoint",
         "pre_infra_setup",
+        "resolve_context_length",
         "generation_defaults",
         "adjust_overrides",
         "build_server_args",
@@ -289,6 +306,38 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
     assert init_graph_calls == [True]
     assert scheduler.kwargs["server_args"].disable_cuda_graph is False
     assert scheduler.kwargs["model_runner"].outbox == "outbox"
+
+
+def test_tts_engine_builder_rejects_invalid_resolved_context_length() -> None:
+    from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
+
+    class InvalidContextBuilder(TtsEngineBuilder):
+        model_name = "Invalid TTS"
+
+        def resolve_checkpoint(self, model_path: str) -> str:
+            return model_path
+
+        def resolve_context_length(self, checkpoint_dir: str) -> int:
+            del checkpoint_dir
+            return 0
+
+        def generation_defaults(self, *, dtype: str) -> dict[str, Any]:
+            raise AssertionError("generation defaults must not see an invalid context")
+
+        def setup_model(self, **kwargs: Any) -> None:
+            raise AssertionError("infrastructure must not be created")
+
+        def make_model_runner(self, model_worker: Any, output_proc: Any) -> Any:
+            raise AssertionError("model runner must not be created")
+
+        def make_adapters(self, model: Any) -> tuple[Any, Any]:
+            raise AssertionError("adapters must not be created")
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid TTS resolved an invalid context length: 0",
+    ):
+        InvalidContextBuilder().build("model")
 
 
 def test_tts_engine_builder_base_scheduler_preserves_abort_with_extra_kwargs(

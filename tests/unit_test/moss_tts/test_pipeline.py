@@ -127,6 +127,7 @@ class _NeverPackedVocoderDecoder(_AlwaysPackedVocoderDecoder):
 
 def test_moss_tts_config_and_registry_contracts() -> None:
     config = MossTTSPipelineConfig(model_path="model")
+    assert config.max_speech_input_chars is None
     assert [stage.name for stage in config.stages] == [
         "preprocessing",
         "tts_engine",
@@ -316,8 +317,40 @@ def test_moss_tts_config_rejects_invalid_reference_cache_settings(
         MossTTSPipelineConfig(model_path="model", **kwargs)
 
 
+@pytest.mark.parametrize(
+    ("context_length", "expected_max_prefill_tokens"),
+    [(4096, 4096), (40960, 8192)],
+)
+def test_moss_tts_engine_caps_prefill_to_resolved_context(
+    monkeypatch,
+    context_length,
+    expected_max_prefill_tokens,
+) -> None:
+    from sglang_omni.models.moss_tts import engine_builder
+
+    monkeypatch.setattr(
+        engine_builder,
+        "get_config",
+        lambda model_path, trust_remote_code: SimpleNamespace(model_path=model_path),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "get_hf_text_config",
+        lambda config: SimpleNamespace(max_position_embeddings=context_length),
+    )
+
+    builder = engine_builder.MossTtsEngineBuilder()
+    builder.context_length = builder.resolve_context_length("model")
+
+    assert builder.context_length == context_length
+    assert (
+        builder.generation_defaults(dtype="bfloat16")["max_prefill_tokens"]
+        == expected_max_prefill_tokens
+    )
+
+
 def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
-    from sglang_omni.models.moss_tts import request_builders, stages
+    from sglang_omni.models.moss_tts import engine_builder, request_builders, stages
     from sglang_omni.scheduling import (
         bootstrap,
         engine_factory,
@@ -325,11 +358,11 @@ def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
         sglang_backend,
     )
 
-    captured: dict[str, object] = {"build_kwargs": []}
+    captured: dict[str, object] = {"build_kwargs": [], "context_lengths": []}
 
     def fake_build_sglang_server_args(model_path, context_length, **kwargs):
         captured["model_path"] = model_path
-        captured["context_length"] = context_length
+        captured["context_lengths"].append(context_length)
         captured["build_kwargs"].append(dict(kwargs))
         return FakeServerArgs(
             disable_cuda_graph=kwargs["disable_cuda_graph"],
@@ -409,6 +442,16 @@ def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
         engine_factory, "_resolve_checkpoint", lambda model_path: model_path
     )
     monkeypatch.setattr(
+        engine_builder,
+        "get_config",
+        lambda model_path, trust_remote_code: SimpleNamespace(model_path=model_path),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "get_hf_text_config",
+        lambda config: SimpleNamespace(max_position_embeddings=40960),
+    )
+    monkeypatch.setattr(
         request_builders,
         "make_moss_tts_scheduler_adapters",
         lambda model: (lambda payload: payload, lambda data: data),
@@ -444,12 +487,14 @@ def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
     assert default_kwargs["cuda_graph_bs"] == [1, 2, 4, 8, 12, 16]
     assert default_kwargs["cuda_graph_max_bs"] == 16
     assert default_kwargs["enable_torch_compile"] is False
+    assert default_kwargs["max_prefill_tokens"] == 8192
     assert "mem_fraction_static" not in default_kwargs
     assert explicit_kwargs["cuda_graph_bs"] == [1, 2, 4, 8, 12, 16]
     assert explicit_kwargs["cuda_graph_max_bs"] == 16
     assert explicit_kwargs["enable_torch_compile"] is True
     assert explicit_kwargs["mem_fraction_static"] == 0.61
-    assert captured["context_length"] == 8192
+    assert explicit_kwargs["max_prefill_tokens"] == 8192
+    assert captured["context_lengths"] == [40960, 40960]
     assert captured["model_arch_override"] == "MossTTSDelaySGLangModel"
     assert captured["defer_cuda_graph_capture"] is True
     assert captured["graph_inits"] == 2

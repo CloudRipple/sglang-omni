@@ -570,6 +570,25 @@ def test_speech_endpoint_returns_binary_audio() -> None:
     assert speech_client.speech_requests[0].metadata["tts_params"]["voice"] == "default"
 
 
+def test_speech_endpoint_can_defer_input_length_to_model_context() -> None:
+    speech_client = SuccessfulSpeechClient()
+    client = TestClient(
+        create_app(
+            speech_client,
+            model_name="tts",
+            max_speech_input_chars=None,
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"input": "x" * 5000, "response_format": "wav"},
+    )
+
+    assert response.status_code == 200
+    assert len(speech_client.speech_requests[0].prompt) == 5000
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_speech_endpoint_accepts_seedtts_reference_payload_without_voice(
     stream: bool,
