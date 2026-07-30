@@ -280,7 +280,6 @@ def test_max_sessions_rejects_new_identity_without_ownership_mutation(
         max_sessions=1,
         max_held_sessions=1,
         max_active_turns=1,
-        max_turn_frames=32,
     )
     scheduler._max_session_rows = 64
     scheduler._max_held_kv_tokens = 64
@@ -337,7 +336,6 @@ def test_active_first_turn_reserves_held_session_before_physical_kv() -> None:
         max_sessions=2,
         max_held_sessions=1,
         max_active_turns=2,
-        max_turn_frames=32,
     )
     scheduler._max_session_rows = 64
     scheduler._max_held_kv_tokens = 128
@@ -375,47 +373,28 @@ def test_active_first_turn_reserves_held_session_before_physical_kv() -> None:
     assert scheduler._admission_rejection_totals == {"held_session_limit": 1}
 
 
-@pytest.mark.parametrize(
-    (
-        "limit_overrides",
-        "max_session_rows",
-        "max_held_kv_tokens",
-        "match",
-        "reason",
-    ),
-    [
-        (
-            {
-                "max_turn_frames": 31,
-            },
-            64,
-            64,
-            "turn frame limit exceeded",
-            "turn_frame_limit",
-        ),
-        (
-            {
-                "max_turn_frames": 32,
-            },
-            44,
-            44,
-            "session context limit exceeded",
-            "session_context_limit",
-        ),
-    ],
-)
-def test_turn_and_context_limits_reject_before_session_create_req(
+def test_large_turn_is_admitted_when_context_and_kv_capacity_allow() -> None:
+    scheduler = _scheduler()
+    scheduler._max_session_rows = 6000
+    scheduler._max_held_kv_tokens = 6000
+    data = _request_data(
+        tuple(range(12)),
+        input_done=False,
+        max_new_tokens=5000,
+    )
+
+    scheduler._enforce_resource_admission("request-1", data)
+
+    assert data.context_reservation_rows == 5013
+    assert not getattr(scheduler, "_admission_rejection_totals", {})
+
+
+def test_context_limit_rejects_before_session_create_req(
     monkeypatch: pytest.MonkeyPatch,
-    limit_overrides: dict[str, int],
-    max_session_rows: int,
-    max_held_kv_tokens: int,
-    match: str,
-    reason: str,
 ) -> None:
     scheduler = _scheduler()
-    _set_limits(scheduler, **limit_overrides)
-    scheduler._max_session_rows = max_session_rows
-    scheduler._max_held_kv_tokens = max_held_kv_tokens
+    scheduler._max_session_rows = 44
+    scheduler._max_held_kv_tokens = 44
     create_calls = 0
 
     def unexpected_create(*args: Any, **kwargs: Any) -> Any:
@@ -429,7 +408,7 @@ def test_turn_and_context_limits_reject_before_session_create_req(
     monkeypatch.setattr(Session, "create_req", unexpected_create)
     data = _request_data(tuple(range(12)), input_done=False)
 
-    with pytest.raises((RuntimeError, ValueError), match=match):
+    with pytest.raises(ValueError, match="session context limit exceeded"):
         scheduler._finalize_built_request(
             _payload(tuple(range(12))),
             False,
@@ -440,7 +419,7 @@ def test_turn_and_context_limits_reject_before_session_create_req(
     assert scheduler._moss_tts_realtime_sessions == {}
     assert scheduler.session_controller.sessions == {}
     assert data.context_reservation_rows == 0
-    assert scheduler._admission_rejection_totals == {reason: 1}
+    assert scheduler._admission_rejection_totals == {"session_context_limit": 1}
 
 
 def test_global_held_kv_limit_rejects_before_second_session_create_req(
@@ -452,7 +431,6 @@ def test_global_held_kv_limit_rejects_before_second_session_create_req(
         max_sessions=2,
         max_held_sessions=2,
         max_active_turns=2,
-        max_turn_frames=32,
     )
     scheduler._max_session_rows = 64
     scheduler._max_held_kv_tokens = 70
@@ -509,7 +487,6 @@ def test_warm_session_admission_replaces_old_kv_reservation() -> None:
         max_sessions=1,
         max_held_sessions=1,
         max_active_turns=1,
-        max_turn_frames=32,
     )
     scheduler._max_session_rows = required_rows
     scheduler._max_held_kv_tokens = required_rows

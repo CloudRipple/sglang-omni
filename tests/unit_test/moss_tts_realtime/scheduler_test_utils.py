@@ -256,6 +256,7 @@ def _request_data(
     initial_token_ids: tuple[int, ...],
     *,
     input_done: bool,
+    max_new_tokens: int = 32,
     keep_session: bool = True,
     session_id: str = "session-1",
     turn_id: str = "turn-1",
@@ -270,14 +271,14 @@ def _request_data(
         initial_token_ids=list(initial_token_ids),
         input_done=input_done,
         keep_session=keep_session,
-        generation_kwargs={"max_new_tokens": 32},
+        generation_kwargs={"max_new_tokens": max_new_tokens},
     )
     return MossTTSRealtimeRequestData(
         input_ids=torch.tensor(
             build_moss_tts_realtime_row_cache_key_ids(rows),
             dtype=torch.long,
         ),
-        max_new_tokens=32,
+        max_new_tokens=max_new_tokens,
         state=state,
         model_config=SimpleNamespace(
             vocab_size=200_000,

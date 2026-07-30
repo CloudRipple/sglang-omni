@@ -32,8 +32,15 @@ class MossTTSRealtimeModelRunner(ModelRunner):
             )
             or 1
         )
+        context_length = getattr(server_args, "context_length", None)
         max_history_frames = int(
-            getattr(tp_worker, "moss_tts_realtime_max_turn_frames", 1000) or 1000
+            getattr(
+                tp_worker,
+                "moss_tts_realtime_max_history_frames",
+                context_length,
+            )
+            or context_length
+            or 1
         )
         self.model.init_decode_state_pool(
             max_running_requests=max_active_turns,

@@ -37,7 +37,6 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
         max_pending_text_tokens: int,
         max_pending_text_bytes: int,
         max_input_updates: int,
-        max_turn_frames: int,
         terminal_tombstone_limit: int,
         input_idle_timeout_s: float,
         turn_timeout_s: float,
@@ -50,7 +49,6 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
             max_pending_text_tokens=max_pending_text_tokens,
             max_pending_text_bytes=max_pending_text_bytes,
             max_input_updates=max_input_updates,
-            max_turn_frames=max_turn_frames,
             terminal_tombstone_limit=terminal_tombstone_limit,
             input_idle_timeout_s=input_idle_timeout_s,
             turn_timeout_s=turn_timeout_s,
@@ -268,7 +266,10 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
             < self.context_length
         ):
             raise ValueError("loaded model context is smaller than max_seq_len")
-        model_worker.moss_tts_realtime_max_turn_frames = self.limits.max_turn_frames
+        # The scheduler already admits each turn against this same context
+        # length. Using it for the fixed sampling-history pool avoids a second,
+        # arbitrary per-turn generation cap while keeping the pool bounded.
+        model_worker.moss_tts_realtime_max_history_frames = self.context_length
         model_worker.moss_tts_realtime_max_active_turns = self.limits.max_active_turns
 
     def get_model_buffer_bs(self, model: Any) -> int | None:

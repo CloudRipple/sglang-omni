@@ -21,7 +21,6 @@ def _builder(**overrides: Any) -> MossTTSRealtimeEngineBuilder:
         "max_pending_text_tokens": 64,
         "max_pending_text_bytes": 2048,
         "max_input_updates": 32,
-        "max_turn_frames": 40,
         "terminal_tombstone_limit": 77,
         "input_idle_timeout_s": 1.5,
         "turn_timeout_s": 2.5,

@@ -259,13 +259,11 @@ def _normalize_generation_kwargs(values: Mapping[str, Any] | None) -> dict[str, 
     if values is not None and not isinstance(values, Mapping):
         raise TypeError("generation_kwargs must be a mapping")
     source = dict(values or {})
-    max_new_tokens = source.get("max_new_tokens")
-    if max_new_tokens is None:
-        max_new_tokens = _source_value(
-            source,
-            "max_turn_frames",
-            MOSS_TTS_REALTIME_DEFAULT_MAX_NEW_TOKENS,
-        )
+    max_new_tokens = _source_value(
+        source,
+        "max_new_tokens",
+        MOSS_TTS_REALTIME_DEFAULT_MAX_NEW_TOKENS,
+    )
     kwargs: dict[str, Any] = {
         "max_new_tokens": _strict_int(
             max_new_tokens,

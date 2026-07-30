@@ -27,7 +27,6 @@ def _builder(**overrides: Any) -> MossTTSRealtimeEngineBuilder:
         "max_pending_text_tokens": 64,
         "max_pending_text_bytes": 2048,
         "max_input_updates": 32,
-        "max_turn_frames": 40,
         "terminal_tombstone_limit": 77,
         "input_idle_timeout_s": 1.5,
         "turn_timeout_s": 2.5,
@@ -615,7 +614,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
         "total_gpu_memory_fraction": pytest.approx(0.80),
         "model_arch_override": "MossTTSRealtimeSGLangModel",
     }
-    assert worker.moss_tts_realtime_max_turn_frames == 40
+    assert worker.moss_tts_realtime_max_history_frames == 40960
     assert worker.moss_tts_realtime_max_active_turns == 3
     assert calls["processor_binding"] == (
         underlying_runner.model.config,

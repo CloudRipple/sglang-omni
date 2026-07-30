@@ -41,7 +41,6 @@ class MossTTSRealtimeResourceLimits(BaseModel):
     max_pending_text_tokens: int = 4096
     max_pending_text_bytes: int = 256 * 1024
     max_input_updates: int = 8192
-    max_turn_frames: int = 1000
     terminal_tombstone_limit: int = 8192
     input_idle_timeout_s: float = 30.0
     turn_timeout_s: float = 600.0
@@ -55,7 +54,6 @@ class MossTTSRealtimeResourceLimits(BaseModel):
             "max_pending_text_tokens",
             "max_pending_text_bytes",
             "max_input_updates",
-            "max_turn_frames",
             "terminal_tombstone_limit",
         )
         for field_name in positive_int_fields:
@@ -216,6 +214,7 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
                     "max_session_rows",
                     "max_held_kv_tokens",
                     "codec_slots",
+                    "max_turn_frames",
                 ):
                     stage.factory_args.pop(key, None)
                 for key in (
@@ -225,7 +224,6 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
                     "max_pending_text_tokens",
                     "max_pending_text_bytes",
                     "max_input_updates",
-                    "max_turn_frames",
                     "terminal_tombstone_limit",
                     "input_idle_timeout_s",
                     "turn_timeout_s",

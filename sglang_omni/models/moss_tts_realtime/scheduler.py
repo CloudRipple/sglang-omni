@@ -132,7 +132,6 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         max_pending_text_bytes: int = _DEFAULT_LIMITS.max_pending_text_bytes,
         max_input_updates: int = _DEFAULT_LIMITS.max_input_updates,
         max_active_turns: int = _DEFAULT_LIMITS.max_active_turns,
-        max_turn_frames: int = _DEFAULT_LIMITS.max_turn_frames,
         input_idle_timeout_s: float = _DEFAULT_LIMITS.input_idle_timeout_s,
         turn_timeout_s: float = _DEFAULT_LIMITS.turn_timeout_s,
         session_idle_ttl_s: float = _DEFAULT_LIMITS.session_idle_ttl_s,
@@ -147,7 +146,6 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             max_pending_text_bytes=max_pending_text_bytes,
             max_input_updates=max_input_updates,
             max_active_turns=max_active_turns,
-            max_turn_frames=max_turn_frames,
             input_idle_timeout_s=input_idle_timeout_s,
             turn_timeout_s=turn_timeout_s,
             session_idle_ttl_s=session_idle_ttl_s,
@@ -976,28 +974,17 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
             self._record_admission_rejection(
                 request_id,
-                reason="invalid_turn_frame_limit",
+                reason="invalid_max_new_tokens",
                 message="MOSS-TTS-Realtime max_new_tokens must be an integer",
                 error_type=TypeError,
             )
         if max_new_tokens < 1:
             self._record_admission_rejection(
                 request_id,
-                reason="invalid_turn_frame_limit",
+                reason="invalid_max_new_tokens",
                 message="MOSS-TTS-Realtime max_new_tokens must be positive",
                 error_type=ValueError,
             )
-        if max_new_tokens > limits.max_turn_frames:
-            self._record_admission_rejection(
-                request_id,
-                reason="turn_frame_limit",
-                message=(
-                    "MOSS-TTS-Realtime turn frame limit exceeded: "
-                    f"{max_new_tokens} > {limits.max_turn_frames}"
-                ),
-                error_type=ValueError,
-            )
-
         prompt_rows = data.prompt_rows
         if not isinstance(prompt_rows, torch.Tensor):
             self._record_admission_rejection(
@@ -2234,7 +2221,6 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 "physical_held_kv_tokens_high_water": (self._held_kv_tokens_high_water),
                 "max_sessions": limits.max_sessions,
                 "max_held_sessions": limits.max_held_sessions,
-                "max_turn_frames": limits.max_turn_frames,
                 "max_session_rows": self._max_session_rows,
                 "max_held_kv_tokens": self._max_held_kv_tokens,
                 "codec_slots": self._codec_slots,

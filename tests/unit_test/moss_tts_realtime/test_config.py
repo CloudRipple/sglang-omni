@@ -180,6 +180,7 @@ def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> N
         max_session_rows=999,
         max_held_kv_tokens=999,
         codec_slots=999,
+        max_turn_frames=999,
         turn_timeout_s=999.0,
     )
     stage_by_name["vocoder"].factory_args["stream_slots"] = 999
@@ -190,7 +191,6 @@ def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> N
         max_pending_text_tokens=64,
         max_pending_text_bytes=2048,
         max_input_updates=32,
-        max_turn_frames=40,
         terminal_tombstone_limit=77,
         input_idle_timeout_s=1.5,
         turn_timeout_s=2.5,
@@ -211,6 +211,7 @@ def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> N
     assert "max_session_rows" not in engine_args
     assert "max_held_kv_tokens" not in engine_args
     assert "codec_slots" not in engine_args
+    assert "max_turn_frames" not in engine_args
     assert stage_by_name["vocoder"].factory_args["stream_slots"] == (
         limits.max_active_turns
     )
@@ -218,7 +219,7 @@ def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> N
 
 @pytest.mark.parametrize(
     "field_name",
-    ["max_session_rows", "max_held_kv_tokens", "codec_slots"],
+    ["max_session_rows", "max_held_kv_tokens", "codec_slots", "max_turn_frames"],
 )
 def test_resource_limits_reject_derived_fields(field_name: str) -> None:
     assert field_name not in MossTTSRealtimeResourceLimits.model_fields
