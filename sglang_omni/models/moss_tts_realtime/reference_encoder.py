@@ -140,6 +140,9 @@ class MossTTSRealtimeAudioEncoder:
         )
         if self.sample_rate < 1:
             raise ValueError("MOSS-TTS-Realtime codec sample rate must be positive")
+        self.downsample_rate = int(getattr(config, "downsample_rate", 0) or 0)
+        if self.downsample_rate < 1:
+            raise ValueError("MOSS-TTS-Realtime codec downsample rate must be positive")
 
     def prepare_waveform(self, value: Any) -> torch.Tensor:
         source = _normalize_audio_source(value)
@@ -178,49 +181,75 @@ class MossTTSRealtimeAudioEncoder:
             return {}
         return {"num_quantizers": self.num_quantizers}
 
+    def _prompt_code_lengths(self, waveforms: list[torch.Tensor]) -> list[int]:
+        # Upstream MOSS-TTS-Realtime uses every raw codec frame after the codec
+        # pads a waveform to downsample_rate. Derive that per-item ceil length
+        # from the normalized waveform instead of the codec's floor-divided
+        # audio_codes_lengths.
+        return [
+            (int(waveform.numel()) + self.downsample_rate - 1) // self.downsample_rate
+            for waveform in waveforms
+        ]
+
     def encode(self, value: Any) -> torch.Tensor:
         waveform = self.prepare_waveform(value).to(self.device)
+        prompt_lengths = self._prompt_code_lengths([waveform])
         with self._lock, torch.inference_mode():
             output = self.codec.encode(
                 waveform.unsqueeze(0),
                 return_dict=True,
                 **self._quantizer_kwargs(),
             )
-        return self._split_codec_output(output, batch_size=1)[0]
+        return self._split_codec_output(
+            output,
+            prompt_lengths=prompt_lengths,
+        )[0]
 
     def encode_waveforms(self, waveforms: list[torch.Tensor]) -> list[torch.Tensor]:
         if not waveforms:
             raise ValueError("waveforms must contain at least one waveform")
         prepared = [waveform.to(self.device) for waveform in waveforms]
+        prompt_lengths = self._prompt_code_lengths(prepared)
         batch_encode = getattr(self.codec, "batch_encode", None)
         if callable(batch_encode):
             with self._lock, torch.inference_mode():
                 output = batch_encode(prepared, **self._quantizer_kwargs())
-            return self._split_codec_output(output, batch_size=len(prepared))
+            return self._split_codec_output(
+                output,
+                prompt_lengths=prompt_lengths,
+            )
 
         results: list[torch.Tensor] = []
         with self._lock, torch.inference_mode():
-            for waveform in prepared:
+            for waveform, prompt_length in zip(
+                prepared,
+                prompt_lengths,
+                strict=True,
+            ):
                 output = self.codec.encode(
                     waveform.unsqueeze(0),
                     return_dict=True,
                     **self._quantizer_kwargs(),
                 )
-                results.extend(self._split_codec_output(output, batch_size=1))
+                results.extend(
+                    self._split_codec_output(
+                        output,
+                        prompt_lengths=[prompt_length],
+                    )
+                )
         return results
 
     def _split_codec_output(
         self,
         output: Any,
         *,
-        batch_size: int,
+        prompt_lengths: list[int],
     ) -> list[torch.Tensor]:
+        batch_size = len(prompt_lengths)
         if isinstance(output, Mapping):
             audio_codes = output.get("audio_codes")
-            audio_codes_lengths = output.get("audio_codes_lengths")
         else:
             audio_codes = getattr(output, "audio_codes", None)
-            audio_codes_lengths = getattr(output, "audio_codes_lengths", None)
         if not isinstance(audio_codes, torch.Tensor):
             raise RuntimeError(
                 "MOSS-TTS-Realtime codec encode returned no audio_codes tensor"
@@ -236,31 +265,18 @@ class MossTTSRealtimeAudioEncoder:
                 )
             audio_codes = audio_codes[: self.num_quantizers]
 
-        if audio_codes_lengths is None:
-            if batch_size != 1:
-                raise RuntimeError(
-                    "MOSS-TTS-Realtime batched codec encode returned no code lengths"
-                )
-            audio_codes_lengths = torch.tensor(
-                [int(audio_codes.shape[-1])],
-                device=audio_codes.device,
-                dtype=torch.long,
-            )
-        if not isinstance(audio_codes_lengths, torch.Tensor):
-            audio_codes_lengths = torch.as_tensor(audio_codes_lengths)
-        lengths = audio_codes_lengths.detach().to(device="cpu", dtype=torch.long)
-        if lengths.numel() != batch_size:
-            raise RuntimeError(
-                "MOSS-TTS-Realtime codec code lengths must match the batch size"
-            )
-
         codes = audio_codes.detach().to(device="cpu", dtype=torch.long)
         results: list[torch.Tensor] = []
-        for index in range(batch_size):
-            length = int(lengths[index])
-            if length < 1 or length > int(codes.shape[-1]):
+        raw_frames = int(codes.shape[-1])
+        for index, length in enumerate(prompt_lengths):
+            if length < 1:
                 raise RuntimeError(
-                    "MOSS-TTS-Realtime codec returned an invalid code length"
+                    "MOSS-TTS-Realtime reference produced an invalid prompt length"
+                )
+            if length > raw_frames:
+                raise RuntimeError(
+                    "MOSS-TTS-Realtime codec returned fewer raw frames than "
+                    "required by the reference waveform"
                 )
             results.append(codes[:, index, :length].transpose(0, 1).contiguous())
         return results

@@ -24,7 +24,7 @@ N_VQ = 16
 
 
 class _FakeCodec:
-    config = SimpleNamespace(sampling_rate=24000)
+    config = SimpleNamespace(sampling_rate=24000, downsample_rate=1)
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[int], int | None]] = []
@@ -57,7 +57,7 @@ def test_audio_encoder_uses_codec_tensor_contract() -> None:
     output = SimpleNamespace(audio_codes=torch.zeros((32, 1, 4), dtype=torch.long))
 
     class FakeCodec:
-        config = SimpleNamespace(sampling_rate=24000)
+        config = SimpleNamespace(sampling_rate=24000, downsample_rate=8)
 
         def encode(self, values: torch.Tensor, **kwargs: Any) -> Any:
             calls.append((values.detach().clone(), kwargs))
@@ -87,7 +87,7 @@ def test_audio_encoder_normalizes_base64_mapping(monkeypatch) -> None:
         return np.arange(12, dtype=np.float32)
 
     class FakeCodec:
-        config = SimpleNamespace(sampling_rate=24000)
+        config = SimpleNamespace(sampling_rate=24000, downsample_rate=12)
 
         def encode(self, values: torch.Tensor, **kwargs: Any) -> Any:
             seen["values"] = values.detach().clone()
@@ -109,6 +109,107 @@ def test_audio_encoder_normalizes_base64_mapping(monkeypatch) -> None:
     }
     assert seen["values"].shape == (1, 12)
     assert seen["encode_kwargs"] == {"return_dict": True}
+
+
+@pytest.mark.parametrize(
+    ("waveform_samples", "raw_frames", "reported_frames"),
+    [
+        (8, 2, 2),
+        (9, 3, 2),
+    ],
+)
+def test_audio_encoder_uses_upstream_ceil_prompt_length(
+    waveform_samples: int,
+    raw_frames: int,
+    reported_frames: int,
+) -> None:
+    class FakeCodec:
+        config = SimpleNamespace(sampling_rate=24000, downsample_rate=4)
+
+        def encode(self, values: torch.Tensor, **kwargs: Any) -> Any:
+            assert values.shape == (1, waveform_samples)
+            assert kwargs == {"return_dict": True, "num_quantizers": N_VQ}
+            codes = torch.arange(raw_frames, dtype=torch.long).view(1, 1, -1)
+            return SimpleNamespace(
+                audio_codes=codes.expand(N_VQ, 1, -1).contiguous(),
+                audio_codes_lengths=torch.tensor([reported_frames]),
+            )
+
+    encoder = MossTTSRealtimeAudioEncoder(
+        FakeCodec(),
+        device="cpu",
+        num_quantizers=N_VQ,
+    )
+
+    result = encoder.encode(torch.ones(waveform_samples))
+
+    assert result.shape == (raw_frames, N_VQ)
+    assert torch.equal(result[:, 0], torch.arange(raw_frames))
+
+
+def test_audio_encoder_uses_per_item_ceil_lengths_for_mixed_batch() -> None:
+    class FakeCodec:
+        config = SimpleNamespace(sampling_rate=24000, downsample_rate=4)
+
+        def batch_encode(
+            self,
+            waveforms: list[torch.Tensor],
+            *,
+            num_quantizers: int | None = None,
+        ) -> Any:
+            assert [int(waveform.numel()) for waveform in waveforms] == [8, 9, 17]
+            assert num_quantizers == N_VQ
+            codes = torch.zeros(N_VQ, 3, 5, dtype=torch.long)
+            for batch_index in range(3):
+                codes[:, batch_index] = 100 * batch_index + torch.arange(
+                    5, dtype=torch.long
+                )
+            return SimpleNamespace(
+                audio_codes=codes,
+                audio_codes_lengths=torch.tensor([2, 2, 4]),
+            )
+
+    encoder = MossTTSRealtimeAudioEncoder(
+        FakeCodec(),
+        device="cpu",
+        num_quantizers=N_VQ,
+    )
+
+    results = encoder.encode_waveforms(
+        [
+            torch.ones(8),
+            torch.ones(9),
+            torch.ones(17),
+        ]
+    )
+
+    assert [tuple(result.shape) for result in results] == [
+        (2, N_VQ),
+        (3, N_VQ),
+        (5, N_VQ),
+    ]
+    assert [int(result[-1, 0]) for result in results] == [1, 102, 204]
+
+
+def test_audio_encoder_rejects_codec_with_insufficient_raw_frames() -> None:
+    class FakeCodec:
+        config = SimpleNamespace(sampling_rate=24000, downsample_rate=4)
+
+        def encode(self, values: torch.Tensor, **kwargs: Any) -> Any:
+            del values, kwargs
+            return SimpleNamespace(
+                audio_codes=torch.zeros(N_VQ, 1, 2, dtype=torch.long),
+                audio_codes_lengths=torch.tensor([2]),
+            )
+
+    encoder = MossTTSRealtimeAudioEncoder(
+        FakeCodec(),
+        device="cpu",
+        num_quantizers=N_VQ,
+    )
+
+    with pytest.raises(RuntimeError, match="fewer raw frames"):
+        encoder.encode(torch.ones(9))
 
 
 def test_codec_adapter_batch_encode_uses_requested_quantizers_and_lengths() -> None:
