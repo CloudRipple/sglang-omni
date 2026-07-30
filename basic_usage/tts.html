@@ -56,7 +56,7 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Omni Router Usage" href="omni_router.html" />
+    <link rel="next" title="TTS Process Topology" href="tts_process_topology.html" />
     <link rel="prev" title="Omni Model Usage" href="qwen3_omni.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -231,6 +231,7 @@
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Omni Model Usage</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="omni_router.html">Omni Router Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="mps_dp.html">Same-GPU Data Parallelism with CUDA MPS</a></li>
 </ul>
@@ -571,6 +572,8 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 </section>
 <section id="launch-the-server">
 <h2>Launch the Server<a class="headerlink" href="#launch-the-server" title="Link to this heading">#</a></h2>
+<p>See <a class="reference internal" href="tts_process_topology.html"><span class="std std-doc">TTS Process Topology</span></a> for model defaults,
+<code class="docutils literal notranslate"><span class="pre">--isolate-stage</span></code>, and same-GPU memory requirements.</p>
 <p>The reference-audio examples below fetch clips from Hugging Face, so the
 commands include the Hugging Face host and its current download redirect host.
 Omit those flags when your requests use only text, uploaded voices, local/file
@@ -732,9 +735,9 @@ requires both <code class="docutils literal notranslate"><span class="pre">&quot
 <p>Streaming returns 16-bit mono PCM bytes (<code class="docutils literal notranslate"><span class="pre">audio/pcm</span></code>) with sample-rate metadata
 in response headers. It does not include in-band JSON events, final usage, or a
 terminal sentinel. When the client does not set <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code>,
-streaming requests default to a 1-frame first vocoder chunk for lower
-first-audio latency. Set <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code> to <code class="docutils literal notranslate"><span class="pre">0</span></code> to use the model’s
-steady chunk size from the start.</p>
+the model selects a continuity-safe first vocoder chunk. Set the field explicitly
+to override that default, or set it to <code class="docutils literal notranslate"><span class="pre">0</span></code> to use the model’s steady chunk size
+from the start.</p>
 </section>
 <section id="batch-speech">
 <h3>Batch Speech<a class="headerlink" href="#batch-speech" title="Link to this heading">#</a></h3>
@@ -1020,7 +1023,7 @@ the SGLang-Omni server:</p>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code></p></td>
 <td><p>int</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
-<td><p>Optional first codec chunk size for streaming TTFA tuning. Higgs TTS currently consumes this parameter first. Raw PCM speech requests default this to <code class="docutils literal notranslate"><span class="pre">1</span></code> unless the client sets a value, including <code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p>Optional first codec chunk size for streaming TTFA tuning. When omitted, each model applies its own default: Higgs TTS uses <code class="docutils literal notranslate"><span class="pre">20</span></code>, MOSS-TTS Local uses <code class="docutils literal notranslate"><span class="pre">5</span></code>, and ZONOS2 uses <code class="docutils literal notranslate"><span class="pre">40</span></code>. An explicit <code class="docutils literal notranslate"><span class="pre">0</span></code> uses the model’s steady chunk size from the start</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">references</span></code></p></td>
 <td><p>list</p></td>
@@ -1215,11 +1218,11 @@ python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmar
       </div>
     </a>
     <a class="right-next"
-       href="omni_router.html"
+       href="tts_process_topology.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Omni Router Usage</p>
+        <p class="prev-next-title">TTS Process Topology</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
