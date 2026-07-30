@@ -37,6 +37,16 @@ MOSS_TTS_REALTIME_PREPARED_INITIAL_TOKEN_IDS_KEY = (
 _MOSS_TTS_REALTIME_PREPARED_MARKER = "_moss_tts_realtime_prepared_request"
 _ASSISTANT_TURN_PREFIX = "<|im_end|>\n<|im_start|>assistant\n"
 _MAX_SUPPORTED_CODEC_QUANTIZERS = 64
+_STANDARD_SPEECH_GENERATION_FIELDS = frozenset(
+    {
+        "max_new_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "repetition_penalty",
+        "seed",
+    }
+)
 
 
 def _processor_model_config(processor: Any) -> Any:
@@ -309,6 +319,35 @@ def _normalize_generation_kwargs(values: Mapping[str, Any] | None) -> dict[str, 
     return kwargs
 
 
+def _build_generation_source(
+    *,
+    params: Mapping[str, Any],
+    options: Mapping[str, Any],
+    tts_params: Mapping[str, Any],
+    has_tts_params: bool,
+) -> dict[str, Any]:
+    """Keep model defaults unless the speech caller explicitly overrides them."""
+
+    source = dict(options)
+    explicit_generation_params = tts_params.get("explicit_generation_params")
+    if isinstance(explicit_generation_params, (list, tuple, set)):
+        explicit_fields = {str(field) for field in explicit_generation_params}
+    else:
+        explicit_fields = set()
+
+    for key, value in params.items():
+        if value is None:
+            continue
+        if (
+            has_tts_params
+            and key in _STANDARD_SPEECH_GENERATION_FIELDS
+            and key not in explicit_fields
+        ):
+            continue
+        source[key] = value
+    return source
+
+
 def build_moss_tts_realtime_state(
     payload: StagePayload,
     *,
@@ -359,6 +398,7 @@ def build_moss_tts_realtime_state(
         metadata.get("moss_tts_realtime"),
         "metadata.moss_tts_realtime",
     )
+    has_tts_params = "tts_params" in metadata
     tts_params = _mapping(metadata.get("tts_params"), "metadata.tts_params")
     options = {**tts_params, **realtime}
 
@@ -401,10 +441,12 @@ def build_moss_tts_realtime_state(
     reference_data_uri = audio_data_uri_from_reference(reference) if reference else None
     user_data_uri = audio_data_uri_from_reference(user) if user else None
 
-    generation_source = {
-        **options,
-        **{key: value for key, value in params.items() if value is not None},
-    }
+    generation_source = _build_generation_source(
+        params=params,
+        options=options,
+        tts_params=tts_params,
+        has_tts_params=has_tts_params,
+    )
     generation_kwargs = _normalize_generation_kwargs(generation_source)
 
     explicit_session_id = _optional_text(

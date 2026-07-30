@@ -212,6 +212,98 @@ def test_offline_state_defaults_match_hf_sampling_contract() -> None:
     }
 
 
+def test_offline_state_ignores_implicit_speech_sampling_defaults() -> None:
+    state = rb.build_moss_tts_realtime_state(
+        _payload(
+            "hello",
+            params={
+                "temperature": 0.8,
+                "top_p": 0.8,
+                "top_k": 30,
+                "repetition_penalty": 1.1,
+            },
+            metadata={
+                "tts_params": {
+                    "voice": "default",
+                    "response_format": "wav",
+                    "speed": 1.0,
+                }
+            },
+        ),
+        num_codebooks=N_VQ,
+    )
+
+    assert state.generation_kwargs == {
+        "max_new_tokens": 1000,
+        "temperature": 0.8,
+        "top_p": 0.6,
+        "top_k": 30,
+        "do_sample": True,
+        "repetition_penalty": 1.1,
+        "repetition_window": 50,
+    }
+
+
+def test_offline_state_preserves_explicit_speech_sampling_overrides() -> None:
+    state = rb.build_moss_tts_realtime_state(
+        _payload(
+            "hello",
+            params={
+                "max_new_tokens": 2048,
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "repetition_penalty": 1.05,
+                "seed": 17,
+            },
+            metadata={
+                "tts_params": {
+                    "explicit_generation_params": [
+                        "max_new_tokens",
+                        "temperature",
+                        "top_p",
+                        "top_k",
+                        "repetition_penalty",
+                        "seed",
+                    ]
+                }
+            },
+        ),
+        num_codebooks=N_VQ,
+    )
+
+    assert state.generation_kwargs == {
+        "max_new_tokens": 2048,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "do_sample": True,
+        "repetition_penalty": 1.05,
+        "repetition_window": 50,
+        "seed": 17,
+    }
+
+
+def test_direct_request_sampling_params_remain_authoritative() -> None:
+    state = rb.build_moss_tts_realtime_state(
+        _payload(
+            "hello",
+            params={
+                "temperature": 0.6,
+                "top_p": 0.7,
+                "top_k": 15,
+                "repetition_penalty": 1.02,
+            },
+        ),
+        num_codebooks=N_VQ,
+    )
+
+    assert state.generation_kwargs["temperature"] == 0.6
+    assert state.generation_kwargs["top_p"] == 0.7
+    assert state.generation_kwargs["top_k"] == 15
+    assert state.generation_kwargs["repetition_penalty"] == 1.02
+
+
 def test_offline_state_preserves_explicit_open_input() -> None:
     state = rb.build_moss_tts_realtime_state(
         _payload("hello", params={"input_done": False}),
