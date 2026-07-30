@@ -5,6 +5,7 @@ Usage:
     python -m benchmarks.dataset.prepare --dataset seedtts
     python -m benchmarks.dataset.prepare --dataset seedtts-mini
     python -m benchmarks.dataset.prepare --dataset seedtts-50
+    python -m benchmarks.dataset.prepare --dataset moss-tts-voice-taxonomy
     python -m benchmarks.dataset.prepare --dataset mmmu
     python -m benchmarks.dataset.prepare --dataset mmmu-ci-50
     python -m benchmarks.dataset.prepare --dataset mmsu
@@ -27,6 +28,7 @@ DATASETS: dict[str, str] = {
     "seedtts": "zhaochenyang20/seed-tts-eval-arrow",
     "seedtts-mini": "zhaochenyang20/seed-tts-eval-mini-arrow",
     "seedtts-50": "zhaochenyang20/seed-tts-eval-50-arrow",
+    "moss-tts-voice-taxonomy": "OpenMOSS-Team/MOSS-TTS-Voice-Taxonomy-Eval",
     "mmmu": "MMMU/MMMU",
     "mmmu-ci-50": "zhaochenyang20/mmmu-ci-50",
     "mmsu": "ddwang2000/MMSU",

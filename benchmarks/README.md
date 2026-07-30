@@ -23,6 +23,7 @@ benchmarks/
 ```bash
 # 0. Prepare dataset (once)
 python -m benchmarks.dataset.prepare --dataset seedtts
+python -m benchmarks.dataset.prepare --dataset moss-tts-voice-taxonomy
 
 # 1. Start a server on port 8000 (pick one matching the benchmark below)
 
@@ -95,6 +96,12 @@ python -m benchmarks.eval.benchmark_tts_seedtts \
     --ref-format references --token-count auto \
     --max-concurrency 8 \
     --output-dir results/moss_tts_en --lang en --max-samples 50
+
+# 2g. MOSS-TTS Voice Taxonomy — EN + ZH generation, macro WER/CER, and SIM
+python -m benchmarks.eval.benchmark_tts_voice_taxonomy \
+    --model OpenMOSS-Team/MOSS-TTS-v1.5 \
+    --max-concurrency 16 \
+    --output-dir results/moss_voice_taxonomy
 
 # 3a. Qwen3-Omni — full pipeline (generate + transcribe)
 python -m benchmarks.eval.benchmark_omni_seedtts \
@@ -178,6 +185,7 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
 | Script | Task | Model | API |
 |--------|------|-------|-----|
 | `eval/benchmark_tts_seedtts.py` | TTS speed + WER (unified) | e.g. S2-Pro, Voxtral, Higgs TTS | `/v1/audio/speech` |
+| `eval/benchmark_tts_voice_taxonomy.py` | MOSS Voice Taxonomy speed + macro WER/CER + long-safe SIM | MOSS-TTS | `/v1/audio/speech`, `/v1/audio/transcriptions` |
 | `eval/benchmark_tts_serving.py` | TTS serving contract | OpenAI-compatible TTS models | `/v1/audio/speech`, raw PCM streaming, WebSocket, voice and batch contracts |
 | `eval/benchmark_omni_seedtts.py` | TTS speed + WER (unified) | Qwen3-Omni | `/v1/chat/completions` |
 | `eval/benchmark_omni_mmsu.py` | MMSU (audio comprehension) | Qwen3-Omni | `/v1/chat/completions` |
@@ -202,6 +210,15 @@ payloads: the default `--ref-format flat` sends `ref_audio`/`ref_text`, while
 `--ref-format references` sends `references=[{audio_path, text}]` for Higgs TTS
 and MOSS-TTS. MOSS-TTS additionally supports duration control through
 `--token-count`.
+
+`benchmark_tts_voice_taxonomy.py` reuses the SeedTTS generation harness but
+implements the Voice Taxonomy metric contract separately: Qwen3-ASR audio is
+split into non-overlapping 30-second chunks, English uses word-level WER,
+Chinese uses character-level CER, final WER/CER is a per-sample macro mean, and
+generated audio longer than 60 seconds uses head/tail 30-second speaker-SIM.
+The default command evaluates both dataset splits and writes the combined
+`voice-taxonomy-eval.json` under `--output-dir`. Use `--generate-only`,
+`--wer-only`, or `--similarity-only` to run one phase.
 
 `benchmark_omni_seedtts.py` documents local vs CI GPU usage in its module
 docstring (sequential phases on CI to reduce OOM risk).
@@ -284,6 +301,7 @@ Download helpers live in `benchmarks/dataset/prepare.py`:
 python -m benchmarks.dataset.prepare --dataset seedtts       # full SeedTTS
 python -m benchmarks.dataset.prepare --dataset seedtts-mini  # smoke-test subset
 python -m benchmarks.dataset.prepare --dataset seedtts-50    # 50-sample subset
+python -m benchmarks.dataset.prepare --dataset moss-tts-voice-taxonomy  # MOSS Voice Taxonomy EN/ZH
 python -m benchmarks.dataset.prepare --dataset mmmu          # full MMMU (30 subjects)
 python -m benchmarks.dataset.prepare --dataset mmmu-ci-50    # MMMU CI subset
 python -m benchmarks.dataset.prepare --dataset mmsu          # full MMSU (ddwang2000/MMSU)

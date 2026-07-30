@@ -248,6 +248,7 @@ class TtsSeedttsBenchmarkConfig:
     warmup: int = 1
     concurrency: int = DEFAULT_TTS_BENCHMARK_CONCURRENCY
     request_rate: float = float("inf")
+    request_timeout_s: int = 300
     stream: bool = False
     initial_codec_chunk_frames: int | None = None
     disable_tqdm: bool = False
@@ -304,6 +305,7 @@ def _build_results_config(
         "warmup": config.warmup,
         "concurrency": config.concurrency,
         "request_rate": config.request_rate,
+        "request_timeout_s": config.request_timeout_s,
         "initial_codec_chunk_frames": config.initial_codec_chunk_frames,
         "max_running_requests": config.max_running_requests,
         "cuda_graph_max_bs": config.cuda_graph_max_bs,
@@ -362,6 +364,7 @@ async def run_tts_seedtts_benchmark(
             request_rate=config.request_rate,
             warmup=config.warmup,
             disable_tqdm=config.disable_tqdm,
+            timeout_s=config.request_timeout_s,
         )
     )
     outputs = await runner.run(samples, send_fn)
@@ -444,6 +447,7 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         warmup=args.warmup,
         concurrency=args.concurrency,
         request_rate=args.request_rate,
+        request_timeout_s=args.request_timeout_s,
         stream=args.stream,
         initial_codec_chunk_frames=args.initial_codec_chunk_frames,
         disable_tqdm=args.disable_tqdm,
@@ -592,6 +596,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Requests per second (inf = send all at once).",
     )
     parser.add_argument(
+        "--request-timeout-s",
+        type=int,
+        default=300,
+        help="Per-request TTS timeout in seconds.",
+    )
+    parser.add_argument(
         "--stream",
         action="store_true",
         help="Use streaming for TTS generation.",
@@ -728,6 +738,8 @@ def main() -> None:
         parser.error("--max-running-requests must be positive")
     if args.cuda_graph_max_bs <= 0:
         parser.error("--cuda-graph-max-bs must be positive")
+    if args.request_timeout_s <= 0:
+        parser.error("--request-timeout-s must be positive")
     if args.use_existing_server and not (args.generate_only or args.transcribe_only):
         parser.error(
             "--use-existing-server currently requires --generate-only or "
