@@ -16,6 +16,9 @@ from sglang_omni.models.moss_tts_realtime.streaming_vocoder import _CodecStreamS
 from sglang_omni.models.moss_tts_realtime.vocoder_cuda_graph import (
     MossTTSRealtimeVocoderCudaGraphRunner,
 )
+from sglang_omni.models.moss_tts_realtime.vocoder_decoder import (
+    configure_moss_tts_realtime_vocoder_decoder,
+)
 
 pytestmark = pytest.mark.gpu
 
@@ -28,8 +31,12 @@ SAMPLES_PER_FRAME = 1920
 FRAME_COUNTS = [1, 2, 3]
 
 
-@pytest.fixture(scope="module")
-def session_bundle():
+@pytest.fixture(
+    scope="module",
+    params=[torch.float32, torch.bfloat16],
+    ids=["float32", "bfloat16"],
+)
+def session_bundle(request):
     snapshots = glob.glob(CODEC_GLOB)
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -40,7 +47,16 @@ def session_bundle():
         snapshots[0],
         component="decoder",
         device="cuda",
+        dtype=request.param,
     )
+    if request.param != torch.float32:
+        assert (
+            configure_moss_tts_realtime_vocoder_decoder(
+                codec,
+                dtype=request.param,
+            )
+            == 68
+        )
     session = _CodecStreamSession(
         codec,
         stream_slots=STREAM_SLOTS,
@@ -51,7 +67,7 @@ def session_bundle():
     captured = session.warmup_cuda_graph(FRAME_COUNTS, min_free_gb=0.0)
     assert captured == FRAME_COUNTS
     try:
-        yield session, slots
+        yield session, slots, request.param
     finally:
         for slot in slots:
             if slot in session._leased_slots:
@@ -109,7 +125,8 @@ def test_streaming_cuda_graph_is_bit_identical(
     frame_count: int,
     active_slots: int,
 ) -> None:
-    session, slots = session_bundle
+    session, slots, decoder_dtype = session_bundle
+    assert next(session._codec.decoder.parameters()).dtype is decoder_dtype
     torch.manual_seed(100 * frame_count + active_slots)
     slot_codes = {
         slot: torch.randint(
@@ -136,7 +153,7 @@ def test_streaming_cuda_graph_is_bit_identical(
 
 
 def test_released_slot_restarts_from_fresh_codec_state(session_bundle) -> None:
-    session, slots = session_bundle
+    session, slots, _ = session_bundle
     slot = slots[0]
     torch.manual_seed(20260728)
     codes = torch.randint(

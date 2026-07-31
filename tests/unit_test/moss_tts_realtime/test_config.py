@@ -58,6 +58,7 @@ def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     assert stages["vocoder"].factory_args["cuda_graph"] is True
     assert stages["vocoder"].factory_args["cuda_graph_frames"] is None
     assert stages["vocoder"].factory_args["cuda_graph_min_free_gb"] == 3.0
+    assert stages["vocoder"].factory_args["dtype"] == "bfloat16"
 
 
 def test_realtime_coordinator_factory_is_model_scoped() -> None:
@@ -279,6 +280,16 @@ def test_pipeline_threads_codec_cuda_graph_settings() -> None:
     assert vocoder.factory_args["cuda_graph"] is False
     assert vocoder.factory_args["cuda_graph_frames"] == [1, 3]
     assert vocoder.factory_args["cuda_graph_min_free_gb"] == 5.5
+
+
+def test_pipeline_threads_vocoder_dtype_setting() -> None:
+    config = MossTTSRealtimePipelineConfig(
+        model_path="fake-model",
+        vocoder_dtype="float32",
+    )
+    vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
+
+    assert vocoder.factory_args["dtype"] == "float32"
 
 
 def test_pipeline_realtime_input_stage_must_exist_and_accept_early_updates() -> None:

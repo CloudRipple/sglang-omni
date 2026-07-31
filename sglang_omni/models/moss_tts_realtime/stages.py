@@ -33,7 +33,10 @@ from sglang_omni.models.moss_tts_realtime.request_builders import (
 from sglang_omni.models.moss_tts_realtime.streaming_vocoder import (
     MossTTSRealtimeStreamingVocoderScheduler,
 )
-from sglang_omni.models.weight_loader import load_module
+from sglang_omni.models.moss_tts_realtime.vocoder_decoder import (
+    configure_moss_tts_realtime_vocoder_decoder,
+)
+from sglang_omni.models.weight_loader import load_module, resolve_dtype
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,7 @@ def _load_moss_tts_realtime_codec_component(
     *,
     component: Literal["encoder", "decoder"],
     device: str,
+    dtype: torch.dtype | None = None,
 ) -> Any:
     codec = _create_moss_tts_realtime_codec_shell(checkpoint_dir)
     unused_component = "decoder" if component == "encoder" else "encoder"
@@ -88,6 +92,7 @@ def _load_moss_tts_realtime_codec_component(
         getattr(codec, component),
         checkpoint_dir,
         prefix=f"{component}.",
+        dtype=dtype,
         device=device,
         strict=True,
         local_files_only=True,
@@ -197,6 +202,7 @@ def load_moss_tts_realtime_codec(
     *,
     component: Literal["encoder", "decoder"],
     device: str = "cuda:0",
+    dtype: torch.dtype | None = None,
 ) -> Any:
     if component not in ("encoder", "decoder"):
         raise ValueError(f"unsupported MOSS-TTS-Realtime codec component: {component}")
@@ -212,6 +218,7 @@ def load_moss_tts_realtime_codec(
         checkpoint_dir,
         component=component,
         device=resolved_device,
+        dtype=dtype,
     )
 
 
@@ -423,14 +430,24 @@ def create_vocoder_executor(
     cuda_graph: bool = True,
     cuda_graph_frames: list[int] | None = None,
     cuda_graph_min_free_gb: float = 3.0,
+    dtype: str | torch.dtype = "bfloat16",
 ) -> MossTTSRealtimeStreamingVocoderScheduler:
     resolved_device = _resolve_codec_device(device, gpu_id)
+    decoder_dtype = resolve_dtype(dtype)
+    if decoder_dtype is None:
+        raise ValueError("MOSS-TTS-Realtime vocoder dtype must be explicit")
     processor = load_moss_tts_realtime_processor(model_path)
     codec = load_moss_tts_realtime_codec(
         codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
         component="decoder",
         device=resolved_device,
+        dtype=decoder_dtype,
     )
+    if decoder_dtype != torch.float32:
+        configure_moss_tts_realtime_vocoder_decoder(
+            codec,
+            dtype=decoder_dtype,
+        )
     scheduler = MossTTSRealtimeStreamingVocoderScheduler(
         codec,
         n_vq=int(processor.model_config.rvq),

@@ -13,6 +13,9 @@ from typing import Any
 import torch
 
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
+from sglang_omni.models.moss_tts_realtime.vocoder_decoder import (
+    moss_tts_realtime_vocoder_decoder_dtype,
+)
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.pipeline_state import build_usage
@@ -650,6 +653,9 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             "codec_cuda_graph_captured_frames": (
                 session.captured_frames() if session is not None else []
             ),
+            "codec_decoder_dtype": str(
+                moss_tts_realtime_vocoder_decoder_dtype(self._codec)
+            ).removeprefix("torch."),
             "codec_resource_totals": totals,
             "codec_slot_acquire_total": totals.get("codec_slot_acquire_total", 0),
             "codec_slot_release_total": totals.get("codec_slot_release_total", 0),

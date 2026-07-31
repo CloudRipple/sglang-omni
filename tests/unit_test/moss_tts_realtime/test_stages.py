@@ -108,16 +108,22 @@ def test_engine_pre_infra_reuses_processor_model_config(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("component", "expected_keys"),
+    ("component", "dtype", "expected_keys"),
     [
-        ("encoder", {"encoder.weight", "quantizer.weight"}),
-        ("decoder", {"decoder.weight", "quantizer.weight"}),
+        ("encoder", None, {"encoder.weight", "quantizer.weight"}),
+        ("decoder", None, {"decoder.weight", "quantizer.weight"}),
+        (
+            "decoder",
+            torch.bfloat16,
+            {"decoder.weight", "quantizer.weight"},
+        ),
     ],
 )
 def test_codec_loader_reads_only_requested_component_weights(
     monkeypatch,
     tmp_path,
     component: str,
+    dtype: torch.dtype | None,
     expected_keys: set[str],
 ) -> None:
     import safetensors
@@ -204,13 +210,20 @@ def test_codec_loader_reads_only_requested_component_weights(
         "codec",
         component=component,
         device="cpu",
+        dtype=dtype,
     )
 
     assert loaded_keys == expected_keys
     assert set(codec.state_dict()) == expected_keys
     for name, value in codec.state_dict().items():
         assert value.device.type == "cpu"
-        assert torch.equal(value, expected_weights[name])
+        expected_dtype = (
+            dtype
+            if dtype is not None and name.startswith(f"{component}.")
+            else torch.float32
+        )
+        assert value.dtype is expected_dtype
+        torch.testing.assert_close(value.float(), expected_weights[name])
 
 
 def test_codec_memory_estimate_scales_streaming_state_with_active_turns(
@@ -297,8 +310,9 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
         *,
         component: str,
         device: str,
+        dtype: torch.dtype | None = None,
     ) -> object:
-        calls["codec"] = (model_path, component, device)
+        calls["codec"] = (model_path, component, device, dtype)
         return codec
 
     class FakeAudioEncoder:
@@ -390,7 +404,7 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
     assert calls == {
         "processor_path": "model",
         "codec_source": "codec",
-        "codec": ("/resolved-codec", "encoder", "cuda:3"),
+        "codec": ("/resolved-codec", "encoder", "cuda:3", None),
         "encoder": (codec, "cuda:3", 16),
         "batched": (codec_encoder, 4, 7),
         "reference_cache": (
@@ -770,8 +784,9 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
         *,
         component: str,
         device: str,
+        dtype: torch.dtype,
     ) -> object:
-        calls["codec"] = (model_path, component, device)
+        calls["codec"] = (model_path, component, device, dtype)
         return codec
 
     def fake_scheduler(loaded_codec: Any, **kwargs: Any) -> object:
@@ -804,12 +819,13 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
         cuda_graph=False,
         cuda_graph_frames=[1, 3],
         cuda_graph_min_free_gb=5.0,
+        dtype="float32",
     )
 
     assert result is scheduler
     assert calls == {
         "processor": "model",
-        "codec": ("codec", "decoder", "cuda:2"),
+        "codec": ("codec", "decoder", "cuda:2", torch.float32),
         "scheduler": (
             codec,
             {
@@ -824,3 +840,56 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
         ),
         "warmup": 1,
     }
+
+
+def test_create_vocoder_executor_defaults_to_bfloat16_before_warmup(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, Any]] = []
+    codec = object()
+    processor = SimpleNamespace(model_config=SimpleNamespace(rvq=16))
+
+    class FakeVocoderScheduler:
+        def warmup_now(self) -> None:
+            events.append(("warmup", None))
+
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_realtime_codec",
+        lambda *args, **kwargs: (
+            events.append(("load_dtype", kwargs.get("dtype"))),
+            codec,
+        )[-1],
+    )
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_realtime_processor",
+        lambda _: processor,
+    )
+    monkeypatch.setattr(
+        stages,
+        "configure_moss_tts_realtime_vocoder_decoder",
+        lambda loaded_codec, *, dtype: events.append(
+            ("configure", (loaded_codec, dtype))
+        ),
+    )
+    monkeypatch.setattr(
+        stages,
+        "MossTTSRealtimeStreamingVocoderScheduler",
+        lambda loaded_codec, **kwargs: (
+            events.append(("scheduler", loaded_codec)),
+            FakeVocoderScheduler(),
+        )[-1],
+    )
+
+    stages.create_vocoder_executor(
+        "model",
+        codec_model_path="codec",
+    )
+
+    assert events == [
+        ("load_dtype", torch.bfloat16),
+        ("configure", (codec, torch.bfloat16)),
+        ("scheduler", codec),
+        ("warmup", None),
+    ]

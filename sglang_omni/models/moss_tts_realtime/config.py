@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -113,7 +113,7 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
             name="vocoder",
             process="pipeline",
             factory=f"{_PKG}.stages.create_vocoder_executor",
-            factory_args={"device": codec_device},
+            factory_args={"device": codec_device, "dtype": "bfloat16"},
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,
@@ -151,6 +151,7 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
     cuda_graph: bool = True
     cuda_graph_frames: list[int] | None = None
     cuda_graph_min_free_gb: float = 3.0
+    vocoder_dtype: Literal["float32", "bfloat16"] = "bfloat16"
     ref_audio_cache: bool = True
     ref_audio_cache_max_items: int = _REF_AUDIO_CACHE_MAX_ITEMS
     ref_audio_cache_max_bytes: int = _REF_AUDIO_CACHE_MAX_BYTES
@@ -238,6 +239,7 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
                 stage.factory_args["cuda_graph_min_free_gb"] = (
                     self.cuda_graph_min_free_gb
                 )
+                stage.factory_args["dtype"] = self.vocoder_dtype
 
     def supports_uploaded_voice_references(self) -> bool:
         return True

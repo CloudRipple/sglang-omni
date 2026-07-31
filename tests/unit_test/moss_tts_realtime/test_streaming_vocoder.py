@@ -424,6 +424,7 @@ def test_codec_model_info_tracks_acquire_release_reuse_and_exhaustion() -> None:
     assert initial["codec_slot_capacity"] == 1
     assert initial["codec_active_slots"] == 0
     assert initial["codec_free_slots"] == 1
+    assert initial["codec_decoder_dtype"] == "float32"
 
     scheduler._on_chunk("live", _stream_item(row, 0))
     leased_slot = scheduler._stream_states["live"].slot
