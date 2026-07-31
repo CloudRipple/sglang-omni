@@ -32,7 +32,7 @@ _MAX_CUDA_GRAPH_FRAMES = 25
 
 
 class _LegacyCodecStreamingStateAdapter:
-    """Cached access to the legacy codec's module-owned streaming states."""
+    """Access legacy codec states through one shared per-step exec mask."""
 
     def __init__(self, codec: Any, *, device: torch.device) -> None:
         self._states: list[Any] = []
@@ -41,11 +41,6 @@ class _LegacyCodecStreamingStateAdapter:
             state = getattr(module, "_streaming_state", None)
             if state is None:
                 return
-            if not callable(getattr(state, "set_exec_mask", None)):
-                raise RuntimeError(
-                    f"codec streaming state {type(state).__name__} lacks "
-                    "set_exec_mask()"
-                )
             if not callable(getattr(state, "reset", None)):
                 raise RuntimeError(
                     f"codec streaming state {type(state).__name__} lacks reset()"
@@ -59,15 +54,59 @@ class _LegacyCodecStreamingStateAdapter:
         codec.apply(collect)
         if not self._states:
             raise RuntimeError("MOSS-TTS-Realtime codec has no active streaming state")
-        self._device = device
+        self._device = torch.device(device)
+        exec_masks: list[torch.Tensor] = []
+        for state in self._states:
+            exec_mask = getattr(state, "exec_mask", None)
+            if not isinstance(exec_mask, torch.Tensor):
+                raise RuntimeError(
+                    f"codec streaming state {type(state).__name__} has no "
+                    "Tensor exec_mask"
+                )
+            exec_masks.append(exec_mask)
+
+        state_devices = {torch.device(state.device) for state in self._states}
+        mask_devices = {exec_mask.device for exec_mask in exec_masks}
+        mask_shapes = {tuple(exec_mask.shape) for exec_mask in exec_masks}
+        mask_dtypes = {exec_mask.dtype for exec_mask in exec_masks}
+        if (
+            state_devices != {self._device}
+            or mask_devices != {self._device}
+            or len(mask_shapes) != 1
+            or mask_dtypes != {torch.bool}
+        ):
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec streaming states cannot share exec_mask: "
+                f"state_devices={state_devices}, mask_devices={mask_devices}, "
+                f"mask_shapes={mask_shapes}, mask_dtypes={mask_dtypes}"
+            )
+        (expected_shape,) = mask_shapes
+        if len(expected_shape) != 1:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec streaming states cannot share "
+                f"exec_mask with non-vector shape {expected_shape}"
+            )
+
+        # Every state consumes the same active-slot mask. Alias it before CUDA
+        # Graph capture so each live step needs one device copy instead of one
+        # copy for every codec module.
+        self._shared_exec_mask = exec_masks[0].clone()
+        for state in self._states:
+            state.exec_mask = self._shared_exec_mask
 
     @property
     def count(self) -> int:
         return len(self._states)
 
     def set_exec_mask(self, exec_mask: torch.Tensor) -> None:
-        for state in self._states:
-            state.set_exec_mask(exec_mask.to(device=state.device))
+        if exec_mask.shape != self._shared_exec_mask.shape:
+            raise ValueError(
+                "MOSS-TTS-Realtime codec exec_mask must have shape "
+                f"{tuple(self._shared_exec_mask.shape)}, got {tuple(exec_mask.shape)}"
+            )
+        self._shared_exec_mask.copy_(
+            exec_mask.to(device=self._device, dtype=torch.bool)
+        )
 
     def reset_slots(self, slots: list[int], *, batch_size: int) -> None:
         if not slots:

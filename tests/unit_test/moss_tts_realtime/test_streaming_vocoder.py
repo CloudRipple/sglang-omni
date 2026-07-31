@@ -17,6 +17,7 @@ from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeSt
 from sglang_omni.models.moss_tts_realtime.streaming_vocoder import (
     MossTTSRealtimeStreamingVocoderScheduler,
     _CodecStreamSession,
+    _LegacyCodecStreamingStateAdapter,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
@@ -252,6 +253,12 @@ def _scheduler(
     return scheduler, codec
 
 
+def _active_fake_states(codec: FakeLegacyCodec) -> list[_FakeStreamingState]:
+    states = [module._streaming_state for module in codec.state_modules]
+    assert all(state is not None for state in states)
+    return [state for state in states if state is not None]
+
+
 def _drain(scheduler: MossTTSRealtimeStreamingVocoderScheduler) -> list[Any]:
     messages = []
     while True:
@@ -372,6 +379,74 @@ def test_staggered_requests_keep_their_exact_next_ramp_size() -> None:
     messages = _drain(scheduler)
     np.testing.assert_array_equal(_stream_audio(messages, "a"), _reference(rows_a))
     np.testing.assert_array_equal(_stream_audio(messages, "b"), _reference(rows_b))
+
+
+def test_codec_session_shares_one_exec_mask_and_resets_every_state() -> None:
+    codec = FakeLegacyCodec()
+    session = _CodecStreamSession(
+        codec,
+        stream_slots=2,
+        n_vq=N_VQ,
+        samples_per_frame=SAMPLES_PER_FRAME,
+    )
+    states = _active_fake_states(codec)
+    shared_exec_mask = states[0].exec_mask
+
+    assert all(state.exec_mask is shared_exec_mask for state in states)
+    session._state_adapter.set_exec_mask(torch.tensor([False, False]))
+    for index, state in enumerate(states, start=1):
+        state.offsets.fill_(index)
+
+    session._state_adapter.reset_slots([1], batch_size=2)
+
+    assert torch.equal(shared_exec_mask, torch.tensor([False, True]))
+    for index, state in enumerate(states, start=1):
+        assert torch.equal(state.offsets, torch.tensor([index, 0]))
+        assert state.exec_mask is shared_exec_mask
+    session.close()
+
+
+@pytest.mark.parametrize("mismatch", ["shape", "dtype", "device"])
+def test_codec_state_adapter_rejects_incompatible_exec_masks(mismatch: str) -> None:
+    codec = FakeLegacyCodec()
+    with codec.streaming(2):
+        states = _active_fake_states(codec)
+        original_exec_masks = [state.exec_mask for state in states]
+        if mismatch == "shape":
+            states[1].exec_mask = torch.ones(3, dtype=torch.bool)
+        elif mismatch == "dtype":
+            states[1].exec_mask = torch.ones(2, dtype=torch.long)
+        else:
+            states[1].device = torch.device("meta")
+            states[1].exec_mask = torch.ones(2, dtype=torch.bool, device="meta")
+
+        with pytest.raises(RuntimeError, match="cannot share exec_mask"):
+            _LegacyCodecStreamingStateAdapter(codec, device=torch.device("cpu"))
+
+        assert states[0].exec_mask is original_exec_masks[0]
+
+
+@pytest.mark.parametrize("stream_slots", [1, 16])
+def test_shared_exec_mask_only_advances_active_eager_slot(stream_slots: int) -> None:
+    codec = FakeLegacyCodec()
+    session = _CodecStreamSession(
+        codec,
+        stream_slots=stream_slots,
+        n_vq=N_VQ,
+        samples_per_frame=SAMPLES_PER_FRAME,
+    )
+    slot = session.acquire()
+
+    decoded = session.step({slot: _rows(1, seed=33).transpose(0, 1)})[slot]
+
+    assert decoded.shape == (1, SAMPLES_PER_FRAME)
+    assert codec.frame_calls == [((slot,), 1)]
+    for state in _active_fake_states(codec):
+        expected_offsets = torch.zeros(stream_slots, dtype=torch.long)
+        expected_offsets[slot] = 1
+        assert torch.equal(state.offsets, expected_offsets)
+    session.release(slot)
+    session.close()
 
 
 def test_masked_release_preserves_peer_and_reused_slot_starts_fresh() -> None:
