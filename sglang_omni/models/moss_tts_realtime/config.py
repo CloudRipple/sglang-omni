@@ -23,6 +23,7 @@ _COLOCATED_TOTAL_GPU_MEMORY_FRACTION = 0.90
 _AR_MEM_FRACTION_STATIC = 0.85
 _REF_AUDIO_CACHE_MAX_ITEMS = 8192
 _REF_AUDIO_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_MAX_CUDA_GRAPH_FRAMES = 25
 
 
 class MossTTSRealtimeResourceLimits(BaseModel):
@@ -181,10 +182,15 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         if self.cuda_graph_frames is not None:
             if not self.cuda_graph_frames:
                 raise ValueError("cuda_graph_frames must not be empty")
-            invalid = [frame for frame in self.cuda_graph_frames if frame < 1]
+            invalid = [
+                frame
+                for frame in self.cuda_graph_frames
+                if not 1 <= frame <= _MAX_CUDA_GRAPH_FRAMES
+            ]
             if invalid:
                 raise ValueError(
-                    "cuda_graph_frames entries must be positive integers, "
+                    "cuda_graph_frames entries must be integers in "
+                    f"[1, {_MAX_CUDA_GRAPH_FRAMES}], "
                     f"got {invalid}"
                 )
         stage_by_name = {stage.name: stage for stage in self.stages}

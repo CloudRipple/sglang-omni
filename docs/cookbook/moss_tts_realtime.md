@@ -40,7 +40,9 @@ the SGLang-Omni dependencies.
 
 The provided config colocates preprocessing, the AR engine, and the streaming
 vocoder on one GPU. It enables the current performance defaults: a bfloat16
-vocoder decoder and CUDA Graph capture for the 1/2/3-frame codec ramp.
+vocoder decoder and dense CUDA Graph capture for codec frame counts 1 through
+12. Normal low-latency playback still follows the 1/2/3-frame ramp; a larger
+captured shape is used only to consume frames that are already queued.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 sgl-omni serve \
@@ -97,8 +99,9 @@ curl -s http://localhost:8000/model_info | jq '
 ```
 
 With the example config, the expected values are `bfloat16`, `true`, and
-`[1, 2, 3]`. CUDA Graph capture falls back to eager execution if capture cannot
-be completed; `/model_info` and the server log show the effective state.
+`[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]`. CUDA Graph capture falls back to
+eager execution if capture cannot be completed; `/model_info` and the server
+log show the effective state.
 
 ## Complete-Input Speech API
 
@@ -405,7 +408,7 @@ Important pipeline fields and their defaults are:
 |---|---:|---|
 | `vocoder_dtype` | `bfloat16` | Decoder precision; set `float32` for compatibility fallback |
 | `cuda_graph` | `true` | Enable streaming vocoder CUDA Graph capture |
-| `cuda_graph_frames` | `null` | Automatically capture the 1/2/3-frame codec ramp |
+| `cuda_graph_frames` | `null` | Densely capture codec frame counts 1 through 12 |
 | `cuda_graph_min_free_gb` | `3.0` | Minimum free memory required before capture |
 | `limits.max_sessions` | `64` | Logical realtime sessions admitted by the backend |
 | `limits.max_active_turns` | `16` | Concurrent turns across all WebSockets; one per WebSocket |
@@ -423,6 +426,12 @@ sgl-omni serve \
   --cuda-graph false \
   --port 8000
 ```
+
+`cuda_graph_frames` accepts explicit frame counts from 1 through 25. Capturing
+the dense 1-through-25 range is useful only when a deployment expects unusually
+large vocoder backlogs. It increases startup capture time and graph memory, but
+does not make the normal path wait for 25 frames: the scheduler always consumes
+the largest captured shape that fits the frames already pending.
 
 To increase the backend active-input timeout:
 

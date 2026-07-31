@@ -28,7 +28,8 @@ CODEC_GLOB = (
 N_VQ = 16
 STREAM_SLOTS = 2
 SAMPLES_PER_FRAME = 1920
-FRAME_COUNTS = [1, 2, 3]
+CAPTURE_FRAME_COUNTS = list(range(1, 13))
+FRAME_COUNTS = [1, 2, 3, 6, 12]
 
 
 @pytest.fixture(
@@ -64,8 +65,8 @@ def session_bundle(request):
         samples_per_frame=SAMPLES_PER_FRAME,
     )
     slots = [session.acquire() for _ in range(STREAM_SLOTS)]
-    captured = session.warmup_cuda_graph(FRAME_COUNTS, min_free_gb=0.0)
-    assert captured == FRAME_COUNTS
+    captured = session.warmup_cuda_graph(CAPTURE_FRAME_COUNTS, min_free_gb=0.0)
+    assert captured == CAPTURE_FRAME_COUNTS
     try:
         yield session, slots, request.param
     finally:

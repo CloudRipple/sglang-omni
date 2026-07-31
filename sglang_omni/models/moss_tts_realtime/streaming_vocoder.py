@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 _SOURCE_HINT = "MOSS-TTS-Realtime"
 _CHUNK_RAMP = (1, 2, 3)
 _STEADY_CHUNK_FRAMES = 3
+_DEFAULT_CUDA_GRAPH_MAX_FRAMES = 12
+_MAX_CUDA_GRAPH_FRAMES = 25
 
 
 class _LegacyCodecStreamingStateAdapter:
@@ -522,12 +524,12 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             invalid = [
                 frame
                 for frame in self._cuda_graph_frames
-                if not 1 <= frame <= _STEADY_CHUNK_FRAMES
+                if not 1 <= frame <= _MAX_CUDA_GRAPH_FRAMES
             ]
             if invalid:
                 raise ValueError(
                     "cuda_graph_frames must be within the realtime codec step "
-                    f"range [1, {_STEADY_CHUNK_FRAMES}], got {invalid}"
+                    f"range [1, {_MAX_CUDA_GRAPH_FRAMES}], got {invalid}"
                 )
         self._resource_totals: Counter[str] = Counter()
         self._active_slots_high_water = 0
@@ -560,7 +562,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
     def _cuda_graph_capture_frames(self) -> list[int]:
         if self._cuda_graph_frames is not None:
             return sorted(set(self._cuda_graph_frames))
-        return sorted(set(_CHUNK_RAMP))
+        return list(range(1, _DEFAULT_CUDA_GRAPH_MAX_FRAMES + 1))
 
     def _codec_on_cuda(self) -> bool:
         try:
@@ -653,6 +655,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             "codec_cuda_graph_captured_frames": (
                 session.captured_frames() if session is not None else []
             ),
+            "codec_cuda_graph_default_max_frames": _DEFAULT_CUDA_GRAPH_MAX_FRAMES,
             "codec_decoder_dtype": str(
                 moss_tts_realtime_vocoder_decoder_dtype(self._codec)
             ).removeprefix("torch."),
@@ -803,17 +806,35 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             if state.next_chunk_frames == step_frames
         ]
 
+    def _coalesced_step_frames(
+        self,
+        participants: list[tuple[str, _RealtimeStreamState]],
+    ) -> int:
+        threshold = participants[0][1].next_chunk_frames
+        if any(state.next_chunk_frames != threshold for _, state in participants):
+            raise RuntimeError(
+                "MOSS-TTS-Realtime coalesced participants have different thresholds"
+            )
+        if threshold != _STEADY_CHUNK_FRAMES:
+            return threshold
+
+        common_pending = min(len(state.pending) for _, state in participants)
+        session = self._session
+        captured = session.captured_frames() if session is not None else []
+        candidates = [
+            frame
+            for frame in captured
+            if _STEADY_CHUNK_FRAMES <= frame <= common_pending
+        ]
+        return max(candidates, default=_STEADY_CHUNK_FRAMES)
+
     def build_step_plan(
         self,
         participants: list[tuple[str, _RealtimeStreamState]],
     ) -> _CoalescedStepPlan:
         if not participants:
             raise ValueError("MOSS-TTS-Realtime codec step has no participants")
-        step_frames = participants[0][1].next_chunk_frames
-        if any(state.next_chunk_frames != step_frames for _, state in participants):
-            raise RuntimeError(
-                "MOSS-TTS-Realtime coalesced participants have different thresholds"
-            )
+        step_frames = self._coalesced_step_frames(participants)
         slot_codes: dict[int, torch.Tensor] = {}
         for _, state in participants:
             if state.slot is None:
@@ -837,6 +858,10 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         self._resource_totals["codec_decoded_frame_total"] += plan.step_frames * len(
             participants
         )
+        if plan.step_frames > _STEADY_CHUNK_FRAMES:
+            catchup_frames = plan.step_frames * len(participants)
+            self._resource_totals["codec_catchup_step_total"] += 1
+            self._resource_totals["codec_catchup_frame_total"] += catchup_frames
         output: dict[str, torch.Tensor] = {}
         for request_id, state in participants:
             if state.slot is None:

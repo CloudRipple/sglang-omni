@@ -686,7 +686,7 @@ def test_codec_session_attempts_cuda_graph_warmup_once(monkeypatch) -> None:
     session.close()
 
 
-def test_scheduler_default_cuda_graph_frames_match_realtime_ramp(
+def test_scheduler_default_cuda_graph_frames_cover_dense_catchup_range(
     monkeypatch,
 ) -> None:
     calls: list[tuple[list[int], float]] = []
@@ -712,7 +712,7 @@ def test_scheduler_default_cuda_graph_frames_match_realtime_ramp(
     scheduler.warmup_now()
     scheduler.warmup_now()
 
-    assert calls == [([1, 2, 3], 3.0)]
+    assert calls == [(list(range(1, 13)), 3.0)]
     assert scheduler._session is not None
     assert scheduler._session.warmup_attempted
     scheduler.on_serving_stop()
@@ -723,7 +723,7 @@ def test_scheduler_default_cuda_graph_frames_match_realtime_ramp(
     [
         ({"cuda_graph_frames": []}, "must not be empty"),
         ({"cuda_graph_frames": [0]}, "step range"),
-        ({"cuda_graph_frames": [4]}, "step range"),
+        ({"cuda_graph_frames": [26]}, "step range"),
         ({"cuda_graph_min_free_gb": -1.0}, "non-negative"),
     ],
 )
@@ -737,6 +737,62 @@ def test_scheduler_rejects_invalid_cuda_graph_settings(
             n_vq=N_VQ,
             **kwargs,
         )
+
+
+def test_scheduler_accepts_explicit_capture_through_25_frames() -> None:
+    scheduler = MossTTSRealtimeStreamingVocoderScheduler(
+        FakeLegacyCodec(),
+        n_vq=N_VQ,
+        cuda_graph_frames=[25, 1, 25],
+    )
+
+    assert scheduler._cuda_graph_capture_frames() == [1, 25]
+
+
+def test_dense_cuda_graph_range_drains_existing_backlog_without_waiting() -> None:
+    scheduler, _ = _scheduler(stream_slots=1)
+    session = scheduler._ensure_session()
+    graph = _FakeCudaGraphRunner(list(range(1, 13)))
+    session._cg_runner = graph
+    rows = _rows(20, seed=96)
+
+    scheduler.on_stream_chunk_batch(
+        [("req", _stream_item(row, index)) for index, row in enumerate(rows)]
+    )
+
+    assert graph.decode_calls == [1, 2, 12, 5]
+    messages = _drain(scheduler)
+    assert [
+        _decode_audio(message.data).shape[0]
+        for message in messages
+        if message.type == "stream"
+    ] == [
+        1 * SAMPLES_PER_FRAME,
+        2 * SAMPLES_PER_FRAME,
+        12 * SAMPLES_PER_FRAME,
+        5 * SAMPLES_PER_FRAME,
+    ]
+    snapshot = scheduler.admin("model_info")["data"]
+    assert snapshot["codec_resource_totals"]["codec_catchup_step_total"] == 2
+    assert snapshot["codec_resource_totals"]["codec_catchup_frame_total"] == 17
+    scheduler.abort("req")
+
+
+def test_dense_cuda_graph_range_never_waits_to_fill_a_larger_shape() -> None:
+    scheduler, _ = _scheduler(stream_slots=1)
+    session = scheduler._ensure_session()
+    graph = _FakeCudaGraphRunner(list(range(1, 13)))
+    session._cg_runner = graph
+    rows = _rows(6, seed=97)
+
+    for index, row in enumerate(rows):
+        scheduler._on_chunk("req", _stream_item(row, index))
+
+    assert graph.decode_calls == [1, 2, 3]
+    snapshot = scheduler.admin("model_info")["data"]
+    assert snapshot["codec_cuda_graph_default_max_frames"] == 12
+    assert snapshot["codec_resource_totals"].get("codec_catchup_step_total", 0) == 0
+    scheduler.abort("req")
 
 
 def test_idle_offline_batch_uses_full_batch_decode() -> None:
