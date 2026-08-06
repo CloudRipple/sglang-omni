@@ -98,6 +98,12 @@ The ASR CI gate runs the selected ASR CI model preset on this same benchmark
 entry point (`tests/test_model/test_asr_ci_seedtts.py`). Qwen3-ASR remains
 the transcriber for the TTS and talker WER stages.
 
+For the current-main concurrency baseline, the fixed-baseline comparison, and
+the per-stage bottleneck decomposition (issue #1324), see
+[Qwen3-ASR concurrency profile](../developer_reference/qwen3_asr_concurrency_profile.md).
+The benchmark's `--profile-events`, `--sample-util`, `--save-raw-dir`, and
+`--fingerprint` flags capture the telemetry that report uses.
+
 ## Known Limitations
 
 - The endpoint accepts one uploaded file per request.
