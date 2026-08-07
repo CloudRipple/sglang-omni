@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
 
 from sglang_omni.client import GenerateChunk
+from sglang_omni.models.moss_tts_realtime import speech_ws as speech_ws_module
 from sglang_omni.models.moss_tts_realtime import text_delta
 from sglang_omni.models.moss_tts_realtime.protocol import MossTTSRealtimeTurnStart
 from sglang_omni.models.moss_tts_realtime.speech_ws import (
@@ -405,6 +406,76 @@ def test_realtime_endpoint_streams_two_turns_and_preserves_input_ids() -> None:
     assert tokenizer.len_calls == 1
 
 
+def test_realtime_events_cover_input_tokenize_and_first_pcm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        speech_ws_module,
+        "_emit_event",
+        lambda **kwargs: captured.append(kwargs),
+    )
+    monkeypatch.setattr(speech_ws_module, "realtime_events_active", lambda: True)
+    client_impl = RealtimeSpeechClient()
+    client = TestClient(
+        create_app(
+            client_impl,
+            model_name="tts",
+            speech_realtime_handler=_realtime_handler(),
+        )
+    )
+
+    with client.websocket_connect("/v1/audio/speech/realtime") as websocket:
+        websocket.send_json(_realtime_config())
+        configured = websocket.receive_json()
+        websocket.send_json({"type": "turn.start", "turn_id": "turn-events"})
+        started = websocket.receive_json()
+        websocket.send_json(
+            {
+                "type": "input.text",
+                "turn_id": "turn-events",
+                "seq_no": 0,
+                "text": "abcdef",
+            }
+        )
+        assert websocket.receive_json()["type"] == "input.ack"
+        websocket.send_json(
+            {"type": "input.done", "turn_id": "turn-events", "seq_no": 1}
+        )
+        _, audio = _collect_until_turn_done(websocket)
+
+    assert audio
+    request_events = [
+        event for event in captured if event["request_id"] == started["request_id"]
+    ]
+    assert [event["event_name"] for event in request_events] == [
+        "ws_input_received",
+        "text_tokenize_start",
+        "text_tokenize_end",
+        "ws_input_received",
+        "text_tokenize_start",
+        "text_tokenize_end",
+        "pcm_encode_start",
+        "pcm_host_ready",
+        "pcm_send_begin",
+        "pcm_send_end",
+    ]
+    assert request_events[0]["metadata"] == {
+        "session_id": configured["session_id"],
+        "turn_id": "turn-events",
+        "turn_index": 0,
+        "seq_no": 0,
+        "input_type": "input.text",
+        "input_done": False,
+        "supplied_text_bytes": 6,
+        "supplied_token_count": 0,
+        "stable_token_count": 0,
+    }
+    assert request_events[2]["metadata"]["new_stable_token_count"] > 0
+    assert request_events[-1]["metadata"]["pcm_bytes"] > 0
+    assert request_events[-1]["metadata"]["audio_start_sent"] is True
+
+
 def test_realtime_custom_input_stage_is_used_for_updates_and_session_close() -> None:
     client_impl = RealtimeSpeechClient()
     custom_stage = "custom_realtime_stage"
@@ -439,7 +510,6 @@ def test_realtime_custom_input_stage_is_used_for_updates_and_session_close() -> 
 
     assert configured["session_id"] == client_impl.closed_sessions[0][0]
     assert client_impl.closed_sessions[0][1] == custom_stage
-    request = client_impl.requests[0][1]
     assert client_impl.realtime_opens[0] == {
         "request_id": started["request_id"],
         "session_id": configured["session_id"],

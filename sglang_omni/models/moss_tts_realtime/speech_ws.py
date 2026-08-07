@@ -18,6 +18,10 @@ from sglang_omni.client import Client, ClientError, GenerateRequest, SamplingPar
 from sglang_omni.client.audio import DEFAULT_SAMPLE_RATE, encode_pcm, select_audio_delta
 from sglang_omni.client.realtime import RealtimeHandle, open_realtime
 from sglang_omni.models.moss_tts_realtime.config import MossTTSRealtimeResourceLimits
+from sglang_omni.models.moss_tts_realtime.observability import (
+    emit_realtime_event as _emit_event,
+)
+from sglang_omni.models.moss_tts_realtime.observability import realtime_events_active
 from sglang_omni.models.moss_tts_realtime.protocol import (
     MossTTSRealtimeClientEvent,
     MossTTSRealtimeInputDone,
@@ -115,6 +119,37 @@ class MossTTSRealtimeSpeechWebSocketSession:
         self._send_lock = asyncio.Lock()
         self._teardown_complete = False
         self._backend_session_closed = False
+
+    def _emit_turn_event(
+        self,
+        turn: _ActiveRealtimeTurn,
+        event_name: str,
+        **metadata: Any,
+    ) -> None:
+        _emit_event(
+            request_id=turn.request_id,
+            stage="coordinator",
+            event_name=event_name,
+            metadata={
+                "session_id": self.session_id,
+                "turn_id": turn.turn_id,
+                "turn_index": turn.turn_index,
+                **metadata,
+            },
+        )
+
+    @staticmethod
+    def _audio_sample_count(audio_data: Any) -> int | None:
+        shape = getattr(audio_data, "shape", None)
+        if shape is not None:
+            try:
+                return int(shape[-1])
+            except (IndexError, TypeError, ValueError):
+                return None
+        try:
+            return len(audio_data)
+        except TypeError:
+            return None
 
     async def run(self) -> None:
         """Read configuration and drive one realtime speech session."""
@@ -293,6 +328,29 @@ class MossTTSRealtimeSpeechWebSocketSession:
         if turn is None:
             return
 
+        observe_events = realtime_events_active()
+        if observe_events:
+            supplied_text_bytes = (
+                len(event.text.encode("utf-8"))
+                if isinstance(event, MossTTSRealtimeInputText)
+                else 0
+            )
+            supplied_token_count = (
+                len(event.token_ids)
+                if isinstance(event, MossTTSRealtimeInputTokens)
+                else 0
+            )
+            self._emit_turn_event(
+                turn,
+                "ws_input_received",
+                seq_no=event.seq_no,
+                input_type=event.type,
+                input_done=isinstance(event, MossTTSRealtimeInputDone),
+                supplied_text_bytes=supplied_text_bytes,
+                supplied_token_count=supplied_token_count,
+                stable_token_count=turn.received_token_count,
+            )
+
         fingerprint = moss_tts_realtime_event_fingerprint(event)
         previous = turn.accepted_fingerprints.get(event.seq_no)
         if previous is not None:
@@ -340,7 +398,26 @@ class MossTTSRealtimeSpeechWebSocketSession:
                     )
                 new_mode = "text"
                 snapshot = turn.delta_tokenizer.snapshot()
+                if observe_events:
+                    self._emit_turn_event(
+                        turn,
+                        "text_tokenize_start",
+                        seq_no=event.seq_no,
+                        operation="push_delta",
+                        stable_token_count=len(turn.delta_tokenizer.emitted_token_ids),
+                    )
                 delta = turn.delta_tokenizer.push_delta(event.text)
+                if observe_events:
+                    self._emit_turn_event(
+                        turn,
+                        "text_tokenize_end",
+                        seq_no=event.seq_no,
+                        operation="push_delta",
+                        new_stable_token_count=len(delta.token_ids),
+                        stable_token_count=len(turn.delta_tokenizer.emitted_token_ids),
+                        tokenizer_token_count=len(turn.delta_tokenizer.token_ids),
+                        tokenizer_text_bytes=turn.delta_tokenizer.total_text_bytes,
+                    )
                 token_ids = delta.token_ids
                 byte_count = delta.byte_count
             elif isinstance(event, MossTTSRealtimeInputTokens):
@@ -362,7 +439,30 @@ class MossTTSRealtimeSpeechWebSocketSession:
             else:
                 if turn.input_mode == "text":
                     snapshot = turn.delta_tokenizer.snapshot()
+                    if observe_events:
+                        self._emit_turn_event(
+                            turn,
+                            "text_tokenize_start",
+                            seq_no=event.seq_no,
+                            operation="flush",
+                            stable_token_count=len(
+                                turn.delta_tokenizer.emitted_token_ids
+                            ),
+                        )
                     delta = turn.delta_tokenizer.flush()
+                    if observe_events:
+                        self._emit_turn_event(
+                            turn,
+                            "text_tokenize_end",
+                            seq_no=event.seq_no,
+                            operation="flush",
+                            new_stable_token_count=len(delta.token_ids),
+                            stable_token_count=len(
+                                turn.delta_tokenizer.emitted_token_ids
+                            ),
+                            tokenizer_token_count=len(turn.delta_tokenizer.token_ids),
+                            tokenizer_text_bytes=turn.delta_tokenizer.total_text_bytes,
+                        )
                     token_ids = delta.token_ids
                     byte_count = delta.byte_count
                 else:
@@ -489,13 +589,53 @@ class MossTTSRealtimeSpeechWebSocketSession:
                 )
                 if audio_data is None:
                     continue
+                sample_count = None
+                capture_first_pcm = turn.audio_chunks == 0 and realtime_events_active()
+                if capture_first_pcm:
+                    sample_count = self._audio_sample_count(audio_data)
+                    capture_first_pcm = sample_count != 0
+                pcm_metadata: dict[str, Any] | None = None
+                if capture_first_pcm:
+                    pcm_metadata = {
+                        "seq_no": turn.next_seq_no - 1 if turn.next_seq_no else None,
+                        "stable_token_count": turn.received_token_count,
+                        "sample_rate": sample_rate,
+                        "sample_count": sample_count,
+                    }
+                    self._emit_turn_event(
+                        turn,
+                        "pcm_encode_start",
+                        **pcm_metadata,
+                    )
                 audio_bytes = encode_pcm(audio_data, sample_rate)
                 if not audio_bytes:
                     continue
+                if capture_first_pcm:
+                    assert pcm_metadata is not None
+                    pcm_metadata["pcm_bytes"] = len(audio_bytes)
+                    self._emit_turn_event(
+                        turn,
+                        "pcm_host_ready",
+                        **pcm_metadata,
+                    )
                 if not turn.audio_started:
                     await self._send_audio_start(turn)
                     turn.audio_started = True
+                if capture_first_pcm:
+                    self._emit_turn_event(
+                        turn,
+                        "pcm_send_begin",
+                        audio_start_sent=turn.audio_started,
+                        **pcm_metadata,
+                    )
                 await self._send_bytes(audio_bytes)
+                if capture_first_pcm:
+                    self._emit_turn_event(
+                        turn,
+                        "pcm_send_end",
+                        audio_start_sent=turn.audio_started,
+                        **pcm_metadata,
+                    )
                 turn.audio_chunks += 1
                 turn.audio_bytes += len(audio_bytes)
 
@@ -764,8 +904,7 @@ class MossTTSRealtimeSpeechWebSocketSession:
             raise ValueError("speech WebSocket client messages must be text frames")
         if len(raw.encode("utf-8")) > resolved_max_bytes:
             raise ValueError(
-                f"{message_kind} WebSocket message exceeds "
-                f"{resolved_max_bytes} bytes"
+                f"{message_kind} WebSocket message exceeds {resolved_max_bytes} bytes"
             )
         return raw
 

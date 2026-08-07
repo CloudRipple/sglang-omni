@@ -12,11 +12,17 @@ from typing import Any
 
 import torch
 
+from sglang_omni.models.moss_tts_realtime.observability import (
+    emit_realtime_event as _emit_event,
+)
+from sglang_omni.models.moss_tts_realtime.observability import (
+    realtime_events_active,
+    realtime_identity_metadata,
+)
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
 from sglang_omni.models.moss_tts_realtime.vocoder_decoder import (
     moss_tts_realtime_vocoder_decoder_dtype,
 )
-from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.pipeline_state import build_usage
 from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
@@ -479,6 +485,10 @@ class _RealtimeStreamState:
     pending: list[torch.Tensor] = field(default_factory=list)
     ramp_index: int = 0
     next_chunk_frames: int = _CHUNK_RAMP[0]
+    session_id: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    identity_latched: bool = False
 
 
 @dataclass(frozen=True)
@@ -770,7 +780,25 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         *,
         origin: str,
     ) -> None:
-        del state
+        identity_source = source.data if origin == "payload" else source
+        if not state.identity_latched and isinstance(identity_source, Mapping):
+            for name in ("session_id", "turn_id"):
+                value = identity_source.get(name)
+                if (
+                    getattr(state, name) is None
+                    and isinstance(value, str)
+                    and value.strip()
+                ):
+                    setattr(state, name, value)
+            turn_index = identity_source.get("turn_index")
+            if (
+                state.turn_index is None
+                and not isinstance(turn_index, bool)
+                and isinstance(turn_index, int)
+                and turn_index >= 0
+            ):
+                state.turn_index = turn_index
+            state.identity_latched = True
         if origin == "payload":
             return
         metadata: Mapping[str, Any] = source
@@ -892,7 +920,39 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         participants: list[tuple[str, _RealtimeStreamState]],
         plan: _CoalescedStepPlan,
     ) -> dict[str, torch.Tensor]:
-        decoded = self._ensure_session().step(plan.slot_codes)
+        session = self._ensure_session()
+        first_participants: list[tuple[str, _RealtimeStreamState]] = []
+        shared_metadata: dict[str, Any] = {}
+        if realtime_events_active():
+            first_participants = [
+                (request_id, state)
+                for request_id, state in participants
+                if state.ramp_index == 0
+            ]
+            shared_metadata = {
+                "step_frames": plan.step_frames,
+                "participant_count": len(participants),
+                "codec_slot_width": self._stream_slots,
+                "codec_active_slots": session.active_leases,
+                "execution_mode": (
+                    "cuda_graph"
+                    if plan.step_frames in session.captured_frames()
+                    else "eager"
+                ),
+                "cuda_graph_enabled": self._cuda_graph,
+            }
+        for request_id, state in first_participants:
+            metadata = realtime_identity_metadata(state)
+            metadata.update(shared_metadata)
+            metadata.update({"codec_slot": state.slot, "decode_step_index": 0})
+            _emit_event(
+                request_id=request_id,
+                stage=None,
+                event_name="vocoder_step_start",
+                metadata=metadata,
+            )
+
+        decoded = session.step(plan.slot_codes)
         self._resource_totals["codec_decode_step_total"] += 1
         self._resource_totals["codec_decoded_frame_total"] += plan.step_frames * len(
             participants
@@ -910,6 +970,23 @@ class MossTTSRealtimeStreamingVocoderScheduler(
                 state.ramp_index += 1
             state.next_chunk_frames = _CHUNK_RAMP[state.ramp_index]
             output[request_id] = decoded[state.slot]
+        for request_id, state in first_participants:
+            waveform = output[request_id]
+            metadata = realtime_identity_metadata(state)
+            metadata.update(shared_metadata)
+            metadata.update(
+                {
+                    "codec_slot": state.slot,
+                    "decode_step_index": 0,
+                    "output_samples": int(waveform.shape[-1]),
+                }
+            )
+            _emit_event(
+                request_id=request_id,
+                stage=None,
+                event_name="vocoder_step_end",
+                metadata=metadata,
+            )
         return output
 
     def _release_state_slot(

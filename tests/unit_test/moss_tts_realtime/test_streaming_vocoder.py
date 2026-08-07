@@ -13,6 +13,9 @@ import pytest
 import torch
 from torch import nn
 
+from sglang_omni.models.moss_tts_realtime import (
+    streaming_vocoder as streaming_vocoder_module,
+)
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
 from sglang_omni.models.moss_tts_realtime.streaming_vocoder import (
     MossTTSRealtimeStreamingVocoderScheduler,
@@ -352,6 +355,125 @@ def test_equal_ramp_steps_coalesce_without_cross_slot_drift() -> None:
     assert codec.frame_calls == [((0, 1), 1), ((0, 1), 2), ((0, 1), 3)]
     np.testing.assert_array_equal(_stream_audio(messages, "a"), _reference(rows_a))
     np.testing.assert_array_equal(_stream_audio(messages, "b"), _reference(rows_b))
+
+
+def test_first_vocoder_step_events_cover_each_coalesced_participant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        streaming_vocoder_module,
+        "realtime_events_active",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        streaming_vocoder_module,
+        "_emit_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    scheduler, _ = _scheduler(stream_slots=2)
+    rows_a = _rows(3, seed=21)
+    rows_b = _rows(3, seed=22)
+
+    scheduler.on_stream_chunk_batch(
+        [
+            (
+                "a",
+                _stream_item(
+                    rows_a[0],
+                    0,
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    turn_index=0,
+                ),
+            ),
+            (
+                "b",
+                _stream_item(
+                    rows_b[0],
+                    0,
+                    session_id="session-b",
+                    turn_id="turn-b",
+                    turn_index=1,
+                ),
+            ),
+        ]
+    )
+    scheduler.on_stream_chunk_batch(
+        [
+            ("a", _stream_item(rows_a[1], 1)),
+            ("a", _stream_item(rows_a[2], 2)),
+            ("b", _stream_item(rows_b[1], 1)),
+            ("b", _stream_item(rows_b[2], 2)),
+        ]
+    )
+
+    critical = [
+        event
+        for event in events
+        if event["event_name"] in {"vocoder_step_start", "vocoder_step_end"}
+    ]
+    assert [event["event_name"] for event in critical] == [
+        "vocoder_step_start",
+        "vocoder_step_start",
+        "vocoder_step_end",
+        "vocoder_step_end",
+    ]
+    assert [event["request_id"] for event in critical] == ["a", "b", "a", "b"]
+    for event in critical:
+        assert event["metadata"]["step_frames"] == 1
+        assert event["metadata"]["participant_count"] == 2
+        assert event["metadata"]["codec_slot_width"] == 2
+        assert event["metadata"]["codec_active_slots"] == 2
+        assert event["metadata"]["execution_mode"] == "eager"
+        assert event["metadata"]["decode_step_index"] == 0
+    assert critical[0]["metadata"]["session_id"] == "session-a"
+    assert critical[1]["metadata"]["turn_index"] == 1
+    assert critical[2]["metadata"]["output_samples"] == SAMPLES_PER_FRAME
+    scheduler.abort("a")
+    scheduler.abort("b")
+
+
+def test_observability_identity_is_best_effort_not_a_stream_contract() -> None:
+    scheduler, _ = _scheduler(stream_slots=1)
+    rows = _rows(3, seed=23)
+
+    scheduler.on_stream_chunk_batch(
+        [
+            (
+                "request",
+                _stream_item(
+                    rows[0],
+                    0,
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    turn_index=0,
+                ),
+            )
+        ]
+    )
+    scheduler.on_stream_chunk_batch(
+        [
+            (
+                "request",
+                _stream_item(
+                    rows[1],
+                    1,
+                    session_id="session-b",
+                    turn_id="turn-b",
+                    turn_index=-1,
+                ),
+            ),
+            ("request", _stream_item(rows[2], 2)),
+        ]
+    )
+
+    state = scheduler._stream_states["request"]
+    assert state.session_id == "session-a"
+    assert state.turn_id == "turn-a"
+    assert state.turn_index == 0
+    assert all(message.type == "stream" for message in _drain(scheduler))
+    scheduler.abort("request")
 
 
 def test_staggered_requests_keep_their_exact_next_ramp_size() -> None:

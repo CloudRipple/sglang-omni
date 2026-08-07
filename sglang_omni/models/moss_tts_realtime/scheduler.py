@@ -20,6 +20,13 @@ from sglang.srt.managers.scheduler import Scheduler as _Upstream
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 
 from sglang_omni.models.moss_tts_realtime.config import MossTTSRealtimeResourceLimits
+from sglang_omni.models.moss_tts_realtime.observability import (
+    emit_realtime_event as _emit_event,
+)
+from sglang_omni.models.moss_tts_realtime.observability import (
+    realtime_events_active,
+    realtime_identity_metadata,
+)
 from sglang_omni.models.moss_tts_realtime.request_builders import (
     MOSS_TTS_REALTIME_PREPARED_INITIAL_TOKEN_IDS_KEY,
     build_moss_tts_realtime_prefill_rows,
@@ -34,7 +41,6 @@ from sglang_omni.models.moss_tts_realtime.request_state import (
     MossTTSRealtimeUpdateDisposition,
     apply_moss_tts_realtime_input_update,
 )
-from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto.messages import InputUpdateMessage
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.types import SchedulerRequest
@@ -219,6 +225,8 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             self._held_sessions_high_water = 0
         if not hasattr(self, "_held_kv_tokens_high_water"):
             self._held_kv_tokens_high_water = 0
+        if not hasattr(self, "_prefill_gate_ready_event_ids"):
+            self._prefill_gate_ready_event_ids: set[str] = set()
 
     def _bump_resource_total(self, name: str, amount: int = 1) -> None:
         self._ensure_observability_state()
@@ -292,10 +300,11 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         event_name: str,
         *,
         metadata: Mapping[str, Any] | None = None,
+        stage: str | None = None,
     ) -> None:
         _emit_event(
             request_id=str(request_id),
-            stage=None,
+            stage=stage,
             event_name=f"moss_tts_realtime_{event_name}",
             metadata=metadata,
         )
@@ -549,10 +558,69 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             buffered is not None and buffered.input_done
         )
         token_count = len(initial_token_ids) + pending_update_tokens
-        return (
+        ready = (
             token_count >= int(self._moss_tts_realtime_model_config.delay_tokens_len)
             or input_done
         )
+        request_id = str(payload.request_id)
+        observe_events = ready and realtime_events_active()
+        if observe_events:
+            self._ensure_observability_state()
+        if observe_events and request_id not in self._prefill_gate_ready_event_ids:
+            self._prefill_gate_ready_event_ids.add(request_id)
+            last_update = (
+                buffered.messages[-1]
+                if buffered is not None and buffered.messages
+                else None
+            )
+            metadata = realtime_identity_metadata(getattr(payload, "data", None))
+            metadata.update(
+                {
+                    "seq_no": getattr(last_update, "seq_no", None),
+                    "new_stable_token_count": (
+                        len(last_update.token_ids)
+                        if last_update is not None
+                        else len(initial_token_ids)
+                    ),
+                    "stable_token_count": token_count,
+                    "pending_bytes": (
+                        int(buffered.byte_count) if buffered is not None else 0
+                    ),
+                    "input_done": input_done,
+                    "required_stable_token_count": int(
+                        self._moss_tts_realtime_model_config.delay_tokens_len
+                    ),
+                    "short_input_done": bool(
+                        input_done
+                        and token_count
+                        < int(self._moss_tts_realtime_model_config.delay_tokens_len)
+                    ),
+                }
+            )
+            self._emit_realtime_event(
+                request_id,
+                "prefill_gate_ready",
+                metadata=metadata,
+            )
+        return ready
+
+    def _run_request_builder(self, payload: Any, active_stage: str | None) -> Any:
+        if realtime_events_active():
+            initial_token_ids, initial_input_done = self._payload_initial_input(payload)
+            metadata = realtime_identity_metadata(getattr(payload, "data", None))
+            metadata.update(
+                {
+                    "initial_stable_token_count": len(initial_token_ids),
+                    "initial_input_done": initial_input_done,
+                }
+            )
+            self._emit_realtime_event(
+                str(payload.request_id),
+                "request_build_start",
+                metadata=metadata,
+                stage=active_stage,
+            )
+        return super()._run_request_builder(payload, active_stage)
 
     def _begin_session_turn(
         self,
@@ -1336,6 +1404,29 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 canonical_rows,
                 model_config=req_data.model_config,
             )
+            if realtime_events_active():
+                canonical_metadata = realtime_identity_metadata(req_data.state)
+                canonical_metadata.update(
+                    {
+                        "seq_no": (
+                            turn.pending_input.next_seq_no - 1
+                            if turn.pending_input.next_seq_no
+                            else None
+                        ),
+                        "stable_token_count": turn.pending_input.total_received_tokens,
+                        "prefill_token_count": len(prefill_token_ids),
+                        "remaining_stable_token_count": len(turn.pending_input),
+                        "base_prompt_rows": len(base_cache_ids),
+                        "canonical_prompt_rows": int(canonical_rows.shape[0]),
+                        "committed_rows": len(session_state.committed_rows),
+                        "canonical_cache_ids": len(canonical_ids),
+                    }
+                )
+                self._emit_realtime_event(
+                    request_id,
+                    "canonical_rows_ready",
+                    metadata=canonical_metadata,
+                )
             req_data.generation_row_start = len(turn.ledger.rows)
             req_data.prompt_rows = canonical_rows
             req_data.state.prompt_rows = canonical_rows
@@ -1453,6 +1544,64 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 if req_data.session_state is session_state:
                     req_data.session_state = None
             raise
+
+    def _enqueue_built_request(
+        self,
+        payload: Any,
+        pending_stream_done: bool,
+        req_data: Any,
+        *,
+        request_admission_lock_held: bool = False,
+    ) -> None:
+        super()._enqueue_built_request(
+            payload,
+            pending_stream_done,
+            req_data,
+            request_admission_lock_held=request_admission_lock_held,
+        )
+        if not isinstance(req_data, MossTTSRealtimeRequestData):
+            return
+        req = req_data.req
+        if (
+            req is None
+            or not realtime_events_active()
+            or not any(item is req for item in self.waiting_queue)
+        ):
+            return
+        turn = req_data.turn_state
+        prefix_indices = getattr(req, "prefix_indices", None)
+        metadata = realtime_identity_metadata(req_data.state)
+        metadata.update(
+            {
+                "seq_no": (
+                    turn.pending_input.next_seq_no - 1
+                    if turn is not None and turn.pending_input.next_seq_no
+                    else None
+                ),
+                "stable_token_count": (
+                    turn.pending_input.total_received_tokens
+                    if turn is not None
+                    else len(req_data.initial_token_ids)
+                ),
+                "prefill_token_count": (
+                    len(turn.prefill_token_ids) if turn is not None else 0
+                ),
+                "prompt_rows": (
+                    int(req_data.prompt_rows.shape[0])
+                    if isinstance(req_data.prompt_rows, torch.Tensor)
+                    else None
+                ),
+                "cached_rows": (
+                    len(prefix_indices) if prefix_indices is not None else 0
+                ),
+                "queue_depth": len(self.waiting_queue),
+            }
+        )
+        self._emit_realtime_event(
+            str(payload.request_id),
+            "scheduler_queue_enter",
+            metadata=metadata,
+        )
 
     @staticmethod
     def _is_live_decode_req(req: Any) -> bool:
@@ -1910,6 +2059,9 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             return
         with lock:
             self._buffered_input_updates.pop(request_id, None)
+            gate_event_ids = getattr(self, "_prefill_gate_ready_event_ids", None)
+            if gate_event_ids is not None:
+                gate_event_ids.discard(request_id)
             terminal_ids = self._input_update_terminal_ids
             if request_id in terminal_ids:
                 return

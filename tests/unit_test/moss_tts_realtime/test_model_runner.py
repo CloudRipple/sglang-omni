@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sglang_omni.models.moss_tts_realtime import model_runner as model_runner_module
 from sglang_omni.models.moss_tts_realtime.model_runner import MossTTSRealtimeModelRunner
 from sglang_omni.models.moss_tts_realtime.payload_types import MossTTSRealtimeState
 from sglang_omni.models.moss_tts_realtime.request_state import (
@@ -128,6 +129,9 @@ def _request(
 ) -> SchedulerRequest:
     turn = _turn(rid)
     state = MossTTSRealtimeState(
+        session_id=f"session-{rid}",
+        turn_id=f"turn-{rid}",
+        turn_index=0,
         generation_kwargs={
             "temperature": 0.0,
             "top_p": 0.6,
@@ -196,6 +200,97 @@ def test_prefill_projects_only_the_uncached_canonical_rows() -> None:
     assert request.data.input_embeds_are_projected
 
 
+def test_prefill_dispatch_events_include_shape_and_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _ = _runner()
+    events: list[dict] = []
+    monkeypatch.setattr(model_runner_module, "realtime_events_active", lambda: True)
+    monkeypatch.setattr(
+        model_runner_module,
+        "_emit_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    rows = torch.arange(3 * 17, dtype=torch.long).reshape(3, 17)
+    request = _request("a", prompt_rows=rows)
+    request.data.req.prefix_indices = [0]
+    request.data.req.extend_range = SimpleNamespace(length=2)
+    schedule_batch = SimpleNamespace(
+        is_prefill_only=True,
+        is_extend_in_batch=True,
+    )
+
+    runner.before_prefill(SimpleNamespace(), schedule_batch, [request])
+    runner.post_prefill(
+        SimpleNamespace(can_run_cuda_graph=False),
+        SimpleNamespace(),
+        schedule_batch,
+        [request],
+    )
+
+    assert [event["event_name"] for event in events] == [
+        "prefill_dispatch_start",
+        "prefill_dispatch_end",
+    ]
+    assert events[0]["metadata"] == {
+        "session_id": "session-a",
+        "turn_id": "turn-a",
+        "turn_index": 0,
+        "seq_no": None,
+        "stable_token_count": 0,
+        "prompt_rows": 3,
+        "prefill_cached_rows": 1,
+        "prefill_dispatch_rows": 2,
+        "batch_size": 1,
+        "is_prefill_only": True,
+        "is_extend_in_batch": True,
+        "is_chunked": False,
+    }
+    assert events[1]["metadata"]["can_run_cuda_graph"] is False
+
+
+def test_first_codec_frame_ready_event_is_emitted_after_host_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, _ = _runner()
+    events: list[dict] = []
+    monkeypatch.setattr(model_runner_module, "realtime_events_active", lambda: True)
+    monkeypatch.setattr(
+        model_runner_module,
+        "_emit_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    outbox = _Outbox()
+    runner.set_stream_outbox(outbox)
+    request = _request("a")
+    result = _result()
+    runner._collect_frame(
+        result,
+        SimpleNamespace(),
+        SimpleNamespace(output_ids=None),
+        [request],
+    )
+
+    runner.post_process_outputs(
+        result,
+        SimpleNamespace(requests=[request]),
+        {"a": RequestOutput(request_id="a", data=result.next_token_ids[0])},
+    )
+
+    assert len(events) == 1
+    assert events[0]["event_name"] == "first_codec_frame_ready"
+    assert events[0]["request_id"] == "a"
+    assert events[0]["metadata"]["frame_index"] == 0
+    assert events[0]["metadata"]["ar_batch_size"] == 1
+    assert request.data.turn_state.provisional_frame is not None
+    assert outbox.messages[0].metadata == {
+        "n_vq": 16,
+        "session_id": "session-a",
+        "turn_id": "turn-a",
+        "turn_index": 0,
+    }
+
+
 def test_collect_journals_nonterminal_frame_and_streams_after_host_apply() -> None:
     runner, model = _runner()
     request = _request("a")
@@ -226,6 +321,7 @@ def test_collect_journals_nonterminal_frame_and_streams_after_host_apply() -> No
     assert request.data.turn_state.provisional_frame.audio_codes == tuple(range(1, 17))
     assert len(outbox.messages) == 1
     assert torch.equal(outbox.messages[0].data, expected_frame[0])
+    assert outbox.messages[0].metadata == {"n_vq": 16}
 
 
 def test_decode_rejects_unresolved_provisional_then_accepts_materialized_row() -> None:

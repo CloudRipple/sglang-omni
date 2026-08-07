@@ -122,6 +122,118 @@ def test_input_update_wakes_deferred_payload_only_when_readiness_can_change() ->
     assert scheduler._is_request_build_ready(payload, pending_stream_done=False)
 
 
+def test_prefill_gate_ready_event_is_emitted_once_for_the_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _scheduler()
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        scheduler_module,
+        "_emit_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(scheduler_module, "realtime_events_active", lambda: True)
+    payload = _payload()
+    payload.data.update(
+        session_id="session-1",
+        turn_id="turn-1",
+        turn_index=0,
+    )
+    scheduler._on_input_update(
+        payload.request_id,
+        _wire_update(seq_no=0, token_ids=tuple(range(12))),
+    )
+
+    assert scheduler._is_request_build_ready(payload, pending_stream_done=False)
+    assert scheduler._is_request_build_ready(payload, pending_stream_done=False)
+
+    gate_events = [
+        event
+        for event in events
+        if event["event_name"] == "moss_tts_realtime_prefill_gate_ready"
+    ]
+    assert len(gate_events) == 1
+    assert gate_events[0]["metadata"] == {
+        "session_id": "session-1",
+        "turn_id": "turn-1",
+        "turn_index": 0,
+        "seq_no": 0,
+        "new_stable_token_count": 12,
+        "stable_token_count": 12,
+        "pending_bytes": 0,
+        "input_done": False,
+        "required_stable_token_count": 12,
+        "short_input_done": False,
+    }
+    assert payload.request_id in scheduler._prefill_gate_ready_event_ids
+    scheduler._mark_input_update_terminal(payload.request_id)
+    assert payload.request_id not in scheduler._prefill_gate_ready_event_ids
+
+
+def test_request_build_canonical_rows_and_queue_events_are_ordered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _scheduler()
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        scheduler_module,
+        "_emit_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(scheduler_module, "realtime_events_active", lambda: True)
+    payload = _payload(tuple(range(12)))
+    payload.data.update(
+        session_id="session-1",
+        turn_id="turn-1",
+        turn_index=0,
+    )
+    scheduler._request_builder = lambda value: value.request_id
+
+    assert scheduler._run_request_builder(payload, "tts_engine") == "request-1"
+    data = _request_data(tuple(range(12)), input_done=False)
+    scheduler._finalize_built_request(payload, False, data)
+
+    def fake_enqueue(
+        owner: Any,
+        queued_payload: Any,
+        pending_stream_done: bool,
+        queued_data: Any,
+        *,
+        request_admission_lock_held: bool = False,
+    ) -> None:
+        del queued_payload, pending_stream_done, request_admission_lock_held
+        queued_data.req._omni_data = queued_data
+        owner.waiting_queue.append(queued_data.req)
+
+    monkeypatch.setattr(
+        scheduler_module.OmniScheduler,
+        "_enqueue_built_request",
+        fake_enqueue,
+    )
+    scheduler._enqueue_built_request(payload, False, data)
+
+    critical = [
+        event
+        for event in events
+        if event["event_name"]
+        in {
+            "moss_tts_realtime_request_build_start",
+            "moss_tts_realtime_canonical_rows_ready",
+            "moss_tts_realtime_scheduler_queue_enter",
+        }
+    ]
+    assert [event["event_name"] for event in critical] == [
+        "moss_tts_realtime_request_build_start",
+        "moss_tts_realtime_canonical_rows_ready",
+        "moss_tts_realtime_scheduler_queue_enter",
+    ]
+    assert critical[0]["stage"] == "tts_engine"
+    assert critical[1]["metadata"]["prefill_token_count"] == 12
+    assert critical[1]["metadata"]["canonical_prompt_rows"] == 13
+    assert critical[2]["metadata"]["queue_depth"] == 1
+    assert critical[2]["metadata"]["cached_rows"] == 0
+
+
 def test_finalizer_replays_buffered_updates_before_freezing_prefill() -> None:
     scheduler = _scheduler()
     initial = (1, 2, 3)

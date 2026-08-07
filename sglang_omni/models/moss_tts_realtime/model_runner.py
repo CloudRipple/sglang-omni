@@ -8,6 +8,13 @@ from typing import Any
 import torch
 
 from sglang_omni.model_runner.base import ModelRunner
+from sglang_omni.models.moss_tts_realtime.observability import (
+    emit_realtime_event as _emit_event,
+)
+from sglang_omni.models.moss_tts_realtime.observability import (
+    realtime_events_active,
+    realtime_identity_metadata,
+)
 from sglang_omni.models.moss_tts_realtime.state_pool import MossTTSRealtimeDecodeJournal
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.types import RequestOutput
@@ -64,6 +71,102 @@ class MossTTSRealtimeModelRunner(ModelRunner):
         if callable(graph_snapshot):
             snapshot.update(graph_snapshot())
         return snapshot
+
+    @staticmethod
+    def _request_event_metadata(sched_req: Any) -> dict[str, Any]:
+        data = sched_req.data
+        metadata = realtime_identity_metadata(getattr(data, "state", None))
+        req = getattr(data, "req", None)
+        turn = getattr(data, "turn_state", None)
+        if turn is not None:
+            metadata.setdefault("session_id", turn.session_id)
+            metadata.setdefault("turn_id", turn.turn_id)
+        prompt_rows = getattr(data, "prompt_rows", None)
+        prefix_indices = (
+            getattr(req, "prefix_indices", None) if req is not None else None
+        )
+        metadata.update(
+            {
+                "seq_no": (
+                    turn.pending_input.next_seq_no - 1
+                    if turn is not None and turn.pending_input.next_seq_no
+                    else None
+                ),
+                "stable_token_count": (
+                    turn.pending_input.total_received_tokens
+                    if turn is not None
+                    else len(getattr(data, "initial_token_ids", ()) or ())
+                ),
+                "prompt_rows": (
+                    int(prompt_rows.shape[0])
+                    if isinstance(prompt_rows, torch.Tensor)
+                    else None
+                ),
+                "prefill_cached_rows": (
+                    len(prefix_indices) if prefix_indices is not None else 0
+                ),
+                "prefill_dispatch_rows": (
+                    int(
+                        getattr(
+                            getattr(req, "extend_range", None),
+                            "length",
+                            0,
+                        )
+                        or 0
+                    )
+                    if req is not None
+                    else 0
+                ),
+            }
+        )
+        return metadata
+
+    def _emit_prefill_events(
+        self,
+        event_name: str,
+        schedule_batch: Any,
+        requests: list[Any],
+        *,
+        can_run_cuda_graph: bool | None = None,
+    ) -> None:
+        if not realtime_events_active():
+            return
+        batch_size = len(requests)
+        for sched_req in requests:
+            metadata = self._request_event_metadata(sched_req)
+            metadata.update(
+                {
+                    "batch_size": batch_size,
+                    "is_prefill_only": bool(
+                        getattr(schedule_batch, "is_prefill_only", False)
+                    ),
+                    "is_extend_in_batch": bool(
+                        getattr(schedule_batch, "is_extend_in_batch", False)
+                    ),
+                    "is_chunked": self._is_chunked_request(sched_req),
+                }
+            )
+            if can_run_cuda_graph is not None:
+                metadata["can_run_cuda_graph"] = can_run_cuda_graph
+            _emit_event(
+                request_id=sched_req.request_id,
+                stage=None,
+                event_name=event_name,
+                metadata=metadata,
+            )
+
+    def before_prefill(
+        self,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list[Any],
+    ) -> None:
+        del forward_batch
+        self._emit_prefill_events(
+            "prefill_dispatch_start",
+            schedule_batch,
+            requests,
+        )
 
     def custom_prefill_forward(
         self,
@@ -240,6 +343,12 @@ class MossTTSRealtimeModelRunner(ModelRunner):
         schedule_batch: Any,
         requests: list[Any],
     ) -> None:
+        self._emit_prefill_events(
+            "prefill_dispatch_end",
+            schedule_batch,
+            requests,
+            can_run_cuda_graph=bool(getattr(result, "can_run_cuda_graph", False)),
+        )
         if bool(getattr(schedule_batch, "is_prefill_only", False)):
             return
         self._collect_frame(result, forward_batch, schedule_batch, requests)
@@ -448,16 +557,41 @@ class MossTTSRealtimeModelRunner(ModelRunner):
                 raise RuntimeError("host and device audio-EOS decisions diverged")
             if observed.is_audio_eos:
                 continue
+            is_first_frame = journal.sample_positions[index] == 0
+            observe_first_frame = is_first_frame and realtime_events_active()
+            if observe_first_frame:
+                metadata = self._request_event_metadata(sched_req)
+                metadata.update(
+                    {
+                        "frame_index": 0,
+                        "ar_batch_size": len(scheduler_output.requests),
+                        "backbone_can_run_cuda_graph": bool(
+                            getattr(result, "can_run_cuda_graph", False)
+                        ),
+                    }
+                )
+                _emit_event(
+                    request_id=rid,
+                    stage=None,
+                    event_name="first_codec_frame_ready",
+                    metadata=metadata,
+                )
             stream_metadata = getattr(data, "stream_metadata", None)
             if not stream_metadata or self._outbox is None:
                 continue
+            outgoing_stream_metadata = stream_metadata
+            if observe_first_frame:
+                outgoing_stream_metadata = {
+                    **stream_metadata,
+                    **realtime_identity_metadata(data.state),
+                }
             self._outbox.put(
                 OutgoingMessage(
                     request_id=rid,
                     type="stream",
                     target=self._vocoder_target,
                     data=frames_cpu[index].clone(),
-                    metadata=stream_metadata,
+                    metadata=outgoing_stream_metadata,
                 )
             )
 
