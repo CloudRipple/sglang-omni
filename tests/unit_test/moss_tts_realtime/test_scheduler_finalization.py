@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from array import array
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sglang.srt.managers.schedule_batch import FINISH_LENGTH, FINISH_MATCHED_TOKEN
+from sglang.srt.managers.schedule_batch import (
+    FINISH_LENGTH,
+    FINISH_MATCHED_TOKEN,
+    ReqKvInfo,
+)
 from sglang.srt.session.session_controller import Session
 from sglang.srt.session.streaming_session import SessionSlot
 
@@ -59,9 +64,10 @@ def _cache_finished_realtime_request(
         output_id = MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID
         finished_reason = FINISH_LENGTH(1)
     turn.observe_audio_frame(frame, generation_step=0)
-    req.output_ids[:] = [output_id]
+    req.output_ids[:] = array("q", [output_id])
     req.finished_reason = finished_reason
     req._omni_data = data
+    req._omni_terminal_claimed = False
     session = req.session
     assert session is not None
     slot = scheduler.tree_cache.slots.get(session.session_id)
@@ -73,7 +79,10 @@ def _cache_finished_realtime_request(
         req_pool_idx = int(slot.req_pool_idx)
     req.req_pool_idx = req_pool_idx
     req.kv_committed_len = len(turn.ledger.rows)
-    req.kv_allocated_len = len(turn.ledger.rows)
+    req.kv = ReqKvInfo(
+        kv_allocated_len=len(turn.ledger.rows),
+        swa_evicted_seqlen=0,
+    )
     slot.save_from_req(req, is_first=is_first)
     session.finish_req(req)
     return req
@@ -428,7 +437,7 @@ def test_turn_timeout_cleans_every_scheduler_owned_location_once(
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_global_server_args",
+        "get_server_args",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()
@@ -451,7 +460,10 @@ def test_turn_timeout_cleans_every_scheduler_owned_location_once(
         req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
         req.req_pool_idx = 3
         req.kv_committed_len = len(turn.ledger.rows)
-        req.kv_allocated_len = len(turn.ledger.rows)
+        req.kv = ReqKvInfo(
+            kv_allocated_len=len(turn.ledger.rows),
+            swa_evicted_seqlen=0,
+        )
         batch = _AlignedDecodeBatch([req])
         if location == "runnable":
             scheduler.running_batch = batch
@@ -581,7 +593,10 @@ def test_parked_cleanup_failure_records_error_without_false_success(
     req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
     req.req_pool_idx = 3
     req.kv_committed_len = len(turn.ledger.rows)
-    req.kv_allocated_len = len(turn.ledger.rows)
+    req.kv = ReqKvInfo(
+        kv_allocated_len=len(turn.ledger.rows),
+        swa_evicted_seqlen=0,
+    )
     batch = _AlignedDecodeBatch([req])
     assert scheduler._park_starved_requests(batch) == 1
     turn.started_at = 100.0
@@ -620,7 +635,7 @@ def test_parked_cleanup_recovers_after_transient_kv_release_failure(
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_global_server_args",
+        "get_server_args",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()
@@ -640,7 +655,10 @@ def test_parked_cleanup_recovers_after_transient_kv_release_failure(
     req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
     req.req_pool_idx = 3
     req.kv_committed_len = len(turn.ledger.rows)
-    req.kv_allocated_len = len(turn.ledger.rows)
+    req.kv = ReqKvInfo(
+        kv_allocated_len=len(turn.ledger.rows),
+        swa_evicted_seqlen=0,
+    )
     batch = _AlignedDecodeBatch([req])
     assert scheduler._park_starved_requests(batch) == 1
     turn.started_at = 100.0

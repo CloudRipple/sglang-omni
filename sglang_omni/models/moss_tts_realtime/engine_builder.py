@@ -276,13 +276,17 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
         return int(model._decode_input_embedding.num_embeddings)
 
     def post_cuda_graph_setup(self, model: Any, server_args: Any) -> None:
+        from sglang_omni.scheduling.generation_batch_policy import (
+            get_decode_cuda_graph_bs,
+        )
+
         # Match MOSS-TTS Local: the generic SGLang CUDA-graph policy owns the
         # enable/disable switch and capture buckets. Realtime's physical request
         # pool also contains idle streaming sessions, so its frame decoder only
         # needs buckets up to the active-turn limit.
         batch_sizes = [
             int(batch_size)
-            for batch_size in server_args.cuda_graph_bs
+            for batch_size in get_decode_cuda_graph_bs(server_args)
             if int(batch_size) <= self.limits.max_active_turns
         ]
         if self.limits.max_active_turns not in batch_sizes:

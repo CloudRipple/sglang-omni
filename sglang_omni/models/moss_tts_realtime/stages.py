@@ -3,18 +3,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from numbers import Integral
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Iterator, Literal
 
 import torch
 
 from sglang_omni.models.moss_tts.hf_loading import (
-    moss_transformers_processor_compat,
-    resolve_moss_checkpoint,
+    moss_transformers_processor_compat as _shared_moss_transformers_processor_compat,
 )
 from sglang_omni.models.moss_tts_realtime.config import (
     DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
@@ -38,6 +40,7 @@ from sglang_omni.models.moss_tts_realtime.vocoder_decoder import (
 )
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.utils.checkpoint import resolve_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,60 @@ _INSTALL_HINT = (
     "model and OpenMOSS-Team/MOSS-Audio-Tokenizer."
 )
 _DEFAULT_LIMITS = MossTTSRealtimeResourceLimits()
+
+
+@contextmanager
+def moss_transformers_processor_compat() -> Iterator[None]:
+    """Handle Transformers API drift and HF-cache source symlinks locally."""
+
+    from transformers import dynamic_module_utils
+
+    original_compute_hash = dynamic_module_utils._compute_local_source_files_hash
+
+    def compute_local_source_files_hash(
+        pretrained_model_name_or_path: str | os.PathLike[str],
+        resolved_module_file: str | os.PathLike[str],
+    ) -> str:
+        # Transformers 5.12 resolves the module symlink before discovering
+        # relative imports. For an HF snapshot this moves discovery under
+        # ``blobs/<hash>``, where sibling source files no longer have their
+        # logical module names. Discover through the snapshot path, but hash
+        # the physical file contents.
+        model_path = Path(os.path.abspath(pretrained_model_name_or_path))
+        logical_module_file = Path(os.path.abspath(resolved_module_file))
+
+        def source_entry(source_file: str | os.PathLike[str]) -> tuple[str, Path]:
+            logical_path = Path(os.path.abspath(source_file))
+            try:
+                relative_path = logical_path.relative_to(model_path).as_posix()
+            except ValueError:
+                relative_path = logical_path.as_posix()
+            return relative_path, logical_path.resolve()
+
+        source_files = [source_entry(logical_module_file)]
+        source_files.extend(
+            source_entry(source_file)
+            for source_file in dynamic_module_utils.get_relative_import_files(
+                logical_module_file
+            )
+        )
+        source_hash = hashlib.sha256()
+        for relative_path, physical_path in sorted(
+            source_files,
+            key=lambda entry: entry[0],
+        ):
+            source_hash.update(relative_path.encode("utf-8"))
+            source_hash.update(physical_path.read_bytes())
+        return source_hash.hexdigest()[:16]
+
+    dynamic_module_utils._compute_local_source_files_hash = (
+        compute_local_source_files_hash
+    )
+    try:
+        with _shared_moss_transformers_processor_compat():
+            yield
+    finally:
+        dynamic_module_utils._compute_local_source_files_hash = original_compute_hash
 
 
 def _resolve_codec_device(device: str | None, gpu_id: int | None) -> str:
@@ -185,7 +242,7 @@ def estimate_moss_tts_realtime_codec_memory(
     if max_active_turns < 1:
         raise ValueError("max_active_turns must be positive")
 
-    checkpoint_dir = str(resolve_moss_checkpoint(model_path))
+    checkpoint_dir = str(resolve_checkpoint(model_path))
     try:
         codec = _create_moss_tts_realtime_codec_shell(checkpoint_dir)
         codec.encoder = torch.nn.ModuleList()
@@ -206,7 +263,7 @@ def load_moss_tts_realtime_codec(
 ) -> Any:
     if component not in ("encoder", "decoder"):
         raise ValueError(f"unsupported MOSS-TTS-Realtime codec component: {component}")
-    checkpoint_dir = str(resolve_moss_checkpoint(model_path))
+    checkpoint_dir = str(resolve_checkpoint(model_path))
     resolved_device = str(torch.device(device))
     logger.info(
         "Loading MOSS-TTS-Realtime codec %s component from %s on %s",
@@ -283,7 +340,7 @@ def bind_moss_tts_realtime_processor_config(config: Any, processor: Any) -> Any:
 def load_moss_tts_realtime_processor(model_path: str) -> Any:
     """Load the model config and processor through the checkpoint auto map."""
 
-    checkpoint_dir = resolve_moss_checkpoint(model_path)
+    checkpoint_dir = resolve_checkpoint(model_path)
     logger.info("Loading MOSS-TTS-Realtime processor from %s", checkpoint_dir)
     try:
         from transformers import AutoConfig, AutoProcessor
@@ -329,7 +386,7 @@ def create_preprocessing_executor(
     resolved_device = _resolve_codec_device(device, gpu_id)
     processor = load_moss_tts_realtime_processor(model_path)
     codec_source = codec_model_path or DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
-    codec_checkpoint = str(resolve_moss_checkpoint(codec_source))
+    codec_checkpoint = str(resolve_checkpoint(codec_source))
     codec = load_moss_tts_realtime_codec(
         codec_checkpoint,
         component="encoder",

@@ -94,7 +94,7 @@ class MossTTSRealtimeModelRunner(ModelRunner):
                 raise RuntimeError("MOSS-TTS-Realtime prefill requires prompt_rows")
             if not isinstance(rows, torch.Tensor):
                 rows = torch.as_tensor(rows, dtype=torch.long)
-            req_len = int(req.extend_input_len)
+            req_len = int(req.extend_range.length)
             prefix_len = len(req.prefix_indices)
             current_rows = rows[prefix_len : prefix_len + req_len]
             if int(current_rows.shape[0]) != req_len:

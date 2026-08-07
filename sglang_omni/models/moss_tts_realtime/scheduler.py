@@ -7,12 +7,14 @@ import hashlib
 import logging
 import threading
 import time
+from array import array
 from collections import Counter, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from sglang.srt.managers.overlap_utils import RelayPayload
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
@@ -41,6 +43,13 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_LIMITS = MossTTSRealtimeResourceLimits()
 _CLOSE_REALTIME_SESSION_ACTION = "close_realtime_session"
+
+
+def _streaming_slot_allocated_len(slot: Any, *, default: int) -> int:
+    """Return the allocated KV length from SGLang's session-slot KV state."""
+
+    kv = getattr(slot, "kv", None)
+    return int(getattr(kv, "kv_allocated_len", default))
 
 
 class _RealtimeMaterializationFailure(RuntimeError):
@@ -379,7 +388,10 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                     if pool_idx is None or pool_idx in active_pool_indices:
                         continue
                     held_sessions += 1
-                    allocated = max(int(getattr(slot, "kv_allocated_len", 0)), 0)
+                    allocated = max(
+                        _streaming_slot_allocated_len(slot, default=0),
+                        0,
+                    )
                     protected = max(int(getattr(slot, "cache_protected_len", 0)), 0)
                     allocated = ((allocated + page_size - 1) // page_size) * page_size
                     held_tokens += max(allocated - protected, 0)
@@ -707,7 +719,7 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             return "host warm length differs from committed ledger length"
         if int(getattr(slot, "kv_committed_len", -1)) != expected_length:
             return "streaming-session KV length differs from committed ledger"
-        if int(getattr(slot, "kv_allocated_len", -1)) < expected_length:
+        if _streaming_slot_allocated_len(slot, default=-1) < expected_length:
             return "streaming-session allocated KV is shorter than committed"
         return None
 
@@ -1106,8 +1118,10 @@ class MossTTSRealtimeScheduler(OmniScheduler):
 
         return TokenizedGenerateReqInput(
             input_text="",
-            input_ids=[int(token_id) for token_id in suffix_input_ids],
+            input_ids=array("q", (int(token_id) for token_id in suffix_input_ids)),
+            input_embeds=None,
             mm_inputs=None,
+            token_type_ids=None,
             sampling_params=cls._build_sampling_params(data),
             return_logprob=False,
             logprob_start_len=-1,
@@ -1138,13 +1152,13 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         audio_eos_token: int,
     ) -> None:
         expected = [int(token_id) for token_id in canonical_ids]
-        normalized_fields: dict[str, list[int]] = {}
+        normalized_fields: dict[str, array[int]] = {}
         for field_name in (
             "origin_input_ids",
             "origin_input_ids_unpadded",
         ):
             raw = getattr(req, field_name, None)
-            if not isinstance(raw, (list, tuple)):
+            if not isinstance(raw, (list, tuple, array)):
                 raise TypeError(f"SGLang request {field_name} must be a sequence")
             values = [int(token_id) for token_id in raw]
             if has_prior_request:
@@ -1172,7 +1186,7 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 raise RuntimeError(
                     f"SGLang request {field_name} does not match canonical row hashes"
                 )
-            normalized_fields[field_name] = values
+            normalized_fields[field_name] = array("q", values)
 
         req.origin_input_ids = normalized_fields["origin_input_ids"]
         req.origin_input_ids_unpadded = normalized_fields["origin_input_ids_unpadded"]
@@ -2673,6 +2687,33 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 data.state.prompt_rows = data.prompt_rows
                 req.output_ids[-1] = cache_key
                 batch.output_ids[index] = cache_key
+                input_ids = getattr(batch, "input_ids", None)
+                if isinstance(input_ids, torch.Tensor):
+                    if input_ids.ndim != 1 or index >= int(input_ids.shape[0]):
+                        raise RuntimeError(
+                            "decode batch input_ids are not request aligned"
+                        )
+                    input_ids[index] = cache_key
+
+                req_pool_indices = batch.req_pool_indices
+                if (
+                    not isinstance(req_pool_indices, torch.Tensor)
+                    or req_pool_indices.ndim != 1
+                    or index >= int(req_pool_indices.shape[0])
+                ):
+                    raise RuntimeError(
+                        "decode batch req_pool_indices are not request aligned"
+                    )
+                future_indices = req_pool_indices[index : index + 1]
+                relay_tokens = torch.tensor(
+                    [cache_key],
+                    dtype=torch.long,
+                    device=future_indices.device,
+                )
+                self.future_map.stash(
+                    future_indices,
+                    RelayPayload(bonus_tokens=relay_tokens),
+                )
 
                 if self._model_runner is not None:
                     hook = getattr(
@@ -2694,7 +2735,7 @@ class MossTTSRealtimeScheduler(OmniScheduler):
 
     def update_running_batch(self, batch: Any) -> Any:
         initial_bs = len(batch.reqs)
-        batch.filter_batch(v1_spec_info_filtered=True)
+        batch.filter_batch()
         if len(batch.reqs) < initial_bs:
             batch.batch_is_full = False
         if not batch.reqs:
@@ -2756,7 +2797,7 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             self._expire_realtime_turns()
             self._expire_parked_requests()
             self._wake_parked_requests()
-            return _Upstream.get_next_batch_to_run(self)
+            return super().get_next_batch_to_run()
         except _RealtimeMaterializationFailure as exc:
             logger.error("%s", exc)
             data = self._find_request_data(exc.request_id)
@@ -3077,7 +3118,7 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 "cached streaming-session KV length does not match canonical ledger: "
                 f"{committed_kv_length} != {expected_length}"
             )
-        allocated_length = int(getattr(slot, "kv_allocated_len", -1))
+        allocated_length = _streaming_slot_allocated_len(slot, default=-1)
         if allocated_length < committed_kv_length:
             raise RuntimeError(
                 "streaming-session allocated KV is shorter than committed"

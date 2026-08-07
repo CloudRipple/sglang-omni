@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import threading
+from array import array
 from collections import deque
 from queue import Queue
 from types import SimpleNamespace
 from typing import Any
 
 import torch
-from sglang.srt.managers.schedule_batch import FINISH_MATCHED_TOKEN
+from sglang.srt.managers.schedule_batch import FINISH_MATCHED_TOKEN, ReqKvInfo
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.session.session_controller import SessionController
 from sglang.srt.session.streaming_session import SessionSlot, StreamingSession
@@ -65,14 +66,20 @@ class _AlignedDecodeBatch:
 
     def filter_batch(
         self,
-        *,
+        chunked_req_to_exclude: Any | None = None,
         keep_indices: list[int] | None = None,
-        v1_spec_info_filtered: bool = False,
     ) -> None:
-        del v1_spec_info_filtered
         if keep_indices is None:
+            if chunked_req_to_exclude is None:
+                excluded: list[Any] = []
+            elif isinstance(chunked_req_to_exclude, list):
+                excluded = chunked_req_to_exclude
+            else:
+                excluded = [chunked_req_to_exclude]
             keep_indices = [
-                index for index, req in enumerate(self.reqs) if not req.finished()
+                index
+                for index, req in enumerate(self.reqs)
+                if not req.finished() and req not in excluded
             ]
         self.reqs = [self.reqs[index] for index in keep_indices]
         index_t = torch.tensor(keep_indices, dtype=torch.long)
@@ -128,6 +135,7 @@ def _scheduler() -> MossTTSRealtimeScheduler:
     scheduler._input_update_terminal_order = deque()
     scheduler._aborted_request_ids = set()
     scheduler._aborted_request_id_order = deque()
+    scheduler._completed_request_ids = {}
     scheduler._pending_request_builds = {}
     scheduler._backlogged_request_build_payloads = deque()
     scheduler._request_build_executor = None
@@ -139,18 +147,21 @@ def _scheduler() -> MossTTSRealtimeScheduler:
     scheduler.last_batch = None
     scheduler._async_pending = None
     scheduler.chunked_req = None
-    scheduler._pending_stream_chunks = {}
-    scheduler._pending_stream_done = set()
+    scheduler._pending_stream_ingress = {}
     scheduler._deferred_request_payloads = {}
     scheduler._dirty_deferred_request_ids = set()
     scheduler._first_emit_done = set()
     scheduler._prefill_start_done = set()
+    scheduler._prefill_end_done = set()
     scheduler._abort_callback = None
+    scheduler._stream_output_builder = None
+    scheduler._request_finished_callback = None
     scheduler._shutdown_callback = None
     scheduler._shutdown_lock = threading.Lock()
     scheduler._mark_running_request_aborted = lambda request_id: False
     scheduler._release_immediate_request_resources = lambda request_id: None
     scheduler._model_runner = None
+    scheduler.future_map = SimpleNamespace(stash=lambda indices, payload: None)
     req_to_token_pool = SimpleNamespace(
         device=torch.device("cpu"),
         req_to_token=torch.arange(64 * 4096, dtype=torch.int64).reshape(64, 4096),
@@ -217,6 +228,8 @@ def _payload(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         request_id=request_id,
+        prefetched_chunks=[],
+        prefetched_stream_done=False,
         data={
             "initial_token_ids": list(token_ids),
             "input_done": input_done,
@@ -329,15 +342,21 @@ def _seed_successful_session_turn(
     generated_row = (77, *tuple(range(1, 17)))
     generated_key = build_moss_tts_realtime_row_cache_key(generated_row)
     committed_rows = turn.ledger.rows + (generated_row,)
-    req.output_ids[:] = list(
-        prior_output_ids
-        if prior_output_ids is not None
-        else (generated_key, MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID)
+    req.output_ids[:] = array(
+        "q",
+        (
+            prior_output_ids
+            if prior_output_ids is not None
+            else (generated_key, MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID)
+        ),
     )
     req.finished_reason = FINISH_MATCHED_TOKEN(MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID)
     req.req_pool_idx = req_pool_idx
     req.kv_committed_len = len(committed_rows)
-    req.kv_allocated_len = len(committed_rows)
+    req.kv = ReqKvInfo(
+        kv_allocated_len=len(committed_rows),
+        swa_evicted_seqlen=0,
+    )
     slot = SessionSlot()
     slot.save_from_req(req, is_first=True)
     scheduler.tree_cache.slots[session.session_id] = slot

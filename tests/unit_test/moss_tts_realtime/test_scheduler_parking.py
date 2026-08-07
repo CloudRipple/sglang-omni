@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import torch
+from sglang.srt.managers.schedule_batch import NextBatchPlan, ReqKvInfo
 
 from sglang_omni.models.moss_tts_realtime import scheduler as scheduler_module
 from sglang_omni.models.moss_tts_realtime.config import MossTTSRealtimeResourceLimits
@@ -139,6 +140,13 @@ def test_materialization_consumes_one_token_and_replaces_both_scalar_ids(
             (request.request_id, materialized.row)
         )
     )
+    relayed: list[tuple[list[int], list[int]]] = []
+    scheduler.future_map = SimpleNamespace(
+        stash=lambda indices, payload: relayed.append(
+            (indices.tolist(), payload.bonus_tokens.tolist())
+        )
+    )
+    batch.input_ids = batch.output_ids.clone()
     upstream_calls: list[Any] = []
 
     def _upstream(owner, candidate):
@@ -154,6 +162,8 @@ def test_materialization_consumes_one_token_and_replaces_both_scalar_ids(
     expected_key = build_moss_tts_realtime_row_cache_key(expected_row)
     assert req.output_ids[-1] == expected_key
     assert batch.output_ids.tolist() == [expected_key]
+    assert batch.input_ids.tolist() == [expected_key]
+    assert relayed == [([req.req_pool_idx], [expected_key])]
     assert data.turn_state.provisional_frame is None
     assert data.turn_state.last_materialized_row.row == expected_row
     assert tuple(data.prompt_rows[-1].tolist()) == expected_row
@@ -229,7 +239,10 @@ def test_materialization_failure_detaches_only_bad_runnable_request(
     monkeypatch.setattr(
         scheduler_module._Upstream,
         "get_next_batch_to_run",
-        lambda owner: owner.update_running_batch(owner.running_batch),
+        lambda owner, running_batch, last_batch: NextBatchPlan(
+            batch_to_run=owner.update_running_batch(running_batch),
+            running_batch=running_batch,
+        ),
     )
     monkeypatch.setattr(
         scheduler_module._Upstream,
@@ -456,12 +469,12 @@ def test_wake_batch_rebuild_matches_installed_schedule_batch_contract(
     )
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_global_server_args",
+        "get_server_args",
         lambda: global_args,
     )
     monkeypatch.setattr(
         sampling_batch_info_module,
-        "get_global_server_args",
+        "get_server_args",
         lambda: global_args,
     )
 
@@ -480,7 +493,10 @@ def test_wake_batch_rebuild_matches_installed_schedule_batch_contract(
     req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
     req.req_pool_idx = 15
     req.kv_committed_len = len(req.origin_input_ids)
-    req.kv_allocated_len = req.kv_committed_len
+    req.kv = ReqKvInfo(
+        kv_allocated_len=req.kv_committed_len,
+        swa_evicted_seqlen=0,
+    )
     batch = _AlignedDecodeBatch([req])
     scheduler._park_starved_requests(batch)
     record = scheduler._parked_input[req.rid]

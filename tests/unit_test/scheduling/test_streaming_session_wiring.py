@@ -25,6 +25,9 @@ def _server_args(
     disable_radix_cache: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        attention_backend="flashinfer",
+        sampling_backend="pytorch",
+        get_attention_backends=lambda: ("flashinfer", "flashinfer"),
         enable_streaming_session=enable_streaming_session,
         disable_radix_cache=disable_radix_cache,
         disable_overlap_schedule=True,
@@ -123,7 +126,12 @@ def test_infrastructure_prefill_and_return_share_wrapped_cache(monkeypatch) -> N
             del config, server_args
             self.gpu_id = gpu_id
             self.tp_rank = tp_rank
-            self.model_runner = SimpleNamespace(model=object())
+            self.model_runner = SimpleNamespace(
+                model=object(),
+                alloc_memory_pool=lambda: None,
+                init_attention_backends=lambda: None,
+                init_cuda_graphs=lambda: None,
+            )
             self.model_config = object()
 
         @staticmethod

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+from array import array
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
@@ -30,12 +31,12 @@ def _scheduler(
     scheduler.last_batch = None
     scheduler._async_pending = None
     scheduler.chunked_req = None
-    scheduler._pending_stream_chunks = {}
-    scheduler._pending_stream_done = set()
+    scheduler._pending_stream_ingress = {}
     scheduler._deferred_request_payloads = {}
     scheduler._dirty_deferred_request_ids = set()
     scheduler._first_emit_done = set()
     scheduler._prefill_start_done = set()
+    scheduler._prefill_end_done = set()
     scheduler._aborted_request_ids = set()
     scheduler._aborted_request_id_order = deque()
     scheduler._abort_callback = None
@@ -56,19 +57,30 @@ def _scheduler(
 
 
 def _payload(request_id: str) -> SimpleNamespace:
-    return SimpleNamespace(request_id=request_id)
+    return SimpleNamespace(
+        request_id=request_id,
+        prefetched_chunks=[],
+        prefetched_stream_done=False,
+    )
 
 
 def _request_data(request_id: str) -> SimpleNamespace:
     return SimpleNamespace(
-        req=SimpleNamespace(rid=request_id),
+        req=SimpleNamespace(
+            rid=request_id,
+            origin_input_ids=array("q"),
+            origin_input_ids_unpadded=array("q"),
+        ),
         enforce_request_limits=False,
     )
 
 
 def test_sync_builder_finalizes_before_req_access_on_scheduler_thread() -> None:
     scheduler = _scheduler()
-    scheduler._pending_stream_done.add("request-1")
+    scheduler._pending_stream_ingress["request-1"] = SimpleNamespace(
+        chunks=[],
+        done=True,
+    )
     builder_threads: list[int] = []
     finalizer_calls: list[tuple[str, bool, int, Any]] = []
 

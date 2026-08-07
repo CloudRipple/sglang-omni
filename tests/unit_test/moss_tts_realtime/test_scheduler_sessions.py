@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from array import array
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
-from sglang.srt.managers.schedule_batch import FINISH_ABORT
+from sglang.srt.managers.schedule_batch import FINISH_ABORT, ReqKvInfo
 from sglang.srt.session.session_controller import Session
 
 from sglang_omni.models.moss_tts_realtime.request_builders import (
@@ -343,8 +344,8 @@ def test_next_turn_reuses_host_session_and_removes_prior_audio_eos(
     assert scheduler._moss_tts_realtime_sessions["session-1"] is session_state
     assert second.session_state is session_state
     assert second.req.session is session
-    assert second.req.origin_input_ids == expected_ids
-    assert second.req.origin_input_ids_unpadded == expected_ids
+    assert list(second.req.origin_input_ids) == expected_ids
+    assert list(second.req.origin_input_ids_unpadded) == expected_ids
     assert second.input_ids.tolist() == expected_ids
     assert torch.equal(second.prompt_rows, expected_rows)
     assert tuple(second.turn_state.ledger.committed_prefix) == committed_rows
@@ -375,7 +376,7 @@ def test_invalid_warm_slot_replays_full_committed_ledger(
     elif warm_damage == "committed_length_mismatch":
         old_slot.kv_committed_len -= 1
     else:
-        old_slot.kv_allocated_len = old_slot.kv_committed_len - 1
+        old_slot.kv.kv_allocated_len = old_slot.kv_committed_len - 1
     submitted_input_ids: list[list[int]] = []
     original = Session.create_req
 
@@ -413,7 +414,7 @@ def test_invalid_warm_slot_replays_full_committed_ledger(
     assert second.ledger_replay is True
     assert submitted_input_ids == [expected_ids]
     assert tuple(second.turn_state.ledger.committed_prefix) == committed_rows
-    assert second.req.origin_input_ids == expected_ids
+    assert list(second.req.origin_input_ids) == expected_ids
     assert second.req.session is not old_session
     assert scheduler.session_controller.get("session-1") is second.req.session
     assert session_state.warm_session_id is None
@@ -456,20 +457,23 @@ def test_next_turn_terminal_history_corruption_fails_without_poisoning_inflight(
     scheduler = _scheduler()
     session_state, session, _, generated_key = _seed_successful_session_turn(scheduler)
     if prior_outputs == "missing":
-        session.req_nodes[next(iter(session.req_nodes))].req.output_ids[:] = [
-            generated_key,
-            generated_key + 1,
-        ]
+        session.req_nodes[next(iter(session.req_nodes))].req.output_ids[:] = array(
+            "q",
+            [generated_key, generated_key + 1],
+        )
     elif prior_outputs == "duplicate":
-        session.req_nodes[next(iter(session.req_nodes))].req.output_ids[:] = [
-            MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID,
-            MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID,
-        ]
+        session.req_nodes[next(iter(session.req_nodes))].req.output_ids[:] = array(
+            "q",
+            [
+                MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID,
+                MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID,
+            ],
+        )
     else:
-        session.req_nodes[next(iter(session.req_nodes))].req.output_ids[:] = [
-            generated_key + 1,
-            MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID,
-        ]
+        session.req_nodes[next(iter(session.req_nodes))].req.output_ids[:] = array(
+            "q",
+            [generated_key + 1, MOSS_TTS_REALTIME_AUDIO_EOS_TOKEN_ID],
+        )
 
     second = _request_data(
         tuple(range(100, 112)),
@@ -524,7 +528,7 @@ def test_active_realtime_session_close_defers_until_finish_abort(monkeypatch) ->
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_global_server_args",
+        "get_server_args",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()
@@ -545,7 +549,10 @@ def test_active_realtime_session_close_defers_until_finish_abort(monkeypatch) ->
     req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
     req.req_pool_idx = 4
     req.kv_committed_len = len(turn.ledger.rows)
-    req.kv_allocated_len = len(turn.ledger.rows)
+    req.kv = ReqKvInfo(
+        kv_allocated_len=len(turn.ledger.rows),
+        swa_evicted_seqlen=0,
+    )
     scheduler.running_batch = _AlignedDecodeBatch([req])
 
     def mark_running_aborted(request_id: str) -> bool:
@@ -618,7 +625,7 @@ def test_stop_cleans_waiting_running_parked_and_held_sessions_once(monkeypatch) 
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_global_server_args",
+        "get_server_args",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()
@@ -678,7 +685,10 @@ def test_stop_cleans_waiting_running_parked_and_held_sessions_once(monkeypatch) 
     running.req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
     running.req.req_pool_idx = 2
     running.req.kv_committed_len = len(running.turn_state.ledger.rows)
-    running.req.kv_allocated_len = len(running.turn_state.ledger.rows)
+    running.req.kv = ReqKvInfo(
+        kv_allocated_len=len(running.turn_state.ledger.rows),
+        swa_evicted_seqlen=0,
+    )
 
     parked = finalize_live(
         request_id="request-parked",
@@ -689,7 +699,10 @@ def test_stop_cleans_waiting_running_parked_and_held_sessions_once(monkeypatch) 
     parked.req.output_ids.append(MOSS_TTS_REALTIME_REFERENCE_AUDIO_PAD_TOKEN_ID)
     parked.req.req_pool_idx = 3
     parked.req.kv_committed_len = len(parked.turn_state.ledger.rows)
-    parked.req.kv_allocated_len = len(parked.turn_state.ledger.rows)
+    parked.req.kv = ReqKvInfo(
+        kv_allocated_len=len(parked.turn_state.ledger.rows),
+        swa_evicted_seqlen=0,
+    )
     parked_batch = _AlignedDecodeBatch([parked.req])
     assert scheduler._park_starved_requests(parked_batch) == 1
     assert parked_batch.reqs == []

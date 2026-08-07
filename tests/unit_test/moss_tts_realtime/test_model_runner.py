@@ -136,11 +136,12 @@ def _request(
             "repetition_penalty": 1.1,
             "repetition_window": 50,
             "seed": seed,
-        }
+        },
     )
+    extend_input_len = 0 if prompt_rows is None else int(prompt_rows.shape[0])
     req = SimpleNamespace(
         rid=rid,
-        extend_input_len=0 if prompt_rows is None else int(prompt_rows.shape[0]),
+        extend_range=SimpleNamespace(length=extend_input_len),
         prefix_indices=[],
         output_ids=[],
         is_chunked=0,
@@ -181,7 +182,7 @@ def test_prefill_projects_only_the_uncached_canonical_rows() -> None:
     rows[:, 1:] %= MOSS_TTS_REALTIME_AUDIO_VOCAB_SIZE
     request = _request("a", prompt_rows=rows)
     request.data.req.prefix_indices = [1]
-    request.data.req.extend_input_len = 2
+    request.data.req.extend_range = SimpleNamespace(length=2)
     forward_batch = SimpleNamespace(input_ids=torch.zeros(2, dtype=torch.long))
 
     runner.custom_prefill_forward(

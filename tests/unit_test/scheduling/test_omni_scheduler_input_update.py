@@ -37,6 +37,7 @@ def _scheduler() -> OmniScheduler:
     scheduler._request_admission_lock = threading.RLock()
     scheduler._aborted_request_ids = set()
     scheduler._aborted_request_id_order = deque()
+    scheduler._completed_request_ids = {}
     scheduler._pending_request_builds = {}
     scheduler._backlogged_request_build_payloads = deque()
     scheduler.waiting_queue = []
@@ -44,12 +45,12 @@ def _scheduler() -> OmniScheduler:
     scheduler.cur_batch = None
     scheduler.last_batch = None
     scheduler._async_pending = None
-    scheduler._pending_stream_chunks = {}
-    scheduler._pending_stream_done = set()
+    scheduler._pending_stream_ingress = {}
     scheduler._deferred_request_payloads = {}
     scheduler._dirty_deferred_request_ids = set()
     scheduler._first_emit_done = set()
     scheduler._prefill_start_done = set()
+    scheduler._prefill_end_done = set()
     scheduler._abort_callback = None
     scheduler._mark_running_request_aborted = lambda request_id: False
     scheduler._release_immediate_request_resources = lambda request_id: None

@@ -36,6 +36,35 @@ def _builder(**overrides: Any) -> MossTTSRealtimeEngineBuilder:
     return MossTTSRealtimeEngineBuilder(**values)
 
 
+def test_transformers_compat_hashes_hf_snapshot_symlink_sources(tmp_path) -> None:
+    from transformers import dynamic_module_utils
+
+    blobs = tmp_path / "blobs"
+    snapshot = tmp_path / "snapshots" / "revision"
+    blobs.mkdir()
+    snapshot.mkdir(parents=True)
+    config_blob = blobs / "config-hash"
+    model_blob = blobs / "model-hash"
+    config_blob.write_text("class CodecConfig: pass\n", encoding="utf-8")
+    model_blob.write_text(
+        "from .configuration_codec import CodecConfig\n",
+        encoding="utf-8",
+    )
+    (snapshot / "configuration_codec.py").symlink_to(config_blob)
+    model_source = snapshot / "modeling_codec.py"
+    model_source.symlink_to(model_blob)
+
+    original = dynamic_module_utils._compute_local_source_files_hash
+    with stages.moss_transformers_processor_compat():
+        source_hash = dynamic_module_utils._compute_local_source_files_hash(
+            snapshot,
+            model_source,
+        )
+
+    assert len(source_hash) == 16
+    assert dynamic_module_utils._compute_local_source_files_hash is original
+
+
 def test_load_processor_uses_checkpoint_auto_map(monkeypatch) -> None:
     import transformers
 
@@ -43,7 +72,7 @@ def test_load_processor_uses_checkpoint_auto_map(monkeypatch) -> None:
     processor = object()
     loaded_config = object()
 
-    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda _: "/resolved")
+    monkeypatch.setattr(stages, "resolve_checkpoint", lambda _: "/resolved")
     monkeypatch.setattr(
         stages,
         "moss_transformers_processor_compat",
@@ -168,7 +197,7 @@ def test_codec_loader_reads_only_requested_component_weights(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda _: tmp_path)
+    monkeypatch.setattr(stages, "resolve_checkpoint", lambda _: tmp_path)
     monkeypatch.setattr(
         stages,
         "moss_transformers_processor_compat",
@@ -261,7 +290,7 @@ def test_codec_memory_estimate_scales_streaming_state_with_active_turns(
             finally:
                 self.decoder[1]._streaming_state = None
 
-    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda _: "/codec")
+    monkeypatch.setattr(stages, "resolve_checkpoint", lambda _: "/codec")
     monkeypatch.setattr(
         stages,
         "moss_transformers_processor_compat",
@@ -375,7 +404,7 @@ def test_create_preprocessing_executor_wires_codec_and_cleanup(monkeypatch) -> N
         calls["codec_source"] = model_path
         return "/resolved-codec"
 
-    monkeypatch.setattr(stages, "resolve_moss_checkpoint", fake_resolve_codec)
+    monkeypatch.setattr(stages, "resolve_checkpoint", fake_resolve_codec)
     monkeypatch.setattr(
         stages,
         "set_moss_tts_realtime_preprocessing_context",
@@ -438,7 +467,7 @@ def test_create_preprocessing_executor_reference_cache_kill_switch(
         "load_moss_tts_realtime_codec",
         lambda *args, **kwargs: object(),
     )
-    monkeypatch.setattr(stages, "resolve_moss_checkpoint", lambda path: path)
+    monkeypatch.setattr(stages, "resolve_checkpoint", lambda path: path)
     monkeypatch.setattr(
         stages,
         "MossTTSRealtimeAudioEncoder",
@@ -496,10 +525,19 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
             "context_length": context_length,
             **kwargs,
         }
+        resolved_kwargs = dict(kwargs)
+        cuda_graph_max_bs = resolved_kwargs.pop("cuda_graph_max_bs")
+        cuda_graph_bs = resolved_kwargs.pop("cuda_graph_bs")
         return SimpleNamespace(
             model_path=model_path,
             context_length=context_length,
-            **kwargs,
+            cuda_graph_config=SimpleNamespace(
+                decode=SimpleNamespace(
+                    max_bs=cuda_graph_max_bs,
+                    bs=cuda_graph_bs,
+                )
+            ),
+            **resolved_kwargs,
         )
 
     language_model = object()
@@ -516,7 +554,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
             _decode_input_embedding=torch.nn.Embedding(7, 4),
             init_frame_decode_graphs=init_frame_decode_graphs,
         ),
-        init_device_graphs=lambda: calls.__setitem__("device_graphs", True),
+        init_cuda_graphs=lambda: calls.__setitem__("cuda_graphs", True),
     )
     worker = SimpleNamespace(
         gpu_id=2,
@@ -624,6 +662,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
     server_args, gpu_id, infra_kwargs = calls["infrastructure"]
     assert gpu_id == 2
     assert server_args.enable_streaming_session is True
+    assert not hasattr(server_args, "cuda_graph_bs")
     assert infra_kwargs == {
         "total_gpu_memory_fraction": pytest.approx(0.80),
         "model_arch_override": "MossTTSRealtimeSGLangModel",
@@ -634,7 +673,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
         underlying_runner.model.config,
         "processor",
     )
-    assert calls["device_graphs"] is True
+    assert calls["cuda_graphs"] is True
     assert calls["frame_decode_graphs"] == [1, 2, 3]
 
     scheduler_kwargs = built.kwargs
@@ -655,7 +694,7 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
     from sglang_omni.models.moss_tts_realtime import model_runner, scheduler
     from sglang_omni.scheduling import bootstrap, engine_factory, sglang_backend
 
-    calls: dict[str, Any] = {"device_graphs": 0, "frame_decode_graphs": 0}
+    calls: dict[str, Any] = {"cuda_graphs": 0, "frame_decode_graphs": 0}
 
     def fake_build_server_args(
         model_path: str, *, context_length: int, **kwargs: Any
@@ -666,8 +705,8 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
             **kwargs,
         )
 
-    def init_device_graphs() -> None:
-        calls["device_graphs"] += 1
+    def init_cuda_graphs() -> None:
+        calls["cuda_graphs"] += 1
 
     def init_frame_decode_graphs(_batch_sizes: list[int]) -> None:
         calls["frame_decode_graphs"] += 1
@@ -681,7 +720,7 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
             ),
             init_frame_decode_graphs=init_frame_decode_graphs,
         ),
-        init_device_graphs=init_device_graphs,
+        init_cuda_graphs=init_cuda_graphs,
     )
     worker = SimpleNamespace(
         gpu_id=0,
@@ -765,7 +804,7 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
         server_args_overrides={"disable_cuda_graph": True},
     )
 
-    assert calls == {"device_graphs": 0, "frame_decode_graphs": 0}
+    assert calls == {"cuda_graphs": 0, "frame_decode_graphs": 0}
 
 
 def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:

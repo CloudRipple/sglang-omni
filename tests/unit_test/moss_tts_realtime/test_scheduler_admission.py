@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 import torch
+from sglang.srt.managers.schedule_batch import ReqKvInfo
 from sglang.srt.session.session_controller import Session
 from sglang.srt.session.streaming_session import SessionSlot
 
@@ -147,7 +148,7 @@ def test_finalizer_replays_buffered_updates_before_freezing_prefill() -> None:
         model_config=finalized.model_config,
     )
     assert torch.equal(finalized.prompt_rows[-12:], expected_prefill)
-    assert finalized.req.origin_input_ids == finalized.input_ids.tolist()
+    assert list(finalized.req.origin_input_ids) == finalized.input_ids.tolist()
     assert len(finalized.turn_state.ledger.rows) == int(finalized.prompt_rows.shape[0])
     assert finalized.generation_row_start == len(finalized.turn_state.ledger.rows)
 
@@ -516,12 +517,12 @@ def test_parked_req_pool_slot_is_excluded_from_physical_held_kv() -> None:
     scheduler.tree_cache.slots["active-session"] = SessionSlot(
         req_pool_idx=3,
         kv_committed_len=5,
-        kv_allocated_len=6,
+        kv=ReqKvInfo(kv_allocated_len=6, swa_evicted_seqlen=0),
     )
     scheduler.tree_cache.slots["idle-session"] = SessionSlot(
         req_pool_idx=4,
         kv_committed_len=7,
-        kv_allocated_len=8,
+        kv=ReqKvInfo(kv_allocated_len=8, swa_evicted_seqlen=0),
     )
 
     snapshot = scheduler._physical_session_snapshot()
