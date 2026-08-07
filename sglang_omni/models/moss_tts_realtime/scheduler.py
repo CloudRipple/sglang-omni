@@ -1992,42 +1992,46 @@ class MossTTSRealtimeScheduler(OmniScheduler):
     ) -> Exception | None:
         """Release terminal KV with one bounded retry after an observed error."""
 
-        try:
-            self._release_request_kv_cache(req)
+        # Abort can arrive from the stage listener while the scheduler thread is
+        # terminalizing the same request. Use the admission/terminal-claim lock
+        # so request-pool ownership is released by only one cleanup path.
+        with self._request_admission_lock:
+            try:
+                self._release_request_kv_cache(req)
+                return None
+            except Exception as exc:
+                self._record_cleanup_error(
+                    request_id,
+                    operation=operation,
+                    error=exc,
+                    data=data,
+                )
+                self._bump_resource_total("kv_release_retry_total")
+                logger.exception(
+                    "Failed to release MOSS-TTS-Realtime KV for %s during %s; "
+                    "retrying once",
+                    request_id,
+                    operation,
+                )
+
+            try:
+                self._release_request_kv_cache(req)
+            except Exception as retry_error:
+                self._bump_resource_total("kv_release_retry_error_total")
+                logger.exception(
+                    "MOSS-TTS-Realtime KV release retry failed for %s during %s",
+                    request_id,
+                    operation,
+                )
+                return retry_error
+
+            self._bump_resource_total("kv_release_retry_success_total")
+            logger.warning(
+                "MOSS-TTS-Realtime KV release recovered after retry for %s during %s",
+                request_id,
+                operation,
+            )
             return None
-        except Exception as exc:
-            self._record_cleanup_error(
-                request_id,
-                operation=operation,
-                error=exc,
-                data=data,
-            )
-            self._bump_resource_total("kv_release_retry_total")
-            logger.exception(
-                "Failed to release MOSS-TTS-Realtime KV for %s during %s; "
-                "retrying once",
-                request_id,
-                operation,
-            )
-
-        try:
-            self._release_request_kv_cache(req)
-        except Exception as retry_error:
-            self._bump_resource_total("kv_release_retry_error_total")
-            logger.exception(
-                "MOSS-TTS-Realtime KV release retry failed for %s during %s",
-                request_id,
-                operation,
-            )
-            return retry_error
-
-        self._bump_resource_total("kv_release_retry_success_total")
-        logger.warning(
-            "MOSS-TTS-Realtime KV release recovered after retry for %s during %s",
-            request_id,
-            operation,
-        )
-        return None
 
     @staticmethod
     def _promote_immediate_abort_finish_reason(req: Any) -> None:
@@ -2977,29 +2981,40 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         cancelled: bool,
         cleanup_complete: bool = True,
     ) -> None:
-        try:
-            self._finalize_unsuccessful_turn_impl(
-                req,
-                reason=reason,
-                cancelled=cancelled,
-            )
-        except Exception as exc:
-            request_data = getattr(req, "_omni_data", None)
-            self._record_cleanup_error(
-                getattr(req, "rid", "unknown"),
-                operation="terminal_rollback",
-                error=exc,
-                data=(
-                    request_data
-                    if isinstance(request_data, MossTTSRealtimeRequestData)
-                    else None
-                ),
-            )
-            raise
-        data = req._omni_data
-        self._record_terminal_lifecycle(req, data)
-        if cleanup_complete:
-            self._record_cleanup_success(req, data)
+        # The same request can be failed by the scheduler and then aborted by
+        # its WebSocket error handler. Keep model-state release, host lifecycle
+        # finalization, and request-data detachment under one ownership lock.
+        with self._request_admission_lock:
+            data = getattr(req, "_omni_data", None)
+            if data is None:
+                data = self._moss_tts_realtime_requests.get(req.rid)
+                if data is None:
+                    return
+                req._omni_data = data
+            if not isinstance(data, MossTTSRealtimeRequestData):
+                raise TypeError(
+                    "terminal realtime request has the wrong request-data type"
+                )
+            if data.lifecycle_finalized:
+                return
+
+            try:
+                self._finalize_unsuccessful_turn_impl(
+                    req,
+                    reason=reason,
+                    cancelled=cancelled,
+                )
+            except Exception as exc:
+                self._record_cleanup_error(
+                    getattr(req, "rid", "unknown"),
+                    operation="terminal_rollback",
+                    error=exc,
+                    data=data,
+                )
+                raise
+            self._record_terminal_lifecycle(req, data)
+            if cleanup_complete:
+                self._record_cleanup_success(req, data)
 
     def _finalize_unsuccessful_turn_impl(
         self,
@@ -3057,16 +3072,23 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         cancelled: bool,
         cleanup_complete: bool = True,
     ) -> None:
-        data = req._omni_data
-        turn = data.turn_state
-        if turn is None or data.lifecycle_finalized:
-            return
-        self._finalize_unsuccessful_turn(
-            req,
-            reason=reason,
-            cancelled=cancelled,
-            cleanup_complete=cleanup_complete,
-        )
+        with self._request_admission_lock:
+            data = getattr(req, "_omni_data", None)
+            if data is None:
+                data = self._moss_tts_realtime_requests.get(req.rid)
+                if data is not None:
+                    req._omni_data = data
+            if not isinstance(data, MossTTSRealtimeRequestData):
+                return
+            turn = data.turn_state
+            if turn is None or data.lifecycle_finalized:
+                return
+            self._finalize_unsuccessful_turn(
+                req,
+                reason=reason,
+                cancelled=cancelled,
+                cleanup_complete=cleanup_complete,
+            )
 
     @staticmethod
     def _finished_reason_type(req: Any) -> str:
@@ -3126,6 +3148,10 @@ class MossTTSRealtimeScheduler(OmniScheduler):
         return session_id, committed_kv_length
 
     def _complete_finished_turn(self, req: Any) -> None:
+        with self._request_admission_lock:
+            self._complete_finished_turn_impl(req)
+
+    def _complete_finished_turn_impl(self, req: Any) -> None:
         data = req._omni_data
         if not isinstance(data, MossTTSRealtimeRequestData):
             raise TypeError("terminal realtime request has the wrong request-data type")

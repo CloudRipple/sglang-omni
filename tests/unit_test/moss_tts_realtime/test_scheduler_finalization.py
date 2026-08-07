@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from array import array
 from types import SimpleNamespace
 from typing import Any
@@ -293,6 +294,103 @@ def test_model_state_release_failure_still_invalidates_turn_and_session() -> Non
     output = scheduler.outbox.get_nowait()
     assert output.type == "error"
     assert "model-state release failure" in str(output.data)
+
+
+def test_concurrent_abort_releases_model_state_once() -> None:
+    scheduler = _scheduler()
+    data = _request_data(tuple(range(12)), input_done=False)
+    scheduler._finalize_built_request(
+        _payload(tuple(range(12))),
+        False,
+        data,
+    )
+    req = data.req
+    turn = data.turn_state
+    assert req is not None
+    assert turn is not None
+    req._omni_data = data
+    turn.assign_model_state_slot(7)
+
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    release_calls = 0
+
+    def release_request(request: Any) -> int:
+        nonlocal release_calls
+        assert request.request_id == req.rid
+        release_calls += 1
+        release_started.set()
+        assert allow_release.wait(timeout=2.0)
+        return turn.release_model_state_slot(expected_slot_id=7)
+
+    scheduler._model_runner = SimpleNamespace(release_request=release_request)
+    errors: list[BaseException] = []
+
+    def abort() -> None:
+        try:
+            scheduler.abort(req.rid, defer_running_cleanup=False)
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=abort)
+    second = threading.Thread(target=abort)
+    first.start()
+    assert release_started.wait(timeout=2.0)
+    second.start()
+    allow_release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert release_calls == 1
+    assert turn.model_state_slot_id is None
+    assert turn.phase is MossTTSRealtimeTurnPhase.CANCELLED
+    assert turn.terminal_reason == "aborted"
+    assert data.lifecycle_finalized is True
+    assert data.observability_finalized is True
+    assert data.cleanup_observability_finalized is True
+    assert scheduler._resource_totals["cleanup_success_total"] == 1
+    assert scheduler._resource_totals["cleanup_error_total"] == 0
+
+
+def test_failure_finalization_keeps_data_after_backend_detaches_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _scheduler()
+    data = _request_data(tuple(range(12)), input_done=False)
+    scheduler._finalize_built_request(
+        _payload(tuple(range(12))),
+        False,
+        data,
+    )
+    req = data.req
+    assert req is not None
+    req._omni_data = data
+    original_invalidate = scheduler._invalidate_request_backend
+
+    def invalidate_and_detach(*args: Any, **kwargs: Any) -> None:
+        original_invalidate(*args, **kwargs)
+        req._omni_data = None
+
+    monkeypatch.setattr(
+        scheduler,
+        "_invalidate_request_backend",
+        invalidate_and_detach,
+    )
+
+    scheduler._terminate_live_turn(
+        req,
+        reason="decode_failed",
+        cancelled=False,
+    )
+
+    assert req._omni_data is None
+    assert data.lifecycle_finalized is True
+    assert data.observability_finalized is True
+    assert data.cleanup_observability_finalized is True
+    assert data.turn_state.phase is MossTTSRealtimeTurnPhase.FAILED
 
 
 def test_partial_host_commit_failure_restores_old_ledger_and_releases_kv(
