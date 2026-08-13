@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-streaming vocoder implementation for MOSS-TTS Delay."""
+"""MOSS-TTS Delay vocoder implementation."""
 
 from __future__ import annotations
 
@@ -134,7 +134,7 @@ class MossTTSVocoder(BatchVocoderBase):
         self._codec = getattr(audio_tokenizer, "model", None)
         self._quantizer = getattr(self._codec, "quantizer", None)
         self._quantizer_decoder = None
-        self._nonstream_decoder = None
+        self._packed_decoder = None
         if (
             self._compute_dtype is not None
             and self._codec is not None
@@ -143,10 +143,8 @@ class MossTTSVocoder(BatchVocoderBase):
         ):
             codec_device = _codec_device(self._codec, self._device)
             try:
-                nonstream_decoder = MossAudioTokenizerVocoderDecoder(
-                    self._codec.decoder
-                )
-                supports_packed_flash = nonstream_decoder.supports_packed_flash(
+                packed_decoder = MossAudioTokenizerVocoderDecoder(self._codec.decoder)
+                supports_packed_flash = packed_decoder.supports_packed_flash(
                     codec_device,
                     self._compute_dtype,
                 )
@@ -167,11 +165,11 @@ class MossTTSVocoder(BatchVocoderBase):
                             "MOSS-TTS Delay quantizer is incompatible with the "
                             "cached decoder; using source quantizer decode"
                         )
-                    self._nonstream_decoder = nonstream_decoder
+                    self._packed_decoder = packed_decoder
                     logger.info(
                         "MOSS-TTS Delay vocoder enabled batched packed decoder "
                         "stages=%d compute_dtype=%s",
-                        len(self._nonstream_decoder),
+                        len(self._packed_decoder),
                         self._compute_dtype,
                     )
                 else:
@@ -205,13 +203,9 @@ class MossTTSVocoder(BatchVocoderBase):
             audio_pad_code=audio_pad_code,
             assistant_start_length=int(state.assistant_start_length),
         )
-        codec_decoder = getattr(self._codec, "decoder", self._codec)
-        codec_dtype = _module_dtype(codec_decoder) or _module_dtype(self._codec)
-        codec_device = _codec_device(self._codec, self._device)
         decoded = []
-        with _autocast_if_supported(codec_device, codec_dtype):
-            for segment in segments:
-                decoded.extend(self._audio_tokenizer.decode_codes([segment]))
+        for segment in segments:
+            decoded.extend(self._decode_with_source_codec([segment]))
         if not decoded:
             raise RuntimeError("MOSS-TTS vocoder decoded no audio segments")
         waveforms = [
@@ -219,6 +213,16 @@ class MossTTSVocoder(BatchVocoderBase):
         ]
         waveform = _join_waveforms(waveforms)
         return waveform, self._resolve_sample_rate(state)
+
+    def _decode_with_source_codec(
+        self,
+        segments: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        codec_decoder = getattr(self._codec, "decoder", self._codec)
+        codec_dtype = _module_dtype(codec_decoder) or _module_dtype(self._codec)
+        codec_device = _codec_device(self._codec, self._device)
+        with _autocast_if_supported(codec_device, codec_dtype):
+            return self._audio_tokenizer.decode_codes(segments)
 
     def _resolve_sample_rate(self, state: MossTTSState) -> int:
         return int(
@@ -238,7 +242,7 @@ class MossTTSVocoder(BatchVocoderBase):
         codec = self._codec
         if codec is None:
             raise RuntimeError("batched MOSS-TTS Delay codec path is unavailable")
-        packed_decoder = self._nonstream_decoder
+        packed_decoder = self._packed_decoder
         if packed_decoder is None:
             raise RuntimeError("packed MOSS-TTS Delay codec path is unavailable")
         if not segments:
@@ -317,10 +321,34 @@ class MossTTSVocoder(BatchVocoderBase):
             )
         return decoded
 
+    def decode_segments(self, segments: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Decode streaming segments through the packed path when available."""
+
+        if not segments:
+            return []
+        if self._packed_decoder is None:
+            return self._decode_with_source_codec(segments)
+
+        try:
+            return self._decode_segment_batches(segments)
+        except Exception:
+            failure_traceback = traceback.format_exc()
+        self._disable_packed_decoder(failure_traceback)
+        return self._decode_with_source_codec(segments)
+
+    def _disable_packed_decoder(self, failure_traceback: str) -> None:
+        self._packed_decoder = None
+        self._quantizer_decoder = None
+        logger.error(
+            "MOSS-TTS Delay packed codec decode failed; disabling the "
+            "packed path and falling back to standalone codec decode:\n%s",
+            failure_traceback.rstrip(),
+        )
+
     async def decode_batch(
         self, items: list[tuple[MossTTSState, torch.Tensor]]
     ) -> list[tuple[torch.Tensor, int]]:
-        if self._nonstream_decoder is None:
+        if self._packed_decoder is None:
             return [self._decode_audio(state, codes) for state, codes in items]
 
         audio_pad_code = resolve_moss_audio_pad_code(
@@ -350,13 +378,7 @@ class MossTTSVocoder(BatchVocoderBase):
             # failed batch's CUDA tensors throughout the fallback.
             failure_traceback = traceback.format_exc()
         if failure_traceback is not None:
-            self._nonstream_decoder = None
-            self._quantizer_decoder = None
-            logger.error(
-                "MOSS-TTS Delay packed codec decode failed; disabling the "
-                "packed path and falling back to standalone codec decode:\n%s",
-                failure_traceback.rstrip(),
-            )
+            self._disable_packed_decoder(failure_traceback)
             return [self._decode_audio(state, codes) for state, codes in items]
 
         return [

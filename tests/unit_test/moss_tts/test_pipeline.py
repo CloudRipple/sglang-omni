@@ -133,6 +133,7 @@ def test_moss_tts_config_and_registry_contracts() -> None:
     vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
     assert preprocessing.factory_args == {
         "dtype": "float32",
+        "compute_dtype": "float16",
         "ref_audio_cache": True,
         "ref_audio_cache_max_items": 8192,
         "ref_audio_cache_max_bytes": 64 * 1024 * 1024,
@@ -155,6 +156,7 @@ def test_moss_tts_production_config_resolves_codec_memory_policy() -> None:
 
     assert preprocessing_args == {
         "dtype": "float32",
+        "compute_dtype": "float16",
         "ref_audio_cache": True,
         "ref_audio_cache_max_items": 8192,
         "ref_audio_cache_max_bytes": 64 * 1024 * 1024,
@@ -291,8 +293,10 @@ def test_moss_tts_config_merge_updates_vocoder_factory_args() -> None:
     ("value", "expected"),
     [
         (None, None),
+        ("float16", torch.float16),
         ("float32", torch.float32),
         ("bfloat16", torch.bfloat16),
+        (torch.float16, torch.float16),
         (torch.float32, torch.float32),
         (torch.bfloat16, torch.bfloat16),
     ],
@@ -303,9 +307,7 @@ def test_moss_tts_resolves_compute_dtype(value, expected) -> None:
     assert stages._resolve_compute_dtype(value) is expected
 
 
-@pytest.mark.parametrize(
-    "value", ["fp16", "float16", "fp32", "bf16", "invalid", torch.float16]
-)
+@pytest.mark.parametrize("value", ["fp16", "fp32", "bf16", "invalid"])
 def test_moss_tts_rejects_invalid_compute_dtype(value) -> None:
     from sglang_omni.models.moss_tts import stages
 
@@ -625,10 +627,10 @@ def test_moss_tts_preprocessing_loads_separate_codec(
         ),
     )
     codec = SimpleNamespace()
-    loaded: list[tuple[str, str, str]] = []
+    loaded: list[tuple[str, str, str, str, torch.dtype | None]] = []
 
-    def load_codec(model_path, *, device, dtype):
-        loaded.append((model_path, device, dtype))
+    def load_codec(model_path, *, device, dtype, component, compute_dtype):
+        loaded.append((model_path, device, dtype, component, compute_dtype))
         return codec
 
     monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
@@ -650,7 +652,9 @@ def test_moss_tts_preprocessing_loads_separate_codec(
     finally:
         rb.clear_moss_tts_preprocessing_context()
 
-    assert loaded == [("codec-from-model-config", "cpu", "float32")]
+    assert loaded == [
+        ("codec-from-model-config", "cpu", "float32", "encoder", torch.float16)
+    ]
 
 
 def test_moss_tts_preprocessing_uses_placement_gpu_id(
@@ -667,10 +671,10 @@ def test_moss_tts_preprocessing_uses_placement_gpu_id(
         ),
     )
     codec = SimpleNamespace()
-    loaded: list[tuple[str, str, str]] = []
+    loaded: list[tuple[str, str, str, str, torch.dtype | None]] = []
 
-    def load_codec(model_path, *, device, dtype):
-        loaded.append((model_path, device, dtype))
+    def load_codec(model_path, *, device, dtype, component, compute_dtype):
+        loaded.append((model_path, device, dtype, component, compute_dtype))
         return codec
 
     monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
@@ -688,7 +692,7 @@ def test_moss_tts_preprocessing_uses_placement_gpu_id(
     finally:
         rb.clear_moss_tts_preprocessing_context()
 
-    assert loaded == [("codec", "cuda:2", "float32")]
+    assert loaded == [("codec", "cuda:2", "float32", "encoder", torch.float16)]
 
 
 def test_moss_tts_pathlike_reference_uses_separate_codec() -> None:
@@ -833,10 +837,10 @@ def test_moss_tts_vocoder_honors_explicit_codec_path(
         model_config=SimpleNamespace(audio_pad_code=1024, sampling_rate=24000),
     )
     codec = SimpleNamespace(sample_rate=24000)
-    loaded: list[tuple[str, str, str]] = []
+    loaded: list[tuple[str, str, str, str, torch.dtype | None]] = []
 
-    def load_codec(model_path, *, device, dtype):
-        loaded.append((model_path, device, dtype))
+    def load_codec(model_path, *, device, dtype, component, compute_dtype):
+        loaded.append((model_path, device, dtype, component, compute_dtype))
         return codec
 
     monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
@@ -850,7 +854,7 @@ def test_moss_tts_vocoder_honors_explicit_codec_path(
     )
 
     assert processor.audio_tokenizer is None
-    assert loaded == [("explicit-codec", "cpu", "float32")]
+    assert loaded == [("explicit-codec", "cpu", "float32", "decoder", torch.bfloat16)]
 
 
 def test_moss_tts_audio_tokenizer_preserves_processor_code_layout() -> None:

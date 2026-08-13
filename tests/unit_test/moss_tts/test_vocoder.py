@@ -333,7 +333,7 @@ def test_moss_tts_vocoder_uses_standalone_codec_without_packed_flash(
 
     results = asyncio.run(scheduler._batch_fn(payloads))
 
-    assert scheduler._vocoder._nonstream_decoder is None
+    assert scheduler._vocoder._packed_decoder is None
     assert audio_tokenizer.model.quantizer.codebook.dtype is torch.bfloat16
     assert audio_tokenizer.decode_calls == 2
     assert audio_tokenizer.decode_shapes == [[(2, 2)], [(2, 2)]]
@@ -504,7 +504,7 @@ def test_moss_tts_vocoder_falls_back_after_packed_batch_failure(
     assert quantizer.autocast_enabled == [False]
     assert quantizer.codebook.dtype is torch.float32
     assert released_markers == [True]
-    assert scheduler._vocoder._nonstream_decoder is None
+    assert scheduler._vocoder._packed_decoder is None
     assert scheduler._vocoder._quantizer_decoder is None
     assert audio_tokenizer.decode_calls == 3
     assert audio_tokenizer.decode_shapes == [[(2, 2)], [(2, 2)], [(2, 2)]]
@@ -517,6 +517,40 @@ def test_moss_tts_vocoder_falls_back_after_packed_batch_failure(
     assert np.frombuffer(
         second_results[0].data["audio_waveform"], dtype=np.float32
     ).tolist() == [3.0, 3.0]
+
+
+def test_moss_tts_vocoder_decodes_streaming_segments_with_packed_path() -> None:
+    vocoder = MossTTSVocoder.__new__(MossTTSVocoder)
+    vocoder._packed_decoder = object()
+    vocoder._quantizer_decoder = object()
+    segments = [torch.ones(3, 2, dtype=torch.long)]
+    packed = [torch.arange(4, dtype=torch.float32)]
+    vocoder._decode_segment_batches = lambda items: packed if items is segments else []
+    vocoder._decode_with_source_codec = lambda items: pytest.fail(
+        "available packed path must not use source codec decode"
+    )
+
+    assert vocoder.decode_segments(segments) is packed
+
+
+def test_moss_tts_vocoder_streaming_segment_failure_disables_packed_path() -> None:
+    vocoder = MossTTSVocoder.__new__(MossTTSVocoder)
+    vocoder._packed_decoder = object()
+    vocoder._quantizer_decoder = object()
+    segments = [torch.ones(3, 2, dtype=torch.long)]
+    fallback = [torch.arange(4, dtype=torch.float32)]
+
+    def fail_packed(_items):
+        raise RuntimeError("packed failure")
+
+    vocoder._decode_segment_batches = fail_packed
+    vocoder._decode_with_source_codec = lambda items: (
+        fallback if items is segments else []
+    )
+
+    assert vocoder.decode_segments(segments) is fallback
+    assert vocoder._packed_decoder is None
+    assert vocoder._quantizer_decoder is None
 
 
 @pytest.mark.parametrize("compute_dtype", [None, "float32"])

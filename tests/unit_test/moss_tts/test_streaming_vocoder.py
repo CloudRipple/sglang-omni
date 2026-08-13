@@ -212,17 +212,26 @@ def test_streaming_path_does_not_call_nonstream_batch_decoder(
         torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.long)
     )
     scheduler, tokenizer, vocoder = _make_scheduler()
+    segment_decode_calls = 0
+    original_decode_segments = vocoder.decode_segments
 
     async def fail_decode_batch(*_args, **_kwargs):
         pytest.fail("streaming requests must not use the non-streaming batch decoder")
 
+    def record_decode_segments(segments):
+        nonlocal segment_decode_calls
+        segment_decode_calls += 1
+        return original_decode_segments(segments)
+
     monkeypatch.setattr(vocoder, "decode_batch", fail_decode_batch)
+    monkeypatch.setattr(vocoder, "decode_segments", record_decode_segments)
     scheduler._on_streaming_new_request("req", _payload("req", delayed))
     scheduler._on_chunk("req", _item(delayed))
     scheduler._on_done("req")
 
     messages = _drain(scheduler)
 
+    assert segment_decode_calls > 0
     assert tokenizer.decode_inputs
     assert any(message.type == "stream" for message in messages)
     assert any(message.type == "result" for message in messages)

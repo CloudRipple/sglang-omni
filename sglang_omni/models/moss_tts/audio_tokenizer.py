@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Literal
 
 import torch
+import torch.nn as nn
 import torchaudio
-from transformers import AutoModel
+from accelerate import init_empty_weights
+from transformers import AutoConfig, AutoModel
 
 from sglang_omni.models.moss_tts.hf_loading import moss_transformers_processor_compat
+from sglang_omni.models.weight_loader import load_module, load_weights_by_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,18 @@ DEFAULT_MOSS_TTS_AUDIO_TOKENIZER = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
 _LOUDNESS_TARGET_DBFS = -20.0
 _LOUDNESS_GAIN_MIN_DB = -3.0
 _LOUDNESS_GAIN_MAX_DB = 3.0
+_CODEC_COMPONENTS = ("encoder", "decoder")
+_AUTOCAST_WEIGHT_MODULES = (
+    nn.Linear,
+    nn.Conv1d,
+    nn.Conv2d,
+    nn.Conv3d,
+    nn.ConvTranspose1d,
+    nn.ConvTranspose2d,
+    nn.ConvTranspose3d,
+)
+
+CodecComponent = Literal["encoder", "decoder"]
 
 
 def _torch_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -39,13 +54,193 @@ def _model_floating_dtype(model: Any) -> torch.dtype:
     )
 
 
+class _FP32Quantizer(nn.Module):
+    """Keep codec quantization outside the component autocast region."""
+
+    def __init__(self, source: nn.Module) -> None:
+        super().__init__()
+        self.source = source
+
+    def forward(self, hidden_states: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        device_type = hidden_states.device.type
+        with torch.autocast(device_type=device_type, enabled=False):
+            return self.source(hidden_states.float(), *args, **kwargs)
+
+
+def _validate_component_model(model: nn.Module) -> None:
+    for name in (*_CODEC_COMPONENTS, "quantizer"):
+        if not isinstance(getattr(model, name, None), nn.Module):
+            raise RuntimeError(
+                f"MOSS-TTS audio tokenizer does not expose a {name!r} module"
+            )
+
+
+def _raise_for_meta_state(model: nn.Module) -> None:
+    meta_state = [
+        name
+        for name, tensor in (
+            *model.named_parameters(),
+            *model.named_buffers(),
+        )
+        if tensor.is_meta
+    ]
+    if meta_state:
+        preview = ", ".join(meta_state[:8])
+        if len(meta_state) > 8:
+            preview += f", ... ({len(meta_state)} total)"
+        raise RuntimeError(
+            "MOSS-TTS component codec has unmaterialized state outside the "
+            f"supported component prefixes: {preview}"
+        )
+
+
+def _state_nbytes(model: nn.Module) -> int:
+    return sum(
+        tensor.numel() * tensor.element_size()
+        for tensor in (*model.parameters(), *model.buffers())
+    )
+
+
+def _autocast_weight_names(module: nn.Module) -> set[str]:
+    names = set()
+    for module_name, child in module.named_modules():
+        if not isinstance(child, _AUTOCAST_WEIGHT_MODULES):
+            continue
+        weight = getattr(child, "weight", None)
+        if not isinstance(weight, torch.Tensor) or not weight.is_floating_point():
+            continue
+        names.add(f"{module_name}.weight" if module_name else "weight")
+    return names
+
+
+def _load_mixed_dtype_component(
+    module: nn.Module,
+    model_path: str,
+    *,
+    component: CodecComponent,
+    storage_dtype: torch.dtype | None,
+    compute_dtype: torch.dtype,
+    device: str,
+) -> nn.Module:
+    state_dict = load_weights_by_prefix(model_path, prefix=f"{component}.")
+    compute_weight_names = _autocast_weight_names(module)
+    for name, tensor in state_dict.items():
+        if not tensor.is_floating_point():
+            continue
+        target_dtype = compute_dtype if name in compute_weight_names else storage_dtype
+        if target_dtype is not None and tensor.dtype != target_dtype:
+            state_dict[name] = tensor.to(dtype=target_dtype)
+    module.load_state_dict(state_dict, strict=True, assign=True)
+    module.eval()
+    return module.to(device=device)
+
+
+def _load_component_model(
+    model_path: str,
+    *,
+    component: CodecComponent,
+    device: str,
+    dtype: str | torch.dtype,
+    compute_dtype: str | torch.dtype | None,
+) -> tuple[nn.Module, torch.dtype | None]:
+    config = AutoConfig.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+    )
+    with init_empty_weights(include_buffers=True):
+        model = AutoModel.from_config(
+            config,
+            trust_remote_code=True,
+        )
+    _validate_component_model(model)
+
+    unused_component = "decoder" if component == "encoder" else "encoder"
+    setattr(model, unused_component, nn.ModuleList())
+
+    device_type = torch.device(device).type
+    storage_dtype = None if device_type == "cpu" else _torch_dtype(dtype)
+    resolved_compute_dtype = (
+        None if compute_dtype is None else _torch_dtype(compute_dtype)
+    )
+    if resolved_compute_dtype not in (
+        None,
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ):
+        raise ValueError(
+            "compute_dtype must be float16, bfloat16, float32, or null; got "
+            f"{compute_dtype!r}"
+        )
+    use_low_precision_component = device_type == "cuda" and resolved_compute_dtype in (
+        torch.float16,
+        torch.bfloat16,
+    )
+    use_mixed_component = (
+        use_low_precision_component and resolved_compute_dtype != storage_dtype
+    )
+    selected_module = getattr(model, component)
+    if use_mixed_component:
+        selected_module = _load_mixed_dtype_component(
+            selected_module,
+            model_path,
+            component=component,
+            storage_dtype=storage_dtype,
+            compute_dtype=resolved_compute_dtype,
+            device=device,
+        )
+    else:
+        selected_module = load_module(
+            selected_module,
+            model_path,
+            prefix=f"{component}.",
+            dtype=storage_dtype,
+            device=device,
+            strict=True,
+        )
+    setattr(model, component, selected_module)
+    model.quantizer = load_module(
+        model.quantizer,
+        model_path,
+        prefix="quantizer.",
+        dtype=torch.float32,
+        device=device,
+        strict=True,
+    )
+    if component == "encoder" and use_low_precision_component:
+        model.quantizer = _FP32Quantizer(model.quantizer)
+        from sglang_omni.models.moss_tts.vocoder_decoder import (
+            MossAudioTokenizerEncoder,
+        )
+
+        model.encoder = MossAudioTokenizerEncoder(model.encoder)
+    model.eval()
+    _raise_for_meta_state(model)
+    logger.info(
+        "Loaded codec component=%s (%.3f GiB, compute_dtype=%s)",
+        component,
+        _state_nbytes(model) / (1024**3),
+        resolved_compute_dtype,
+    )
+    runtime_compute_dtype = (
+        resolved_compute_dtype if use_low_precision_component else None
+    )
+    return model, runtime_compute_dtype
+
+
 class MossTTSAudioTokenizer:
     """Processor-compatible wrapper around a separately loaded codec model."""
 
-    def __init__(self, model: Any, *, device: str) -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        device: str,
+        compute_dtype: torch.dtype | None = None,
+    ) -> None:
         self.model = model
         self.device = str(device)
-        self.dtype = _model_floating_dtype(model)
+        self.dtype = compute_dtype or _model_floating_dtype(model)
         self.sample_rate = int(model.config.sampling_rate)
 
     def _autocast(self) -> Any:
@@ -201,21 +396,50 @@ def load_moss_tts_audio_tokenizer(
     *,
     device: str = "cpu",
     dtype: str | torch.dtype = "float32",
+    component: CodecComponent | None = None,
+    compute_dtype: str | torch.dtype | None = None,
 ) -> MossTTSAudioTokenizer:
-    logger.info(f"Loading MOSS-TTS audio tokenizer from {model_path} on {device}")
+    if component is not None and component not in _CODEC_COMPONENTS:
+        raise ValueError(
+            f"component must be one of {_CODEC_COMPONENTS!r} or None; got {component!r}"
+        )
+    logger.info(
+        "Loading MOSS-TTS audio tokenizer from %s on %s (component=%s, "
+        "compute_dtype=%s)",
+        model_path,
+        device,
+        component or "full",
+        compute_dtype,
+    )
+    resolved_compute_dtype = None
     try:
         with moss_transformers_processor_compat():
-            model = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
+            if component is None:
+                model = AutoModel.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
+            else:
+                model, resolved_compute_dtype = _load_component_model(
+                    model_path,
+                    component=component,
+                    device=device,
+                    dtype=dtype,
+                    compute_dtype=compute_dtype,
+                )
     except Exception as exc:
         raise RuntimeError(
-            "MOSS-TTS support requires OpenMOSS-Team/MOSS-Audio-Tokenizer"
+            "MOSS-TTS support requires OpenMOSS-Team/MOSS-Audio-Tokenizer; "
+            f"failed to load component {component or 'full'!r}: {exc}"
         ) from exc
-    model.eval()
-    move_kwargs: dict[str, Any] = {"device": device}
-    if device != "cpu":
-        move_kwargs["dtype"] = _torch_dtype(dtype)
-    model.to(**move_kwargs)
-    return MossTTSAudioTokenizer(model, device=device)
+    if component is None:
+        model.eval()
+        move_kwargs: dict[str, Any] = {"device": device}
+        if torch.device(device).type != "cpu":
+            move_kwargs["dtype"] = _torch_dtype(dtype)
+        model.to(**move_kwargs)
+    return MossTTSAudioTokenizer(
+        model,
+        device=device,
+        compute_dtype=resolved_compute_dtype,
+    )

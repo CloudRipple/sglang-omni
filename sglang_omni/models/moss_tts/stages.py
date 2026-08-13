@@ -66,6 +66,7 @@ _ReferenceEncodeQueueEntry: TypeAlias = tuple[
 
 
 _COMPUTE_DTYPES: dict[str, torch.dtype] = {
+    "float16": torch.float16,
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
 }
@@ -81,9 +82,15 @@ def _resolve_compute_dtype(
             return _COMPUTE_DTYPES[dtype.lower()]
         except KeyError:
             pass
-    elif isinstance(dtype, torch.dtype) and dtype in (torch.float32, torch.bfloat16):
+    elif isinstance(dtype, torch.dtype) and dtype in (
+        torch.float16,
+        torch.float32,
+        torch.bfloat16,
+    ):
         return dtype
-    raise ValueError(f"compute_dtype must be float32, bfloat16, or null; got {dtype!r}")
+    raise ValueError(
+        "compute_dtype must be float16, float32, bfloat16, or null; " f"got {dtype!r}"
+    )
 
 
 def _normalize_moss_processor_config(processor: Any) -> None:
@@ -441,6 +448,7 @@ def create_preprocessing_executor(
     ref_audio_cache: bool = True,
     ref_audio_cache_max_items: int = 8192,
     ref_audio_cache_max_bytes: int = 64 * 1024 * 1024,
+    compute_dtype: str | torch.dtype | None = "float16",
 ) -> SimpleScheduler:
     for name, value in (
         ("ref_audio_cache_max_items", ref_audio_cache_max_items),
@@ -459,6 +467,7 @@ def create_preprocessing_executor(
             "",
         )
     device = _resolve_codec_device(device, gpu_id)
+    resolved_compute_dtype = _resolve_compute_dtype(compute_dtype)
     processor = _load_moss_processor(model_path)
     resolved_codec_model_path = _resolve_audio_tokenizer_model_path(
         processor,
@@ -468,6 +477,8 @@ def create_preprocessing_executor(
         resolved_codec_model_path,
         device=device,
         dtype=dtype,
+        component="encoder",
+        compute_dtype=resolved_compute_dtype,
     )
     reference_encoder: Any = _BatchedReferenceEncoder(
         audio_tokenizer,
@@ -542,6 +553,8 @@ def create_vocoder_executor(
         _resolve_audio_tokenizer_model_path(processor, codec_model_path),
         device=device,
         dtype=dtype,
+        component="decoder",
+        compute_dtype=resolved_compute_dtype,
     )
 
     vocoder = MossTTSVocoder(

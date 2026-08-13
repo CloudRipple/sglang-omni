@@ -306,7 +306,7 @@ class MossStreamingVocoderScheduler(StreamingVocoderBase[_MossStreamState, None]
 
         window_start = max(0, emitted_frames - self._stream_overlap_tokens)
         window = torch.stack(segment.frames[window_start:], dim=0)
-        decoded = self._audio_tokenizer.decode_codes([window])
+        decoded = self._vocoder.decode_segments([window])
         if not decoded:
             return None
         audio = torch.as_tensor(decoded[0]).detach().reshape(-1).to(torch.float32)

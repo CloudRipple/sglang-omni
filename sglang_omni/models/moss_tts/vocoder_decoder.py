@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared MOSS audio-tokenizer non-streaming decoder with packed attention.
+"""Shared MOSS audio-tokenizer decoder with packed attention.
 
 The wrapper keeps the upstream codec embeddings, pretransform stages, and
-waveform projection. It replaces only the non-streaming projected transformer
-attention path so decoder frames can run through SGLang's packed varlen
+waveform projection. It replaces only the projected transformer attention path
+so decoder frames can run through SGLang's packed varlen
 FlashAttention. Both MOSS-Audio-Tokenizer-v2 (MOSS-TTS Local) and the legacy
 MOSS-Audio-Tokenizer used by MOSS-TTS Delay are supported; the latter exposes
 equivalent primitives under older field names.
@@ -928,7 +928,12 @@ class MossAudioTokenizerVocoderDecoder(nn.Module):
         return x, input_lengths
 
 
+class MossAudioTokenizerEncoder(MossAudioTokenizerVocoderDecoder):
+    """MOSS audio-tokenizer encoder with packed projected transformers."""
+
+
 __all__ = [
+    "MossAudioTokenizerEncoder",
     "MossAudioTokenizerAttention",
     "MossAudioTokenizerProjectedTransformer",
     "MossAudioTokenizerTransformer",
