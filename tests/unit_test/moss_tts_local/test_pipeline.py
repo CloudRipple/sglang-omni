@@ -1111,6 +1111,95 @@ def test_create_preprocessing_executor_uses_model_config_codec_path(monkeypatch)
     assert loaded_codec_paths == ["codec-from-model-config"]
 
 
+def test_moss_tts_local_preprocessing_scheduler_owns_reference_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts_local import request_builders as rb
+    from sglang_omni.models.moss_tts_local import stages
+
+    processor = _FakeProcessor()
+    processor.model_config = types.SimpleNamespace(
+        n_vq=N_VQ,
+        audio_tokenizer_name_or_path="codec",
+    )
+    codec = types.SimpleNamespace()
+    monkeypatch.setattr(
+        stages,
+        "_load_moss_tts_local_processor",
+        lambda model_path: processor,
+    )
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_local_audio_tokenizer",
+        lambda *args, **kwargs: codec,
+    )
+
+    first_scheduler = stages.create_preprocessing_executor("model", device="cpu")
+    second_scheduler = None
+    try:
+        first_reference_encoder = rb._QUEUE.snapshot().context.reference_encoder
+        first_batcher = first_reference_encoder._service._hook._encoder
+
+        second_scheduler = stages.create_preprocessing_executor("model", device="cpu")
+        second_context = rb._QUEUE.snapshot().context
+        second_reference_encoder = second_context.reference_encoder
+        second_batcher = second_reference_encoder._service._hook._encoder
+
+        assert not first_batcher._thread.is_alive()
+        first_scheduler.stop()
+        assert rb._QUEUE.snapshot().context is second_context
+        assert second_batcher._thread.is_alive()
+
+        second_scheduler.stop()
+        assert rb._QUEUE.snapshot().context is None
+        assert not second_batcher._thread.is_alive()
+    finally:
+        first_scheduler.stop()
+        if second_scheduler is not None:
+            second_scheduler.stop()
+        rb.clear_moss_tts_local_preprocessing_context()
+
+
+def test_moss_tts_local_preprocessing_factory_failure_closes_reference_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts_local import request_builders as rb
+    from sglang_omni.models.moss_tts_local import stages
+
+    processor = _FakeProcessor()
+    processor.model_config = types.SimpleNamespace(
+        n_vq=N_VQ,
+        audio_tokenizer_name_or_path="codec",
+    )
+    codec = types.SimpleNamespace()
+    captured_batchers = []
+
+    def fail_scheduler(*args, **kwargs):
+        del args, kwargs
+        reference_encoder = rb._QUEUE.snapshot().context.reference_encoder
+        captured_batchers.append(reference_encoder._service._hook._encoder)
+        raise RuntimeError("scheduler construction failed")
+
+    monkeypatch.setattr(
+        stages,
+        "_load_moss_tts_local_processor",
+        lambda model_path: processor,
+    )
+    monkeypatch.setattr(
+        stages,
+        "load_moss_tts_local_audio_tokenizer",
+        lambda *args, **kwargs: codec,
+    )
+    monkeypatch.setattr(stages, "SimpleScheduler", fail_scheduler)
+
+    with pytest.raises(RuntimeError, match="scheduler construction failed"):
+        stages.create_preprocessing_executor("model", device="cpu")
+
+    assert rb._QUEUE.snapshot().context is None
+    assert len(captured_batchers) == 1
+    assert not captured_batchers[0]._thread.is_alive()
+
+
 def test_preprocess_and_result_adapter():
     set_moss_tts_local_preprocessing_context(processor=_FakeProcessor())
     try:
@@ -1338,7 +1427,9 @@ def test_decode_frame_graphed_matches_branchless_eager():
     torch.testing.assert_close(from_graph, eager)
 
 
-def test_batched_reference_encoder_coalesces_and_isolates_errors():
+def test_batched_reference_encoder_coalesces_and_isolates_errors(
+    request: pytest.FixtureRequest,
+):
     import threading
 
     from sglang_omni.models.moss_tts_local.stages import _BatchedReferenceEncoder
@@ -1372,6 +1463,7 @@ def test_batched_reference_encoder_coalesces_and_isolates_errors():
         max_batch_size=4,
         max_batch_wait_ms=20,
     )
+    request.addfinalizer(encoder.close)
     results = {}
 
     def run(path):
@@ -1393,7 +1485,9 @@ def test_batched_reference_encoder_coalesces_and_isolates_errors():
     assert any(len(c) > 1 for c in calls) or len(calls) >= 3
 
 
-def test_batched_reference_encoder_mixes_path_and_waveform_jobs():
+def test_batched_reference_encoder_mixes_path_and_waveform_jobs(
+    request: pytest.FixtureRequest,
+):
     import threading
 
     from sglang_omni.models.moss_tts_local.stages import _BatchedReferenceEncoder
@@ -1418,6 +1512,7 @@ def test_batched_reference_encoder_mixes_path_and_waveform_jobs():
         max_batch_size=2,
         max_batch_wait_ms=100,
     )
+    request.addfinalizer(encoder.close)
     results = {}
     errors = []
     barrier = threading.Barrier(2)
@@ -1449,6 +1544,80 @@ def test_batched_reference_encoder_mixes_path_and_waveform_jobs():
     assert int(results["path"][0, 0]) == 2
     assert int(results["wav"][0, 0]) == 5
     assert calls[0] == [2, 5]
+
+
+def test_moss_tts_local_batch_wait_uses_one_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts_local import stages
+
+    entries = [(object(), object()), (object(), object())]
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        def get(self, timeout=None):
+            self.timeouts.append(timeout)
+            if entries:
+                return entries.pop(0)
+            raise stages.queue.Empty
+
+    fake_queue = FakeQueue()
+    encoder = object.__new__(stages._BatchedReferenceEncoder)
+    encoder._max_batch_size = 8
+    encoder._max_wait_s = 0.004
+    encoder._queue = fake_queue
+    clock = iter((10.0, 10.001, 10.003))
+    monkeypatch.setattr(stages.time, "monotonic", lambda: next(clock))
+
+    batch, shutdown = encoder._drain_batch()
+
+    assert len(batch) == 2
+    assert shutdown is False
+    assert fake_queue.timeouts[0] is None
+    assert fake_queue.timeouts[1:] == pytest.approx([0.003, 0.001])
+
+
+def test_moss_tts_local_batched_reference_encoder_close_is_idempotent() -> None:
+    from sglang_omni.models.moss_tts_local import stages
+
+    encoder = stages._BatchedReferenceEncoder(types.SimpleNamespace(), n_vq=N_VQ)
+    worker = encoder._thread
+
+    encoder.close()
+    encoder.close()
+
+    assert not worker.is_alive()
+    with pytest.raises(RuntimeError, match="reference encoder is closed"):
+        encoder.encode_input(stages._PathReferenceJob("unused.wav"))
+
+
+def test_moss_tts_local_preprocessing_context_closes_replaced_encoder() -> None:
+    from sglang_omni.models.moss_tts_local import request_builders as rb
+    from sglang_omni.models.moss_tts_local import stages
+
+    codec = types.SimpleNamespace()
+    first = stages._BatchedReferenceEncoder(codec, n_vq=N_VQ)
+    second_batcher = stages._BatchedReferenceEncoder(codec, n_vq=N_VQ)
+    second = stages._MossLocalReferenceEncoder(
+        second_batcher,
+        n_vq=N_VQ,
+    )
+
+    try:
+        rb.set_moss_tts_local_preprocessing_context(
+            processor=object(), reference_encoder=first
+        )
+        rb.set_moss_tts_local_preprocessing_context(
+            processor=object(), reference_encoder=second
+        )
+        assert not first._thread.is_alive()
+        assert second_batcher._thread.is_alive()
+    finally:
+        rb.clear_moss_tts_local_preprocessing_context()
+
+    assert not second_batcher._thread.is_alive()
 
 
 # _MossLocalReferenceEncoder
@@ -1705,7 +1874,9 @@ def test_cached_reference_encoder_data_uri_hit_miss(tmp_path):
     assert stats["misses"] == 1
 
 
-def test_uncached_data_uri_uses_reference_encoder():
+def test_uncached_data_uri_uses_reference_encoder(
+    request: pytest.FixtureRequest,
+):
     from sglang_omni.models.moss_tts_local.request_builders import (
         _build_processor_message,
     )
@@ -1721,6 +1892,7 @@ def test_uncached_data_uri_uses_reference_encoder():
         max_batch_size=4,
         max_batch_wait_ms=20,
     )
+    request.addfinalizer(reference_encoder.close)
     processor = _FakeProcessor()
     state = MossTTSLocalState(text="hello", ref_audio=data_uri)
 

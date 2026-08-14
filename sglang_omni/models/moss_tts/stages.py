@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, TypeAlias, cast
 
 import torch
@@ -30,6 +31,7 @@ from sglang_omni.models.moss_tts.hf_loading import (
 from sglang_omni.models.moss_tts.payload_types import moss_tts_special_token_defaults
 from sglang_omni.models.moss_tts.request_builders import (
     cleanup_prepared_moss_tts_request,
+    clear_moss_tts_preprocessing_context,
     preprocess_moss_tts_payload,
     set_moss_tts_preprocessing_context,
 )
@@ -200,12 +202,19 @@ class _BatchedReferenceEncoder:
     def encode(self, source: str | os.PathLike[str]) -> torch.Tensor:
         return self.encode_input(self.load(source))
 
-    def encode_input(self, item: _LoadedReferenceWaveform) -> torch.Tensor:
-        future: concurrent.futures.Future[torch.Tensor] = concurrent.futures.Future()
+    def _enqueue(
+        self,
+        item: _LoadedReferenceWaveform,
+        future: concurrent.futures.Future[torch.Tensor],
+    ) -> None:
         with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("MOSS-TTS reference encoder is closed")
             self._queue.put((item, future))
+
+    def encode_input(self, item: _LoadedReferenceWaveform) -> torch.Tensor:
+        future: concurrent.futures.Future[torch.Tensor] = concurrent.futures.Future()
+        self._enqueue(item, future)
         return future.result(timeout=self.ENCODE_TIMEOUT_S)
 
     def _drain_batch(
@@ -376,9 +385,7 @@ class _MossTTSReferenceEncodeHook(TensorReferenceEncodeHook[_LoadedReferenceWave
         return self._encoder.encode_input(item)
 
     def close(self) -> None:
-        close = getattr(self._encoder, "close", None)
-        if callable(close):
-            close()
+        self._encoder.close()
 
 
 class _MossTTSReferenceEncoder:
@@ -469,25 +476,36 @@ def create_preprocessing_executor(
         max_batch_size=encode_batch_size,
         max_batch_wait_ms=encode_batch_wait_ms,
     )
-    if ref_audio_cache:
-        reference_encoder = _MossTTSReferenceEncoder(
-            reference_encoder,
-            codec_model_path=resolved_codec_model_path,
-            n_vq=int(processor.model_config.n_vq),
-            max_items=ref_audio_cache_max_items,
-            max_bytes=ref_audio_cache_max_bytes,
+    try:
+        if ref_audio_cache:
+            reference_encoder = _MossTTSReferenceEncoder(
+                reference_encoder,
+                codec_model_path=resolved_codec_model_path,
+                n_vq=int(processor.model_config.n_vq),
+                max_items=ref_audio_cache_max_items,
+                max_bytes=ref_audio_cache_max_bytes,
+            )
+        set_moss_tts_preprocessing_context(
+            processor=processor,
+            reference_encoder=reference_encoder,
         )
-    set_moss_tts_preprocessing_context(
-        processor=processor,
-        reference_encoder=reference_encoder,
-    )
-    # note (Zhang Yiyang): Every device uses the same batch queue; there is no
-    # device-specific fallback.
-    return SimpleScheduler(
-        preprocess_moss_tts_payload,
-        abort_callback=cleanup_prepared_moss_tts_request,
-        max_concurrency=max_concurrency,
-    )
+        # note (Zhang Yiyang): Every device uses the same batch queue; there is no
+        # device-specific fallback.
+        return SimpleScheduler(
+            preprocess_moss_tts_payload,
+            abort_callback=cleanup_prepared_moss_tts_request,
+            shutdown_callback=partial(
+                clear_moss_tts_preprocessing_context,
+                expected_reference_encoder=reference_encoder,
+            ),
+            max_concurrency=max_concurrency,
+        )
+    except BaseException:
+        if not clear_moss_tts_preprocessing_context(
+            expected_reference_encoder=reference_encoder
+        ):
+            reference_encoder.close()
+        raise
 
 
 def create_sglang_tts_engine_executor(

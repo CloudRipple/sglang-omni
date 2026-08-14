@@ -212,6 +212,91 @@ def test_moss_tts_preprocessing_context_closes_replaced_encoder() -> None:
     assert not second_batcher._thread.is_alive()
 
 
+def test_moss_tts_preprocessing_scheduler_owns_reference_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import request_builders as rb
+    from sglang_omni.models.moss_tts import stages
+
+    processor = SimpleNamespace(
+        audio_tokenizer=None,
+        model_config=SimpleNamespace(
+            n_vq=2,
+            audio_tokenizer_name_or_path="codec",
+        ),
+    )
+    codec = SimpleNamespace(sample_rate=24000, device="cpu", model=None)
+    monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
+    monkeypatch.setattr(
+        stages,
+        "load_moss_audio_encoder",
+        lambda *args, **kwargs: codec,
+    )
+
+    first_scheduler = stages.create_preprocessing_executor("model", device="cpu")
+    second_scheduler = None
+    try:
+        first_reference_encoder = rb._QUEUE.snapshot().context.reference_encoder
+        first_batcher = first_reference_encoder._service._hook._encoder
+
+        second_scheduler = stages.create_preprocessing_executor("model", device="cpu")
+        second_context = rb._QUEUE.snapshot().context
+        second_reference_encoder = second_context.reference_encoder
+        second_batcher = second_reference_encoder._service._hook._encoder
+
+        assert not first_batcher._thread.is_alive()
+        first_scheduler.stop()
+        assert rb._QUEUE.snapshot().context is second_context
+        assert second_batcher._thread.is_alive()
+
+        second_scheduler.stop()
+        assert rb._QUEUE.snapshot().context is None
+        assert not second_batcher._thread.is_alive()
+    finally:
+        first_scheduler.stop()
+        if second_scheduler is not None:
+            second_scheduler.stop()
+        rb.clear_moss_tts_preprocessing_context()
+
+
+def test_moss_tts_preprocessing_factory_failure_closes_reference_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.moss_tts import request_builders as rb
+    from sglang_omni.models.moss_tts import stages
+
+    processor = SimpleNamespace(
+        audio_tokenizer=None,
+        model_config=SimpleNamespace(
+            n_vq=2,
+            audio_tokenizer_name_or_path="codec",
+        ),
+    )
+    codec = SimpleNamespace(sample_rate=24000, device="cpu", model=None)
+    captured_batchers = []
+
+    def fail_scheduler(*args, **kwargs):
+        del args, kwargs
+        reference_encoder = rb._QUEUE.snapshot().context.reference_encoder
+        captured_batchers.append(reference_encoder._service._hook._encoder)
+        raise RuntimeError("scheduler construction failed")
+
+    monkeypatch.setattr(stages, "_load_moss_processor", lambda model_path: processor)
+    monkeypatch.setattr(
+        stages,
+        "load_moss_audio_encoder",
+        lambda *args, **kwargs: codec,
+    )
+    monkeypatch.setattr(stages, "SimpleScheduler", fail_scheduler)
+
+    with pytest.raises(RuntimeError, match="scheduler construction failed"):
+        stages.create_preprocessing_executor("model", device="cpu")
+
+    assert rb._QUEUE.snapshot().context is None
+    assert len(captured_batchers) == 1
+    assert not captured_batchers[0]._thread.is_alive()
+
+
 def _make_moss_tts_wav_data_uri(
     n_samples: int = 100,
     sample_rate: int = 16000,

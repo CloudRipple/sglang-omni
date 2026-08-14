@@ -157,18 +157,26 @@ def set_moss_tts_preprocessing_context(
                 reference_encoder=reference_encoder,
             )
         )
-        if previous is not None and previous.reference_encoder is reference_encoder:
-            return
-        _close_moss_tts_preprocessing_context(previous)
+    if previous is not None and previous.reference_encoder is reference_encoder:
+        return
+    _close_moss_tts_preprocessing_context(previous)
 
 
-def clear_moss_tts_preprocessing_context() -> None:
-    """Clear MOSS-TTS preprocessing globals, mainly for tests and reloads."""
+def clear_moss_tts_preprocessing_context(
+    *, expected_reference_encoder: Any | None = None
+) -> bool:
+    """Clear and close the matching context; return whether it was owned."""
 
     with _CONTEXT_LIFECYCLE_LOCK:
         previous = _QUEUE.snapshot().context
+        if expected_reference_encoder is not None and (
+            previous is None
+            or previous.reference_encoder is not expected_reference_encoder
+        ):
+            return False
         _QUEUE.clear_context()
-        _close_moss_tts_preprocessing_context(previous)
+    _close_moss_tts_preprocessing_context(previous)
+    return True
 
 
 def cleanup_prepared_moss_tts_request(request_id: str) -> None:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -78,27 +79,61 @@ class MossTTSLocalPreparedRequest:
 
 
 @dataclass
-class _PreprocessingContext:
+class MossTTSLocalPreprocessingContext:
     processor: Any
     reference_encoder: Any = None
 
 
-_QUEUE: PreparedRequestQueue[_PreprocessingContext, MossTTSLocalPreparedRequest] = (
-    PreparedRequestQueue()
-)
+_QUEUE: PreparedRequestQueue[
+    MossTTSLocalPreprocessingContext, MossTTSLocalPreparedRequest
+] = PreparedRequestQueue()
+_CONTEXT_LIFECYCLE_LOCK = threading.Lock()
 MOSS_STREAM_TRANSPORT_BATCH_FRAMES = 5
+
+
+def _close_moss_tts_local_preprocessing_context(
+    context: MossTTSLocalPreprocessingContext | None,
+) -> None:
+    if context is None:
+        return
+    close = getattr(context.reference_encoder, "close", None)
+    if callable(close):
+        close()
 
 
 def set_moss_tts_local_preprocessing_context(
     *, processor: Any, reference_encoder: Any = None
 ) -> None:
-    _QUEUE.set_context(
-        _PreprocessingContext(processor=processor, reference_encoder=reference_encoder)
-    )
+    """Register the upstream MOSS-TTS Local processor used by preprocessing."""
+
+    with _CONTEXT_LIFECYCLE_LOCK:
+        previous = _QUEUE.snapshot().context
+        _QUEUE.set_context(
+            MossTTSLocalPreprocessingContext(
+                processor=processor,
+                reference_encoder=reference_encoder,
+            )
+        )
+    if previous is not None and previous.reference_encoder is reference_encoder:
+        return
+    _close_moss_tts_local_preprocessing_context(previous)
 
 
-def clear_moss_tts_local_preprocessing_context() -> None:
-    _QUEUE.clear_context()
+def clear_moss_tts_local_preprocessing_context(
+    *, expected_reference_encoder: Any | None = None
+) -> bool:
+    """Clear and close the matching context; return whether it was owned."""
+
+    with _CONTEXT_LIFECYCLE_LOCK:
+        previous = _QUEUE.snapshot().context
+        if expected_reference_encoder is not None and (
+            previous is None
+            or previous.reference_encoder is not expected_reference_encoder
+        ):
+            return False
+        _QUEUE.clear_context()
+    _close_moss_tts_local_preprocessing_context(previous)
+    return True
 
 
 def cleanup_prepared_moss_tts_local_request(request_id: str) -> None:
