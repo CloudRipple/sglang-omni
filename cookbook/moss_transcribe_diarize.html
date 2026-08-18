@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=1a9ffd16"></script>
+    <script src="../_static/documentation_options.js?v=0deb7d70"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -51,7 +51,7 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'cookbook/moss_transcribe_diarize';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="../_static/js/qwen3_omni_server_generator.js?v=94f3a115"></script>
+    <script src="../_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
     <script src="../_static/js/ming_omni_server_generator.js?v=694b1473"></script>
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
@@ -60,8 +60,8 @@
     <link rel="prev" title="ARK-ASR-3B" href="arkasr.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.1" />
-    <meta name="docbuild:last-update" content="Aug 11, 2026"/>
+  <meta name="docsearch:version" content="0.1.2" />
+    <meta name="docbuild:last-update" content="Aug 18, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -207,6 +207,7 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/release_notes.html">Release Notes</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
@@ -219,6 +220,7 @@
 <li class="toctree-l1"><a class="reference internal" href="moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dots_tts.html">dots.tts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="minimax_music3.html">MiniMax Music 3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="zonos2.html">ZONOS2</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
@@ -232,6 +234,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts.html">TTS Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/omni_router.html">Omni Router Usage</a></li>
@@ -519,6 +522,7 @@
   <section class="tex2jax_ignore mathjax_ignore" id="moss-transcribe-diarize">
 <h1>MOSS-Transcribe-Diarize<a class="headerlink" href="#moss-transcribe-diarize" title="Link to this heading">#</a></h1>
 <p><a class="reference external" href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">MOSS-Transcribe-Diarize</a> is a multi-speaker ASR and diarization model from the OpenMOSS team.</p>
+<p>MOSS-Transcribe-Diarize does not support <code class="docutils literal notranslate"><span class="pre">/v1/audio/translations</span></code>; that endpoint returns HTTP 400. Use <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>.</p>
 <p><img alt="Model Architecture" src="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/resolve/main/Model_Architecture.png" /></p>
 <p>It transcribes speech, assigns speakers, and predicts timestamps in a single generation pass. With 128K context, it supports up to ~90-minute audio, handles meetings, interruptions, long conversations, and overlapping speech, and adds hotword boosting for names, companies, product terms, and domain vocabulary. MOSS-Transcribe-Diarize is served through the OpenAI-compatible <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code> endpoint.</p>
 <div class="pst-scrollable-table-container"><table class="table">
@@ -678,9 +682,10 @@
 <h3>Optimization Strategies<a class="headerlink" href="#optimization-strategies" title="Link to this heading">#</a></h3>
 <p><img alt="Optimization Overview" src="../_images/moss-td-optimization.svg" /></p>
 <p>The optimization stack mirrors <a class="reference external" href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/sglang/sglang-omni/tts-optimization.md">what we built for TTS</a>, sharing the same core infrastructure with ASR-specific adaptations.</p>
-<p><strong>CUDA Graph.</strong> The LLM decode step pads batch size to predefined buckets (1, 2, 4, 8, …) and replays a captured CUDA graph, eliminating kernel launch overhead on every token. This is the single biggest optimization for AR Decode. The Whisper encoder gets the same treatment, bucketed over chunk count (<code class="docutils literal notranslate"><span class="pre">encoder_chunk_buckets</span></code>, default <code class="docutils literal notranslate"><span class="pre">1..8</span></code> ≈ 4 min of audio).</p>
+<p><strong>CUDA Graph.</strong> The LLM decode step pads batch size to predefined buckets (1, 2, 4, 8, …) and replays a captured CUDA graph, eliminating kernel launch overhead on every token. This is the single biggest optimization for AR Decode. Breakable prefill graphs bucket over token count instead, and the ladder starts at 1 and 2: a fully cached prefix still re-prefills its last token, and that 1-token extend would otherwise pad to the 4-token floor and exceed SGLang’s 2x padding guard, falling back to eager. The 2-token bucket sits exactly on that guard, so it replays either way and only saves the padding. The Whisper encoder gets the same treatment, bucketed over chunk count (<code class="docutils literal notranslate"><span class="pre">encoder_chunk_buckets</span></code>, default <code class="docutils literal notranslate"><span class="pre">1..8</span></code> ≈ 4 min of audio).</p>
+<p><strong>Decoder Torch Compile.</strong> The default pipeline compiles Qwen3 decoder shapes through batch size 4 and uses the eager decoder above that cap. Override the cap with <code class="docutils literal notranslate"><span class="pre">--torch-compile-max-bs</span></code>, or disable decoder compilation with <code class="docutils literal notranslate"><span class="pre">--torch-compile</span> <span class="pre">off</span></code>. Compilation runs once per captured decode bucket at startup (<code class="docutils literal notranslate"><span class="pre">max-autotune-no-cudagraphs</span></code>), so cold start pays an autotuning cost before the server accepts traffic. This setting is independent of the encoder compile option below.</p>
 <p><strong>Encoder Torch Compile (opt-in).</strong> <code class="docutils literal notranslate"><span class="pre">encoder_torch_compile=True</span></code> swaps the encoder CUDA graph for <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> (default mode) with kernel fusion. The two are mutually exclusive. Reduce-overhead mode must not be used: its cudagraph trees corrupt memory alongside the decode CUDA graphs that always run in this process (illegal memory access after ~60s of serving). The cost is a one-time per-bucket compile at startup; <code class="docutils literal notranslate"><span class="pre">dynamic=False</span></code> means only the warmed chunk counts are accelerated, anything else runs eager.</p>
-<p><strong>Async Decode.</strong> Same one-step lookahead as TTS: launch the current decode step’s GPU work, then resolve the previous step’s host-side work (D2H copy, finish detection, result dispatch) in parallel. Falls back to synchronous mode at batch size 1, where the host work is too small to overlap. Two alternating pinned host buffers prevent read/write races between the GPU’s async D2H write and the CPU’s read. For the full mechanism and code pointers, see <a class="reference external" href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/sglang/sglang-omni/tts-optimization.md#asynchronous-decode--lookahead">Asynchronous Decode + Lookahead</a> in the TTS optimization guide.</p>
+<p><strong>Async Decode.</strong> Same one-step lookahead as TTS: launch the current decode step’s GPU work, then resolve the previous step’s host-side work (D2H copy, finish detection, result dispatch) in parallel. MOSS-TD enables lookahead starting at batch size 1 by default. Set <code class="docutils literal notranslate"><span class="pre">--async-lookahead-min-batch-size</span> <span class="pre">2</span></code> to keep batch-size-1 decode synchronous, or use <code class="docutils literal notranslate"><span class="pre">--decode-mode</span> <span class="pre">sync</span></code> to disable lookahead for the stage. Two alternating pinned host buffers prevent read/write races between the GPU’s async D2H write and the CPU’s read. For the full mechanism and code pointers, see <a class="reference external" href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/sglang/sglang-omni/tts-optimization.md#asynchronous-decode--lookahead">Asynchronous Decode + Lookahead</a> in the TTS optimization guide.</p>
 <p><strong>LRU Encoder Cache.</strong> The Whisper encoder forward is deterministic for identical input audio — same waveform always produces the same embeddings. We exploit this with an LRU cache (max 64 entries, 4 GB budget) that stores encoder outputs on CPU, keyed by a content hash of the input waveform. On a cache hit the stored tensor is transferred back to GPU asynchronously, skipping the encoder entirely. On a miss the encoder runs normally and the result is moved to CPU for storage. The cache evicts by both entry count and total bytes, always dropping the least-recently-used entry first.</p>
 <p>Unlike TTS where the same reference voice is reused across many prompts (high hit rate), ASR inputs are typically unique in production. The cache is most useful for request retries, A/B testing with different decoding parameters, and development iteration.</p>
 <p><strong>Stream Output.</strong> Emits transcript text incrementally during AR decode via SSE, so users see partial results as they are generated rather than waiting for the full sequence. Three mechanisms control when to emit:</p>
@@ -708,6 +713,13 @@
 <span class="w">  </span>--mem-fraction-static<span class="w"> </span><span class="m">0</span>.80
 </pre></div>
 </div>
+<p>MOSS-TD briefly holds newly built LM requests to admit larger prefills. The
+default target is 4 requests with a 12 ms oldest-request deadline. While more
+request builds are pending, the scheduler waits for either limit; after build
+work drains, it releases immediately only when decode is idle. During active
+decode, it continues coalescing until the target or deadline. Override the two
+limits with <code class="docutils literal notranslate"><span class="pre">--prefill-coalesce-requests</span></code> and <code class="docutils literal notranslate"><span class="pre">--prefill-coalesce-wait-ms</span></code>, or
+set the request target to <code class="docutils literal notranslate"><span class="pre">0</span></code> to disable coalescing.</p>
 </section>
 <section id="sending-requests">
 <h3>Sending Requests<a class="headerlink" href="#sending-requests" title="Link to this heading">#</a></h3>
@@ -720,23 +732,23 @@
 </div>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
-<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;tests/data/query_to_cars.wav&quot;</span><span class="p">,</span> <span class="s2">&quot;rb&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"tests/data/query_to_cars.wav"</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
     <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-        <span class="s2">&quot;http://localhost:8000/v1/audio/transcriptions&quot;</span><span class="p">,</span>
+        <span class="s2">"http://localhost:8000/v1/audio/transcriptions"</span><span class="p">,</span>
         <span class="n">data</span><span class="o">=</span><span class="p">{</span>
-            <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;OpenMOSS-Team/MOSS-Transcribe-Diarize&quot;</span><span class="p">,</span>
-            <span class="s2">&quot;response_format&quot;</span><span class="p">:</span> <span class="s2">&quot;verbose_json&quot;</span><span class="p">,</span>
+            <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"OpenMOSS-Team/MOSS-Transcribe-Diarize"</span><span class="p">,</span>
+            <span class="s2">"response_format"</span><span class="p">:</span> <span class="s2">"verbose_json"</span><span class="p">,</span>
         <span class="p">},</span>
-        <span class="n">files</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;file&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;query_to_cars.wav&quot;</span><span class="p">,</span> <span class="n">f</span><span class="p">,</span> <span class="s2">&quot;audio/wav&quot;</span><span class="p">)},</span>
+        <span class="n">files</span><span class="o">=</span><span class="p">{</span><span class="s2">"file"</span><span class="p">:</span> <span class="p">(</span><span class="s2">"query_to_cars.wav"</span><span class="p">,</span> <span class="n">f</span><span class="p">,</span> <span class="s2">"audio/wav"</span><span class="p">)},</span>
         <span class="n">timeout</span><span class="o">=</span><span class="mi">300</span><span class="p">,</span>
     <span class="p">)</span>
 
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">payload</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="nb">print</span><span class="p">(</span><span class="n">payload</span><span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">])</span>
-<span class="k">for</span> <span class="n">segment</span> <span class="ow">in</span> <span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;segments&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">payload</span><span class="p">[</span><span class="s2">"text"</span><span class="p">])</span>
+<span class="k">for</span> <span class="n">segment</span> <span class="ow">in</span> <span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"segments"</span><span class="p">,</span> <span class="p">[]):</span>
     <span class="nb">print</span><span class="p">(</span>
-        <span class="sa">f</span><span class="s2">&quot;[</span><span class="si">{</span><span class="n">segment</span><span class="p">[</span><span class="s1">&#39;start&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">-</span><span class="si">{</span><span class="n">segment</span><span class="p">[</span><span class="s1">&#39;end&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">] </span><span class="si">{</span><span class="n">segment</span><span class="p">[</span><span class="s1">&#39;text&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="sa">f</span><span class="s2">"[</span><span class="si">{</span><span class="n">segment</span><span class="p">[</span><span class="s1">'start'</span><span class="p">]</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">-</span><span class="si">{</span><span class="n">segment</span><span class="p">[</span><span class="s1">'end'</span><span class="p">]</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">] </span><span class="si">{</span><span class="n">segment</span><span class="p">[</span><span class="s1">'text'</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span>
     <span class="p">)</span>
 </pre></div>
 </div>
@@ -815,6 +827,15 @@ python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmar
 <span class="w">  </span>--mem-fraction-static<span class="w"> </span><span class="m">0</span>.80<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--output-dir<span class="w"> </span>results/moss_transcribe_diarize_movies800times
 
+<span class="c1"># note (Xinyu): Add one dedicated request-event profiling pass after the measured</span>
+<span class="c1"># evaluation. This pass is excluded from reported accuracy and speed metrics.</span>
+python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmark_asr_transcribe_diarize<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--dataset<span class="w"> </span>movies800times<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--concurrency<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--profile-events<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--profile-event-dir<span class="w"> </span>/tmp/moss_td_bench_profile<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output-dir<span class="w"> </span>results/moss_transcribe_diarize_movies800times_profile
+
 <span class="c1"># Long-sequence ASR / diarization</span>
 python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmark_asr_transcribe_diarize<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--dataset<span class="w"> </span>aishell4_long<span class="w"> </span><span class="se">\</span>
@@ -838,6 +859,13 @@ python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmar
 <span class="w">  </span>--output-dir<span class="w"> </span>results/moss_transcribe_diarize_googletime
 </pre></div>
 </div>
+<p><code class="docutils literal notranslate"><span class="pre">--profile-events</span></code> starts request-level event recording through the serve
+profiler endpoints, runs one extra pass, and adds its <code class="docutils literal notranslate"><span class="pre">stage_breakdown</span></code>,
+<code class="docutils literal notranslate"><span class="pre">hop_breakdown</span></code>, and speed metrics under <code class="docutils literal notranslate"><span class="pre">profile</span></code> in both
+<code class="docutils literal notranslate"><span class="pre">transcribe_diarize_results.json</span></code> and <code class="docutils literal notranslate"><span class="pre">transcribe_diarize_speed_results.json</span></code>.
+The event directory is a server-side path, so report generation requires the
+benchmark process to see the same filesystem. For router or DP deployments,
+pass every worker serve URL with a comma-separated <code class="docutils literal notranslate"><span class="pre">--profile-urls</span></code> value.</p>
 </section>
 <section id="benchmark-results">
 <h2>Benchmark Results<a class="headerlink" href="#benchmark-results" title="Link to this heading">#</a></h2>
@@ -1051,7 +1079,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 11, 2026.
+  Last updated on Aug 18, 2026.
   <br/>
 </p>
   </div>

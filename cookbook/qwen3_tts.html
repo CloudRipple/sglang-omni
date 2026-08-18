@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=1a9ffd16"></script>
+    <script src="../_static/documentation_options.js?v=0deb7d70"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -51,7 +51,7 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'cookbook/qwen3_tts';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="../_static/js/qwen3_omni_server_generator.js?v=94f3a115"></script>
+    <script src="../_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
     <script src="../_static/js/ming_omni_server_generator.js?v=694b1473"></script>
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
@@ -60,8 +60,8 @@
     <link rel="prev" title="Fish Audio S2-Pro" href="fishaudio_s2_pro.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.1" />
-    <meta name="docbuild:last-update" content="Aug 11, 2026"/>
+  <meta name="docsearch:version" content="0.1.2" />
+    <meta name="docbuild:last-update" content="Aug 18, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -207,6 +207,7 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/release_notes.html">Release Notes</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
@@ -219,6 +220,7 @@
 <li class="toctree-l1"><a class="reference internal" href="moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dots_tts.html">dots.tts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="minimax_music3.html">MiniMax Music 3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="zonos2.html">ZONOS2</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
@@ -232,6 +234,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts.html">TTS Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/omni_router.html">Omni Router Usage</a></li>
@@ -486,7 +489,11 @@
             <nav aria-label="Page">
                 <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synthesizing-speech">Synthesizing Speech</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#text-only-requests">Text-only Requests</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a><ul class="nav section-nav flex-column">
@@ -580,6 +587,77 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\<
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
+<section id="deterministic-inference">
+<h3>Deterministic Inference<a class="headerlink" href="#deterministic-inference" title="Link to this heading">#</a></h3>
+<p>Dynamic batching can change Qwen3-TTS codec and waveform outputs even when the
+prompt, reference audio, and seed are unchanged. Both the 0.6B and 1.7B Base
+checkpoints provide an opt-in deterministic mode:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">enable_deterministic_inference</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</pre></div>
+</div>
+<p>When enabled, the same prompt, reference audio, and seed produce byte-identical
+PCM across runtime batch sizes. This mode reduces throughput because it
+serializes reference preprocessing and vocoder decoding and disables Talker
+compilation and the initial vocoder CUDA Graph, so it is disabled by default.</p>
+</section>
+<section id="overload-admission-policy">
+<h3>Overload / admission policy<a class="headerlink" href="#overload-admission-policy" title="Link to this heading">#</a></h3>
+<p>Two SGLang generation-stage knobs bound how the server behaves past saturation:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Knob</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Qwen3-TTS default</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--max-running-requests</span></code></p></td>
+<td><p>Concurrent running slots</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">16</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--max-queued-requests</span></code></p></td>
+<td><p>Waiting-queue depth before fast-reject</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">16</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Every request enters the waiting queue first, so <code class="docutils literal notranslate"><span class="pre">--max-queued-requests</span></code>
+must be <strong>≥ 1</strong>. Capacity is about <code class="docutils literal notranslate"><span class="pre">running</span> <span class="pre">+</span> <span class="pre">queued</span></code>. Extra arrivals get
+HTTP <strong>503</strong> (<code class="docutils literal notranslate"><span class="pre">The</span> <span class="pre">request</span> <span class="pre">queue</span> <span class="pre">is</span> <span class="pre">full.</span></code>) before preprocessing, or later
+if the AR waiting queue or request-build backlog is full. Qwen3-TTS
+defaults to 4 request-build workers with pending depth 16.</p>
+<p>Raising <code class="docutils literal notranslate"><span class="pre">--max-running-requests</span></code> does <strong>not</strong> automatically raise the waiting
+bound. For a ceiling-32 experiment:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-0.6B-Base<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--config<span class="w"> </span>examples/configs/qwen3_tts_0_6b.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-running-requests<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-queued-requests<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
+</pre></div>
+</div>
+<p>Stepped <code class="docutils literal notranslate"><span class="pre">--concurrencies</span></code> is a closed-loop client: it never holds more than
+N in-flight requests, so past-ceiling load is a burst that drains. Keep
+offered load above <code class="docutils literal notranslate"><span class="pre">max_running_requests</span> <span class="pre">+</span> <span class="pre">max_queued_requests</span></code> for a
+duration with open-loop sustained overshoot:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmark_tts_seedtts<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--generate-only<span class="w"> </span>--use-existing-server<span class="w"> </span>--stream<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-0.6B-Base<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-running-requests<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-queued-requests<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--sustained-overshoot<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--overshoot-duration-s<span class="w"> </span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-samples<span class="w"> </span><span class="m">64</span>
+</pre></div>
+</div>
+<p>Arrivals default to <code class="docutils literal notranslate"><span class="pre">2</span> <span class="pre">×</span> <span class="pre">capacity</span></code> (<code class="docutils literal notranslate"><span class="pre">--request-rate</span></code> overrides). Stats are
+on successes only; artifacts land in <code class="docutils literal notranslate"><span class="pre">&lt;output-dir&gt;/overshoot/</span></code>.</p>
+<p>A closed-loop <code class="docutils literal notranslate"><span class="pre">--concurrencies</span> <span class="pre">16,32,48,64</span></code> sweep is still available for
+comparing healthy vs past-ceiling points, but it does not hold overshoot. Each
+concurrency writes inspectable artifacts under <code class="docutils literal notranslate"><span class="pre">&lt;output-dir&gt;/c&lt;N&gt;/</span></code>.</p>
+</section>
 </section>
 <section id="synthesizing-speech">
 <h2>Synthesizing Speech<a class="headerlink" href="#synthesizing-speech" title="Link to this heading">#</a></h2>
@@ -594,16 +672,16 @@ transcript of that clip). Supplying the transcript enables in-context-learning (
 materially improves cloning quality; omitting it falls back to speaker-embedding (x-vector)
 mode.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/v1/audio/speech<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;Qwen/Qwen3-TTS-12Hz-0.6B-Base&quot;,</span>
-<span class="s1">    &quot;voice&quot;: &quot;default&quot;,</span>
-<span class="s1">    &quot;input&quot;: &quot;SGLang-Omni is a great project!&quot;,</span>
-<span class="s1">    &quot;references&quot;: [{</span>
-<span class="s1">      &quot;audio_path&quot;: &quot;https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav&quot;,</span>
-<span class="s1">      &quot;text&quot;: &quot;We asked over twenty different people, and they all said it was his.&quot;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",</span>
+<span class="s1">    "voice": "default",</span>
+<span class="s1">    "input": "SGLang-Omni is a great project!",</span>
+<span class="s1">    "references": [{</span>
+<span class="s1">      "audio_path": "https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav",</span>
+<span class="s1">      "text": "We asked over twenty different people, and they all said it was his."</span>
 <span class="s1">    }]</span>
-<span class="s1">  }&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="s1">  }'</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--output<span class="w"> </span>output.wav
 </pre></div>
 </div>
@@ -614,19 +692,19 @@ mode.</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8000/v1/audio/speech&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8000/v1/audio/speech"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;Qwen/Qwen3-TTS-12Hz-0.6B-Base&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;voice&quot;</span><span class="p">:</span> <span class="s2">&quot;default&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;input&quot;</span><span class="p">:</span> <span class="s2">&quot;Get the trust fund to the bank early.&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;references&quot;</span><span class="p">:</span> <span class="p">[{</span>
-            <span class="s2">&quot;audio_path&quot;</span><span class="p">:</span> <span class="s2">&quot;https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav&quot;</span><span class="p">,</span>
-            <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="s2">&quot;We asked over twenty different people, and they all said it was his.&quot;</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"Qwen/Qwen3-TTS-12Hz-0.6B-Base"</span><span class="p">,</span>
+        <span class="s2">"voice"</span><span class="p">:</span> <span class="s2">"default"</span><span class="p">,</span>
+        <span class="s2">"input"</span><span class="p">:</span> <span class="s2">"Get the trust fund to the bank early."</span><span class="p">,</span>
+        <span class="s2">"references"</span><span class="p">:</span> <span class="p">[{</span>
+            <span class="s2">"audio_path"</span><span class="p">:</span> <span class="s2">"https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav"</span><span class="p">,</span>
+            <span class="s2">"text"</span><span class="p">:</span> <span class="s2">"We asked over twenty different people, and they all said it was his."</span><span class="p">,</span>
         <span class="p">}],</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
-<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;output.wav&quot;</span><span class="p">,</span> <span class="s2">&quot;wb&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
     <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -642,17 +720,17 @@ Batch responses expose the same value as each item’s <code class="docutils lit
 detect). Supported languages are Chinese, English, Japanese, Korean, German, French, Russian,
 Portuguese, Spanish, and Italian.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/v1/audio/speech<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;Qwen/Qwen3-TTS-12Hz-0.6B-Base&quot;,</span>
-<span class="s1">    &quot;voice&quot;: &quot;default&quot;,</span>
-<span class="s1">    &quot;input&quot;: &quot;今天天气不错，就该出去晒晒太阳。&quot;,</span>
-<span class="s1">    &quot;references&quot;: [{</span>
-<span class="s1">      &quot;audio_path&quot;: &quot;https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav&quot;,</span>
-<span class="s1">      &quot;text&quot;: &quot;We asked over twenty different people, and they all said it was his.&quot;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",</span>
+<span class="s1">    "voice": "default",</span>
+<span class="s1">    "input": "今天天气不错，就该出去晒晒太阳。",</span>
+<span class="s1">    "references": [{</span>
+<span class="s1">      "audio_path": "https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav",</span>
+<span class="s1">      "text": "We asked over twenty different people, and they all said it was his."</span>
 <span class="s1">    }],</span>
-<span class="s1">    &quot;language&quot;: &quot;Chinese&quot;</span>
-<span class="s1">  }&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="s1">    "language": "Chinese"</span>
+<span class="s1">  }'</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--output<span class="w"> </span>output.wav
 </pre></div>
 </div>
@@ -662,18 +740,18 @@ Portuguese, Spanish, and Italian.</p>
 <p>Set <code class="docutils literal notranslate"><span class="pre">&quot;stream&quot;:</span> <span class="pre">true</span></code> and <code class="docutils literal notranslate"><span class="pre">&quot;response_format&quot;:</span> <span class="pre">&quot;pcm&quot;</span></code> to receive raw PCM audio
 chunks in real time:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-N<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/v1/audio/speech<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;Qwen/Qwen3-TTS-12Hz-0.6B-Base&quot;,</span>
-<span class="s1">    &quot;voice&quot;: &quot;default&quot;,</span>
-<span class="s1">    &quot;input&quot;: &quot;Get the trust fund to the bank early.&quot;,</span>
-<span class="s1">    &quot;references&quot;: [{</span>
-<span class="s1">      &quot;audio_path&quot;: &quot;https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav&quot;,</span>
-<span class="s1">      &quot;text&quot;: &quot;We asked over twenty different people, and they all said it was his.&quot;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",</span>
+<span class="s1">    "voice": "default",</span>
+<span class="s1">    "input": "Get the trust fund to the bank early.",</span>
+<span class="s1">    "references": [{</span>
+<span class="s1">      "audio_path": "https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav",</span>
+<span class="s1">      "text": "We asked over twenty different people, and they all said it was his."</span>
 <span class="s1">    }],</span>
-<span class="s1">    &quot;stream&quot;: true,</span>
-<span class="s1">    &quot;response_format&quot;: &quot;pcm&quot;</span>
-<span class="s1">  }&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="s1">    "stream": true,</span>
+<span class="s1">    "response_format": "pcm"</span>
+<span class="s1">  }'</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--output<span class="w"> </span>output.pcm
 </pre></div>
 </div>
@@ -684,6 +762,11 @@ for a full Python raw PCM consumer.</p>
 streaming for both this HTTP endpoint and <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/stream</span></code> WebSocket
 sessions with <code class="docutils literal notranslate"><span class="pre">stream_audio=true</span></code>. CustomVoice and VoiceDesign remain
 non-streaming.</p>
+<p>When <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code> is omitted, Qwen3-TTS Base defaults to <code class="docutils literal notranslate"><span class="pre">8</span></code>
+codec frames for the first vocoder chunk so concurrent streams stay continuous.
+Pass a smaller value only when trading continuity for lower time-to-first-audio.
+Utterances that finish in fewer than <code class="docutils literal notranslate"><span class="pre">8</span></code> generated codec frames never reach the
+first chunk, so their audio arrives complete in a single final flush.</p>
 </section>
 </section>
 <section id="generation-parameters">
@@ -747,6 +830,10 @@ non-streaming.</p>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">stream</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
 <td><p>Stream raw PCM audio chunks</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">8</span></code> (model default when omitted)</p></td>
+<td><p>First Base streaming vocoder chunk size in codec frames. Smaller values lower TTFA but underrun more easily; <code class="docutils literal notranslate"><span class="pre">0</span></code> uses the steady stride from the start</p></td>
 </tr>
 </tbody>
 </table>
@@ -885,7 +972,11 @@ checkpoint is less prone.</p></li>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synthesizing-speech">Synthesizing Speech</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#text-only-requests">Text-only Requests</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a><ul class="nav section-nav flex-column">
@@ -933,7 +1024,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 11, 2026.
+  Last updated on Aug 18, 2026.
   <br/>
 </p>
   </div>

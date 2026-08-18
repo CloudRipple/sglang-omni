@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="_static/documentation_options.js?v=1a9ffd16"></script>
+    <script src="_static/documentation_options.js?v=0deb7d70"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/clipboard.min.js?v=a7894cd8"></script>
@@ -51,7 +51,7 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'index';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="_static/js/qwen3_omni_server_generator.js?v=94f3a115"></script>
+    <script src="_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
     <script src="_static/js/ming_omni_server_generator.js?v=694b1473"></script>
     <link rel="icon" href="_static/logo.ico"/>
     <link rel="index" title="Index" href="genindex.html" />
@@ -59,8 +59,8 @@
     <link rel="next" title="🚀 Installation" href="get_started/installation.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.1" />
-    <meta name="docbuild:last-update" content="Aug 11, 2026"/>
+  <meta name="docsearch:version" content="0.1.2" />
+    <meta name="docbuild:last-update" content="Aug 18, 2026"/>
   
     
     <script src="_static/searchtools.js"></script>
@@ -208,6 +208,7 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation.html">🚀 Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="get_started/release_notes.html">Release Notes</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
@@ -220,6 +221,7 @@
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/dots_tts.html">dots.tts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cookbook/minimax_music3.html">MiniMax Music 3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/zonos2.html">ZONOS2</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/fun_asr.html">Fun-ASR-Nano</a></li>
@@ -233,6 +235,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/tts.html">TTS Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/omni_router.html">Omni Router Usage</a></li>
@@ -511,8 +514,8 @@
 <ul class="simple">
 <li><p><strong>Multi-Stage Pipeline</strong>: Flexible framework for orchestrating preprocessing, AR engine, codec, and vocoder stages across processes and GPUs.</p></li>
 <li><p><strong>Native SGLang Integration</strong>: Leverages SGLang’s RadixAttention, continuous batching, and CUDA Graph optimizations for the AR backbone.</p></li>
-<li><p><strong>OpenAI-Compatible Server</strong>: Drop-in <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>, and <code class="docutils literal notranslate"><span class="pre">/v1/chat/completions</span></code> endpoints with real-time streaming support.</p></li>
-<li><p><strong>Broad Model Support</strong>: TTS (Higgs, Fish S2-Pro, Voxtral, Qwen3-TTS, MOSS-TTS / Local, Ming-Omni-TTS, dots.tts, ZONOS2), ASR (Qwen3-ASR, Fun-ASR, ARK-ASR, Whisper, MOSS-Transcribe-Diarize), Omni (Qwen3-Omni, Ming-Omni), and LLaDA2.0-Uni.</p></li>
+<li><p><strong>OpenAI-Compatible Server</strong>: Drop-in <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/translations</span></code>, and <code class="docutils literal notranslate"><span class="pre">/v1/chat/completions</span></code> endpoints with real-time streaming support.</p></li>
+<li><p><strong>Broad Model Support</strong>: TTS (Higgs, Fish S2-Pro, Voxtral, Qwen3-TTS, MOSS-TTS / Local, Ming-Omni-TTS, dots.tts, ZONOS2), Music (MiniMax Music 3), ASR (Qwen3-ASR, Fun-ASR, ARK-ASR, Whisper, MOSS-Transcribe-Diarize), Omni (Qwen3-Omni, Ming-Omni), and LLaDA2.0-Uni.</p></li>
 </ul>
 </section>
 <section id="supported-models">
@@ -566,35 +569,39 @@
 <td><p>TTS</p></td>
 <td><p>MoE TTS, 9 DAC codebooks, voice cloning</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-ASR-1.7B">Qwen/Qwen3-ASR-1.7B</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/MiniMaxAI/MiniMax-Music3">MiniMaxAI/MiniMax-Music3</a></p></td>
+<td><p>Music</p></td>
+<td><p>Text-to-music; lyrics + caption → 32 kHz stereo song</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-ASR-1.7B">Qwen/Qwen3-ASR-1.7B</a></p></td>
 <td><p>ASR</p></td>
 <td><p>Multilingual transcription with 30 language hints</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512-hf">FunAudioLLM/Fun-ASR-Nano-2512-hf</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512-hf">FunAudioLLM/Fun-ASR-Nano-2512-hf</a></p></td>
 <td><p>ASR</p></td>
 <td><p>Multilingual Fun-ASR-Nano</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/AutoArk-AI/ARK-ASR-3B">AutoArk-AI/ARK-ASR-3B</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/AutoArk-AI/ARK-ASR-3B">AutoArk-AI/ARK-ASR-3B</a></p></td>
 <td><p>ASR</p></td>
 <td><p>Multilingual ARK-ASR</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS-Team/MOSS-Transcribe-Diarize</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS-Team/MOSS-Transcribe-Diarize</a></p></td>
 <td><p>ASR</p></td>
 <td><p>Multi-speaker transcription + diarization + timestamps</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/openai/whisper-large-v3">openai/whisper-large-v3</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/openai/whisper-large-v3">openai/whisper-large-v3</a></p></td>
 <td><p>ASR</p></td>
-<td><p>Experimental Whisper route; schema served, correctness not yet validated</p></td>
+<td><p>Experimental transcription and speech-to-English translation routes; see the <a class="reference external" href="basic_usage/audio_translations.html">audio translation support matrix</a></p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct">Qwen/Qwen3-Omni-30B-A3B-Instruct</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct">Qwen/Qwen3-Omni-30B-A3B-Instruct</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Text, image, audio, video → text + audio</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-flash-omni-2.0">inclusionAI/Ming-flash-omni-2.0</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-flash-omni-2.0">inclusionAI/Ming-flash-omni-2.0</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Streaming TTS</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/LLaDA2.0-Uni">inclusionAI/LLaDA2.0-Uni</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/LLaDA2.0-Uni">inclusionAI/LLaDA2.0-Uni</a></p></td>
 <td><p>Multimodal</p></td>
 <td><p>Text + image understanding and generation</p></td>
 </tr>
@@ -605,6 +612,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation.html">🚀 Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="get_started/release_notes.html">Release Notes</a></li>
 </ul>
 </div>
@@ -619,6 +627,7 @@
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/dots_tts.html">dots.tts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cookbook/minimax_music3.html">MiniMax Music 3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/zonos2.html">ZONOS2</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/fun_asr.html">Fun-ASR-Nano</a></li>
@@ -634,6 +643,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/tts.html">TTS Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="basic_usage/omni_router.html">Omni Router Usage</a></li>
@@ -738,7 +748,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 11, 2026.
+  Last updated on Aug 18, 2026.
   <br/>
 </p>
   </div>

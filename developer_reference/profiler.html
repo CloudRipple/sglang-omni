@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=1a9ffd16"></script>
+    <script src="../_static/documentation_options.js?v=0deb7d70"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -51,7 +51,7 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'developer_reference/profiler';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="../_static/js/qwen3_omni_server_generator.js?v=94f3a115"></script>
+    <script src="../_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
     <script src="../_static/js/ming_omni_server_generator.js?v=694b1473"></script>
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
@@ -60,8 +60,8 @@
     <link rel="prev" title="Reference Encode Service" href="reference_encode_service.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.1" />
-    <meta name="docbuild:last-update" content="Aug 11, 2026"/>
+  <meta name="docsearch:version" content="0.1.2" />
+    <meta name="docbuild:last-update" content="Aug 18, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -207,6 +207,7 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/release_notes.html">Release Notes</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
@@ -219,6 +220,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts_local.html">MOSS-TTS-Local</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/dots_tts.html">dots.tts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/minimax_music3.html">MiniMax Music 3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/zonos2.html">ZONOS2</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_asr.html">Fun-ASR-Nano</a></li>
@@ -232,6 +234,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts.html">TTS Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/omni_router.html">Omni Router Usage</a></li>
@@ -527,13 +530,13 @@ deeper kernel investigation.</p>
 <p>Every instrumentation point appends a single line of JSON to a per-process
 JSONL file. The shape:</p>
 <div class="highlight-jsonc notranslate"><div class="highlight"><pre><span></span>{
-  &quot;request_id&quot;: &quot;req-123&quot;,
-  &quot;stage&quot;: &quot;thinker&quot;,
-  &quot;event_name&quot;: &quot;scheduler_first_emit&quot;,
-  &quot;timestamp_ns&quot;: 1717000000123456789,
-  &quot;run_id&quot;: &quot;demo-run&quot;,
-  &quot;pid&quot;: 42,
-  &quot;metadata&quot;: {&quot;chunk_id&quot;: 0}
+  "request_id": "req-123",
+  "stage": "thinker",
+  "event_name": "scheduler_first_emit",
+  "timestamp_ns": 1717000000123456789,
+  "run_id": "demo-run",
+  "pid": 42,
+  "metadata": {"chunk_id": 0}
 }
 </pre></div>
 </div>
@@ -600,7 +603,7 @@ first executable prefill / extend batch is selected.</p>
 </tr>
 <tr class="row-even"><td><p>Code2Wav first audio</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">code2wav_first_audio</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">Code2WavScheduler.decode_delta</span></code> / <code class="docutils literal notranslate"><span class="pre">run_step</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Code2WavScheduler.decode_delta</span></code> / <code class="docutils literal notranslate"><span class="pre">_flush_pending</span></code> / <code class="docutils literal notranslate"><span class="pre">run_step</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p>Terminal response</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">terminal_response</span></code></p></td>
@@ -659,20 +662,30 @@ first executable prefill / extend batch is selected.</p>
 <td><p>Serial decode start: trigger, start/end/new/context/window frames, active and threshold-ready requests, inbox depth</p></td>
 </tr>
 <tr class="row-even"><td><p>Code2Wav</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">code2wav_decode_end</span></code></p></td>
-<td><p>Repeats the start metadata and adds audio samples plus execution metadata</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">code2wav_decode_launched</span></code></p></td>
+<td><p>Pipelined serial window whose vocoder work and asynchronous D2H copy have been enqueued; includes execution mode and window/new-frame counts</p></td>
 </tr>
 <tr class="row-odd"><td><p>Code2Wav</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">code2wav_decode_end</span></code></p></td>
+<td><p>Repeats start metadata and adds the current decode’s <code class="docutils literal notranslate"><span class="pre">audio_samples</span></code> plus execution metadata; output-overlap runs also include <code class="docutils literal notranslate"><span class="pre">pipelined</span></code> and the previous window’s post-EOS-scan <code class="docutils literal notranslate"><span class="pre">d2h_wait_ns</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>Code2Wav</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">code2wav_batch_start</span></code></p></td>
 <td><p>Coalesced step start: batch and bucket shape, new/window frames, active requests, inbox depth, oldest wait, fire reason, due-bucket count, and sub-batch decomposition</p></td>
 </tr>
-<tr class="row-even"><td><p>Code2Wav</p></td>
+<tr class="row-odd"><td><p>Code2Wav</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">code2wav_batch_end</span></code></p></td>
 <td><p>Repeats the start metadata and adds audio samples, execution mode, graph key, and fallback reason</p></td>
 </tr>
 </tbody>
 </table>
 </div>
+<p>Read <code class="docutils literal notranslate"><span class="pre">d2h_wait_ns</span></code> narrowly. With output overlap on, the lazy codec-EOS scan
+calls <code class="docutils literal notranslate"><span class="pre">.tolist()</span></code> on the staged frame heads, which is itself a host
+synchronization point, and it runs before <code class="docutils literal notranslate"><span class="pre">code2wav_decode_start</span></code>. So
+<code class="docutils literal notranslate"><span class="pre">d2h_wait_ns</span></code> measures only the residual wait left after that scan, not the
+whole overlap interval. Use the process-wide CUDA API trace as the load-bearing
+measurement of whether blocking synchronization was actually removed.</p>
 <p>Custom callsites can call <code class="docutils literal notranslate"><span class="pre">sglang_omni.profiler.event_recorder.emit(...)</span></code> to
 add domain-specific events. Events from inactive recorders are no-ops, so
 instrumentation sites do not need to guard against the disabled case.</p>
@@ -694,7 +707,7 @@ consulted when the caller passes <code class="docutils literal notranslate"><spa
 <p>To bind / unbind manually from your own thread:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">sglang_omni.profiler.event_recorder</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_active_stage</span><span class="p">,</span> <span class="n">reset_active_stage</span>
 
-<span class="n">token</span> <span class="o">=</span> <span class="n">set_active_stage</span><span class="p">(</span><span class="s2">&quot;my_stage&quot;</span><span class="p">)</span>
+<span class="n">token</span> <span class="o">=</span> <span class="n">set_active_stage</span><span class="p">(</span><span class="s2">"my_stage"</span><span class="p">)</span>
 <span class="k">try</span><span class="p">:</span>
     <span class="o">...</span>
 <span class="k">finally</span><span class="p">:</span>
@@ -735,8 +748,8 @@ paying for a kernel trace.</p>
 <h2>Generating reports<a class="headerlink" href="#generating-reports" title="Link to this heading">#</a></h2>
 <p>Use the views module directly:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">sglang_omni.profiler.views</span><span class="w"> </span><span class="kn">import</span> <span class="n">build_report</span>
-<span class="n">report</span> <span class="o">=</span> <span class="n">build_report</span><span class="p">(</span><span class="s2">&quot;/tmp/profiles/demo-run/events&quot;</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="n">report</span><span class="p">[</span><span class="s2">&quot;request_count&quot;</span><span class="p">],</span> <span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="p">[</span><span class="s2">&quot;stage_breakdown&quot;</span><span class="p">]))</span>
+<span class="n">report</span> <span class="o">=</span> <span class="n">build_report</span><span class="p">(</span><span class="s2">"/tmp/profiles/demo-run/events"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">report</span><span class="p">[</span><span class="s2">"request_count"</span><span class="p">],</span> <span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="p">[</span><span class="s2">"stage_breakdown"</span><span class="p">]))</span>
 </pre></div>
 </div>
 <p>…or via the CLI:</p>
@@ -834,9 +847,9 @@ multi-GB trace — only opt in when you need that specific information.</p>
 </div>
 <p>Example: record cheap events on every request without a kernel trace:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/start_request_profile<span class="w"> </span><span class="se">\</span>
-<span class="w">     </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;run_id&quot;:&quot;demo&quot;,&quot;event_dir&quot;:&quot;/tmp/profiles/demo/events&quot;}&#39;</span>
+<span class="w">     </span>-d<span class="w"> </span><span class="s1">'{"run_id":"demo","event_dir":"/tmp/profiles/demo/events"}'</span>
 <span class="c1"># … run traffic …</span>
-curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/stop_request_profile<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39;{}&#39;</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/stop_request_profile<span class="w"> </span>-d<span class="w"> </span><span class="s1">'{}'</span>
 python<span class="w"> </span>-m<span class="w"> </span>sglang_omni.profiler<span class="w"> </span>/tmp/profiles/demo/events<span class="w"> </span>--format<span class="w"> </span>table
 </pre></div>
 </div>
@@ -950,7 +963,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 11, 2026.
+  Last updated on Aug 18, 2026.
   <br/>
 </p>
   </div>
