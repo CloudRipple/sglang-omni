@@ -39,6 +39,7 @@ def _scheduler() -> OmniScheduler:
     scheduler._aborted_request_id_order = deque()
     scheduler._completed_request_ids = {}
     scheduler._pending_request_builds = {}
+    scheduler._pending_request_admissions = {}
     scheduler._backlogged_request_build_payloads = deque()
     scheduler.waiting_queue = []
     scheduler.running_batch = SimpleNamespace(reqs=[], batch_is_full=False)

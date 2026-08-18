@@ -535,8 +535,10 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
                 decode=SimpleNamespace(
                     max_bs=cuda_graph_max_bs,
                     bs=cuda_graph_bs,
-                )
+                ),
+                prefill=SimpleNamespace(backend="disabled", bs=None, max_bs=None),
             ),
+            _cuda_graph_config_locked=set(),
             **resolved_kwargs,
         )
 
@@ -560,6 +562,7 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
         gpu_id=2,
         model_runner=underlying_runner,
         model_config=SimpleNamespace(),
+        enable_prefill_input_embeds=False,
     )
 
     def fake_create_infrastructure(
@@ -702,6 +705,10 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
         return SimpleNamespace(
             model_path=model_path,
             context_length=context_length,
+            cuda_graph_config=SimpleNamespace(
+                prefill=SimpleNamespace(backend="disabled", bs=None, max_bs=None)
+            ),
+            _cuda_graph_config_locked=set(),
             **kwargs,
         )
 
@@ -726,6 +733,7 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
         gpu_id=0,
         model_runner=underlying_runner,
         model_config=SimpleNamespace(),
+        enable_prefill_input_embeds=False,
     )
 
     def fake_deferred_infrastructure(

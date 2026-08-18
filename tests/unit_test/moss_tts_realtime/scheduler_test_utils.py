@@ -137,6 +137,7 @@ def _scheduler() -> MossTTSRealtimeScheduler:
     scheduler._aborted_request_id_order = deque()
     scheduler._completed_request_ids = {}
     scheduler._pending_request_builds = {}
+    scheduler._pending_request_admissions = {}
     scheduler._backlogged_request_build_payloads = deque()
     scheduler._request_build_executor = None
     scheduler.request_build_max_pending = 0
@@ -185,6 +186,11 @@ def _scheduler() -> MossTTSRealtimeScheduler:
         delay_tokens_len=12,
     )
     scheduler.max_req_input_len = 4096
+    # Admission defaults mirror the ServerArgs used by the realtime stage.
+    # The tests exercise request construction, not queue limiting or priority
+    # scheduling, so both features are explicitly disabled here.
+    scheduler.max_queued_requests = None
+    scheduler.enable_priority_scheduling = False
     scheduler.enable_overlap = False
     scheduler.enable_async_decode = False
     scheduler.spec_algorithm = SimpleNamespace(is_none=lambda: True)

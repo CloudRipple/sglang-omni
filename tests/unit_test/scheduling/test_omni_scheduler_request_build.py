@@ -46,9 +46,17 @@ def _scheduler(
     scheduler.request_build_max_pending = max_pending if executor is not None else 0
     scheduler._request_build_backlog_limit = max_pending
     scheduler._pending_request_builds = {}
+    scheduler._pending_request_admissions = {}
     scheduler._backlogged_request_build_payloads = deque()
     scheduler._request_build_max_pending_observed = 0
     scheduler._scheduler_thread_id = threading.get_ident()
+    # These tests focus on builder/finalizer ordering. Match the production
+    # defaults explicitly so the admission policy does not become an
+    # accidental part of the fixture contract.
+    scheduler.max_queued_requests = None
+    scheduler.enable_priority_scheduling = False
+    scheduler.schedule_low_priority_values_first = False
+    scheduler.abort_on_priority_when_disabled = False
     scheduler._request_kv_capacity_error = lambda req: None
     scheduler._initialize_request_stream_state = lambda data, payload: None
     scheduler._mark_running_request_aborted = lambda request_id: False
@@ -70,6 +78,7 @@ def _request_data(request_id: str) -> SimpleNamespace:
             rid=request_id,
             origin_input_ids=array("q"),
             origin_input_ids_unpadded=array("q"),
+            priority=None,
         ),
         enforce_request_limits=False,
     )

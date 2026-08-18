@@ -133,6 +133,7 @@ def test_infrastructure_prefill_and_return_share_wrapped_cache(monkeypatch) -> N
                 init_cuda_graphs=lambda: None,
             )
             self.model_config = object()
+            self.enable_prefill_input_embeds = False
 
         @staticmethod
         def get_memory_pool() -> tuple[None, None]:
