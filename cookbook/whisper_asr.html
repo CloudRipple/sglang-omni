@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=0deb7d70"></script>
+    <script src="../_static/documentation_options.js?v=b617ff6d"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="MOSS-Transcribe-Diarize" href="moss_transcribe_diarize.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.2" />
-    <meta name="docbuild:last-update" content="Aug 18, 2026"/>
+  <meta name="docsearch:version" content="0.1.3" />
+    <meta name="docbuild:last-update" content="Aug 22, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -208,7 +208,6 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../get_started/release_notes.html">Release Notes</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="current nav bd-sidenav">
@@ -940,6 +939,13 @@ Graph. Validate the selected buckets before production use.</p></li>
 (<code class="docutils literal notranslate"><span class="pre">pre_lm_max_batch_size=8</span></code>, <code class="docutils literal notranslate"><span class="pre">request_build_max_workers=8</span></code>). Set
 <code class="docutils literal notranslate"><span class="pre">enable_pre_lm_encoder:</span> <span class="pre">false</span></code> under <code class="docutils literal notranslate"><span class="pre">runtime_overrides.asr</span></code> to run the
 encoder inside prefill again.</p></li>
+<li><p>The pre-LM encoder cache (<code class="docutils literal notranslate"><span class="pre">pre_lm_cache_max_entries=1024</span></code>) keeps its
+entries in page-locked (pinned) host memory so device-to-host and
+host-to-device copies run asynchronously on the DMA path instead of
+blocking a worker thread through a pageable bounce buffer. The whole
+budget (<code class="docutils literal notranslate"><span class="pre">entries</span> <span class="pre">×</span> <span class="pre">3.84</span> <span class="pre">MB</span></code> for large-v3, <code class="docutils literal notranslate"><span class="pre">≈3.9</span> <span class="pre">GB</span></code>) is locked at start-up
+and cannot be swapped; size container memory limits accordingly, or set
+<code class="docutils literal notranslate"><span class="pre">pre_lm_cache_pin_host_memory:</span> <span class="pre">false</span></code> to fall back to pageable memory.</p></li>
 <li><p>Prefill budget defaults to 6,144 tokens (<code class="docutils literal notranslate"><span class="pre">⌊6144/1500⌋=4</span></code>) under atomic
 admission (<code class="docutils literal notranslate"><span class="pre">chunked_prefill_size=0</span></code>). This caps LM-side prefill batching
 independently of the pre-LM encoder batch limit.</p></li>
@@ -1051,7 +1057,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 18, 2026.
+  Last updated on Aug 22, 2026.
   <br/>
 </p>
   </div>
