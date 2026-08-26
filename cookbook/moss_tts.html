@@ -51,8 +51,8 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'cookbook/moss_tts';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="../_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
-    <script src="../_static/js/ming_omni_server_generator.js?v=694b1473"></script>
+    <script src="../_static/js/qwen3_omni_server_generator.js?v=d7738e8a"></script>
+    <script src="../_static/js/ming_omni_server_generator.js?v=7979a72f"></script>
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.3" />
-    <meta name="docbuild:last-update" content="Aug 25, 2026"/>
+    <meta name="docbuild:last-update" content="Aug 26, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -250,6 +250,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/apiserver_design.html">API Server Design</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/pipeline.html">Pipeline Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/config.html">Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/adding_parameters.html">Adding a Parameter</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/communication.html">Communication</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
@@ -570,9 +571,13 @@ download the model (public, no token required):</p>
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
-<p>The default model-specific layout keeps the FP32 reference encoder on CPU and
-loads the GPU vocoder in BF16. This removes one codec copy from GPU and halves
-the parameter memory of the remaining codec.</p>
+<p>The default model-specific layout places the repository-local encoder and
+vocoder components on the configured pipeline GPU. The encoder and decoder
+weights materialize in BF16 according to <code class="docutils literal notranslate"><span class="pre">compute_dtype</span></code>; the quantizers and
+explicit FP32 norms remain in FP32. Each stage constructs only the codec
+components it uses instead of loading a complete codec copy.</p>
+<p>The bounded 24 GB and 32 GB configurations explicitly move preprocessing to
+CPU. They retain BF16 compute unless <code class="docutils literal notranslate"><span class="pre">compute_dtype</span></code> is overridden.</p>
 <p>For the bounded 32 GB qualification layout, use:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-path<span class="w"> </span>OpenMOSS-Team/MOSS-TTS-v1.5<span class="w"> </span><span class="se">\</span>
@@ -598,7 +603,7 @@ reference-less synthesis, streaming, cancellation, and recovery on one RTX
 requested <code class="docutils literal notranslate"><span class="pre">max_total_tokens:</span> <span class="pre">8192</span></code>. Treat this as a concurrency-1,
 CUDA-Graph-cap-1 qualification point, not a broader 24 GB capacity claim.</p>
 <p>Both policies can be changed explicitly through the preprocessing/vocoder
-<code class="docutils literal notranslate"><span class="pre">runtime_overrides</span></code> entries when profiling another layout. Explicit <code class="docutils literal notranslate"><span class="pre">device</span></code>
+stages’ <code class="docutils literal notranslate"><span class="pre">factory.*</span></code> entries when profiling another layout. Explicit <code class="docutils literal notranslate"><span class="pre">device</span></code>
 values take precedence over the GPU selected by stage placement.</p>
 </section>
 <section id="synthesizing-speech">
@@ -978,7 +983,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 25, 2026.
+  Last updated on Aug 26, 2026.
   <br/>
 </p>
   </div>
