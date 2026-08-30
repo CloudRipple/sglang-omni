@@ -213,6 +213,63 @@ def test_mixed_rate_batch_parks_only_starved_request_before_upstream(
     assert scheduler._park_total == 1
 
 
+def test_update_running_batch_resyncs_output_ids_after_merge(monkeypatch) -> None:
+    """Regression: a post-prefill merge realigns batch.reqs without touching the
+    scheduler-owned per-row output-id tensor, so a request merged into the
+    running batch read a misaligned id and failed row materialization. The
+    tensor must be resynced from request state before parking/materializing."""
+    scheduler = _scheduler()
+    req_a, _, _ = _decode_request(
+        token_ids=tuple(range(13)),
+        input_done=False,
+        request_id="request-a",
+        turn_id="turn-a",
+        req_pool_idx=5,
+    )
+    req_b, _, _ = _decode_request(
+        token_ids=tuple(range(13)),
+        input_done=False,
+        request_id="request-b",
+        turn_id="turn-b",
+        req_pool_idx=6,
+    )
+    batch = _AlignedDecodeBatch([req_a, req_b])
+    # Stale merge window: only the first row's id is present in the tensor.
+    batch.output_ids = batch.output_ids[:1].clone()
+
+    hook_calls: list[tuple[str, tuple[int, ...]]] = []
+    scheduler._model_runner = SimpleNamespace(
+        on_realtime_row_materialized=lambda request, materialized: hook_calls.append(
+            (request.request_id, materialized.row)
+        )
+    )
+    relayed: list[tuple[list[int], list[int]]] = []
+    scheduler.future_map = SimpleNamespace(
+        stash=lambda indices, payload: relayed.append(
+            (indices.tolist(), payload.bonus_tokens.tolist())
+        )
+    )
+    upstream_calls: list[Any] = []
+
+    def _upstream(owner, candidate):
+        upstream_calls.append(candidate)
+        return candidate
+
+    monkeypatch.setattr(scheduler_module._Upstream, "update_running_batch", _upstream)
+
+    assert scheduler.update_running_batch(batch) is batch
+
+    expected_keys = [
+        build_moss_tts_realtime_row_cache_key((12, *range(1, 17)))
+        for _ in (req_a, req_b)
+    ]
+    assert batch.output_ids.tolist() == expected_keys
+    assert [int(req.output_ids[-1]) for req in (req_a, req_b)] == expected_keys
+    assert [call[0] for call in hook_calls] == ["request-a", "request-b"]
+    assert len(relayed) == 2
+    assert upstream_calls == [batch]
+
+
 def test_materialization_failure_detaches_only_bad_runnable_request(
     monkeypatch,
 ) -> None:

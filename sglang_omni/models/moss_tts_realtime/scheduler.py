@@ -1755,6 +1755,11 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                     self._parked_input[req.rid] = record
                     committed.append((req, turn))
                 batch.filter_batch(keep_indices=keep_indices)
+                if batch.reqs:
+                    # filter_batch knows nothing about the scheduler-owned
+                    # output-id tensor; realign it for the materialization step
+                    # that follows parking.
+                    self._resync_batch_output_ids(batch)
             except Exception as exc:
                 for req, turn in committed:
                     self._parked_input.pop(req.rid, None)
@@ -2889,6 +2894,21 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             except Exception as exc:
                 raise _RealtimeMaterializationFailure(req.rid, exc) from exc
 
+    @staticmethod
+    def _resync_batch_output_ids(batch: Any) -> None:
+        # ``output_ids`` is the scheduler-owned per-row token tensor the model
+        # runner rewrites after each decode step. Upstream merge_batch /
+        # filter_batch realign reqs/req_pool_indices/seq_lens but know nothing
+        # about this custom attribute, so rows merged in after a prefill batch
+        # left it shorter than batch.reqs and row materialization read
+        # misaligned ids. Rebuild it from each request's last output id -- the
+        # value every row invariant below already asserts against.
+        batch.output_ids = torch.tensor(
+            [int(req.output_ids[-1]) for req in batch.reqs],
+            dtype=torch.int64,
+            device=batch.req_pool_indices.device,
+        )
+
     def update_running_batch(self, batch: Any) -> Any:
         initial_bs = len(batch.reqs)
         batch.filter_batch()
@@ -2896,6 +2916,7 @@ class MossTTSRealtimeScheduler(OmniScheduler):
             batch.batch_is_full = False
         if not batch.reqs:
             return batch
+        self._resync_batch_output_ids(batch)
         try:
             self._park_starved_requests(batch)
         except _RealtimeMaterializationFailure:
@@ -2944,6 +2965,10 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 index for index, req in enumerate(batch.reqs) if req.rid != request_id
             ]
             batch.filter_batch(keep_indices=keep_indices)
+            if batch.reqs:
+                # Keep the scheduler-owned output-id tensor aligned for the next
+                # wake merge: upstream filtering does not touch it.
+                self._resync_batch_output_ids(batch)
             batch.batch_is_full = False
             removed = True
         return removed

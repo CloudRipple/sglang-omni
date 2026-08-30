@@ -87,7 +87,9 @@ class _AlignedDecodeBatch:
         self.seq_lens = self.seq_lens[index_t]
         self.seq_lens_cpu = self.seq_lens_cpu[index_t]
         self.orig_seq_lens = self.orig_seq_lens[index_t]
-        self.output_ids = self.output_ids[index_t]
+        # output_ids intentionally not sliced: upstream filter_batch knows
+        # nothing about this scheduler-owned extension; update_running_batch
+        # resyncs it from request state after filtering.
         self.seq_lens_sum = int(self.seq_lens.sum().item())
 
     def merge_batch(self, other: _AlignedDecodeBatch) -> None:
@@ -98,7 +100,8 @@ class _AlignedDecodeBatch:
         self.seq_lens = torch.cat([self.seq_lens, other.seq_lens])
         self.seq_lens_cpu = torch.cat([self.seq_lens_cpu, other.seq_lens_cpu])
         self.orig_seq_lens = torch.cat([self.orig_seq_lens, other.orig_seq_lens])
-        self.output_ids = torch.cat([self.output_ids, other.output_ids])
+        # See filter_batch: merging upstream batches leaves output_ids stale by
+        # design; the scheduler resyncs it on the next update_running_batch.
         self.seq_lens_sum += other.seq_lens_sum
 
     def is_empty(self) -> bool:
