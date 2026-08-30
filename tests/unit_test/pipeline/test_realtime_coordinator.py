@@ -61,6 +61,27 @@ def _coordinator(
     return coordinator
 
 
+def test_realtime_coordinator_accepts_full_mp_runner_construction_kwargs() -> None:
+    """mp_runner hands custom coordinators the same kwargs as Coordinator."""
+    from sglang_omni.config.topology import LogicalProcessPlan
+    from sglang_omni.pipeline.replicas import ReplicaTopology
+
+    coordinator = RealtimeCoordinator(
+        completion_endpoint="inproc://complete",
+        abort_endpoint="inproc://abort",
+        entry_stage="preprocessing",
+        terminal_stages=["vocoder"],
+        terminal_stages_resolver=None,
+        replica_topology=ReplicaTopology(),
+        logical_process_plan=LogicalProcessPlan(processes=(), stage_to_process={}),
+        binding_policy=None,
+        max_in_flight=4,
+    )
+
+    assert coordinator.entry_stage == "preprocessing"
+    assert coordinator.max_in_flight == 4
+
+
 async def _open_realtime(
     coordinator: RealtimeCoordinator,
     request_id: str = "request-1",

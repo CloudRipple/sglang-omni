@@ -215,8 +215,13 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
 
     def customize_server_args(self, server_args: Any) -> None:
         from sglang_omni.utils.gpu_memory import format_bytes_gib
+        from sglang_omni.vendor.sglang.server_args import override_server_args
 
-        server_args.disable_overlap_schedule = True
+        override_server_args(
+            server_args,
+            "sglang_omni.moss_tts_realtime.disable_overlap_schedule",
+            disable_overlap_schedule=True,
+        )
         logger.info(
             "MOSS-TTS-Realtime SGLang startup: gpu_id=%s "
             "total_gpu_memory_fraction=%s minimum_codec_mem_reserve=%s "

@@ -9,7 +9,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+from sglang_omni.config.topology import LogicalProcessPlan
 from sglang_omni.pipeline.coordinator import Coordinator
+from sglang_omni.pipeline.replicas import BindingPolicy, ReplicaTopology
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import (
     AbortMessage,
@@ -162,6 +164,9 @@ class RealtimeCoordinator(Coordinator):
         terminal_stages_resolver: (
             Callable[[OmniRequest], list[str] | None] | None
         ) = None,
+        replica_topology: ReplicaTopology | None = None,
+        logical_process_plan: LogicalProcessPlan | None = None,
+        binding_policy: BindingPolicy | None = None,
         max_in_flight: int | None = None,
     ) -> None:
         super().__init__(
@@ -170,6 +175,9 @@ class RealtimeCoordinator(Coordinator):
             entry_stage=entry_stage,
             terminal_stages=terminal_stages,
             terminal_stages_resolver=terminal_stages_resolver,
+            replica_topology=replica_topology,
+            logical_process_plan=logical_process_plan,
+            binding_policy=binding_policy,
             max_in_flight=max_in_flight,
         )
         self._realtime_requests: dict[str, _RealtimeRequestContext] = {}
