@@ -8,17 +8,20 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from sglang_omni.config import (
+    EngineArgs,
+    EngineStageConfig,
+    FactoryArgs,
     PipelineConfig,
-    SGLangServerArgsConfig,
     StageConfig,
-    StageResourceConfig,
-    StageRuntimeConfig,
 )
 
 _PKG = "sglang_omni.models.moss_tts_realtime"
 
 DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
 
+# Colocated layouts budget the single pipeline process through the engine
+# stage's gpu_memory_fraction; the engine derives its codec memory reserve from
+# that budget (see engine_builder._derive_colocated_codec_memory_budget).
 _COLOCATED_TOTAL_GPU_MEMORY_FRACTION = 0.90
 _AR_MEM_FRACTION_STATIC = 0.85
 _REF_AUDIO_CACHE_MAX_ITEMS = 8192
@@ -77,34 +80,26 @@ class MossTTSRealtimeResourceLimits(BaseModel):
 
 
 def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
-    tts_engine_runtime = StageRuntimeConfig(
-        resources=StageResourceConfig(
-            total_gpu_memory_fraction=(
-                _COLOCATED_TOTAL_GPU_MEMORY_FRACTION if colocated else None
-            )
-        ),
-        sglang_server_args=SGLangServerArgsConfig(
-            mem_fraction_static=None if colocated else _AR_MEM_FRACTION_STATIC
-        ),
-    )
-    tts_engine_args: dict[str, Any] = {"dtype": "bfloat16"}
-
     return [
         StageConfig(
             name="preprocessing",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-            factory_args={"device": codec_device},
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory=FactoryArgs(device=codec_device),
             gpu=0,
             next="tts_engine",
         ),
-        StageConfig(
+        EngineStageConfig(
             name="tts_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            factory_args=tts_engine_args,
-            runtime=tts_engine_runtime,
-            runtime_arg_map={"max_seq_len": "max_seq_len"},
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
+            engine=EngineArgs(
+                mem_fraction_static=None if colocated else _AR_MEM_FRACTION_STATIC
+            ),
+            gpu_memory_fraction=(
+                _COLOCATED_TOTAL_GPU_MEMORY_FRACTION if colocated else None
+            ),
             gpu=0,
             next="vocoder",
             stream_to=["vocoder"],
@@ -113,8 +108,8 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
         StageConfig(
             name="vocoder",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
-            factory_args={"device": codec_device, "dtype": "bfloat16"},
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
+            factory=FactoryArgs(device=codec_device),
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,
@@ -135,17 +130,9 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
     )
     requires_model_capabilities: ClassVar[bool] = True
 
-    @classmethod
-    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": "tts_engine"}
-
-    @classmethod
-    def talker_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": "tts_engine"}
-
-    @classmethod
-    def generation_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"generation": "tts_engine"}
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "tts_engine": EngineStageConfig,
+    }
 
     codec_model_path: str = DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
     realtime_input_stage: str = "tts_engine"
@@ -162,6 +149,30 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
     stages: list[StageConfig] = Field(
         default_factory=lambda: _stages(codec_device="cuda:0", colocated=True)
     )
+
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
+        if stage_name == "preprocessing":
+            return {
+                "codec_model_path": self.codec_model_path,
+                "ref_audio_cache": self.ref_audio_cache,
+                "ref_audio_cache_max_items": self.ref_audio_cache_max_items,
+                "ref_audio_cache_max_bytes": self.ref_audio_cache_max_bytes,
+            }
+        if stage_name == "tts_engine":
+            return {
+                "codec_model_path": self.codec_model_path,
+                **self.limits.model_dump(),
+            }
+        if stage_name == "vocoder":
+            return {
+                "codec_model_path": self.codec_model_path,
+                "stream_slots": self.limits.max_active_turns,
+                "cuda_graph": self.cuda_graph,
+                "cuda_graph_frames": self.cuda_graph_frames,
+                "cuda_graph_min_free_gb": self.cuda_graph_min_free_gb,
+                "dtype": self.vocoder_dtype,
+            }
+        return {}
 
     def model_post_init(self, __context: Any = None) -> None:
         super().model_post_init(__context)
@@ -203,49 +214,6 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
             raise ValueError(
                 "realtime_input_stage must accept updates before its ordinary payload"
             )
-
-        limit_args = self.limits.model_dump()
-        for stage in self.stages:
-            if stage.factory.endswith("create_preprocessing_executor"):
-                stage.factory_args["codec_model_path"] = self.codec_model_path
-                stage.factory_args.setdefault("ref_audio_cache", self.ref_audio_cache)
-                stage.factory_args.setdefault(
-                    "ref_audio_cache_max_items", self.ref_audio_cache_max_items
-                )
-                stage.factory_args.setdefault(
-                    "ref_audio_cache_max_bytes", self.ref_audio_cache_max_bytes
-                )
-            elif stage.factory.endswith("create_sglang_tts_engine_executor"):
-                stage.factory_args["codec_model_path"] = self.codec_model_path
-                for key in (
-                    "max_session_rows",
-                    "max_held_kv_tokens",
-                    "codec_slots",
-                    "max_turn_frames",
-                ):
-                    stage.factory_args.pop(key, None)
-                for key in (
-                    "max_sessions",
-                    "max_held_sessions",
-                    "max_active_turns",
-                    "max_pending_text_tokens",
-                    "max_pending_text_bytes",
-                    "max_input_updates",
-                    "terminal_tombstone_limit",
-                    "input_idle_timeout_s",
-                    "turn_timeout_s",
-                    "session_idle_ttl_s",
-                ):
-                    stage.factory_args[key] = limit_args[key]
-            elif stage.factory.endswith("create_vocoder_executor"):
-                stage.factory_args["codec_model_path"] = self.codec_model_path
-                stage.factory_args["stream_slots"] = self.limits.max_active_turns
-                stage.factory_args["cuda_graph"] = self.cuda_graph
-                stage.factory_args["cuda_graph_frames"] = self.cuda_graph_frames
-                stage.factory_args["cuda_graph_min_free_gb"] = (
-                    self.cuda_graph_min_free_gb
-                )
-                stage.factory_args["dtype"] = self.vocoder_dtype
 
     def supports_uploaded_voice_references(self) -> bool:
         return True

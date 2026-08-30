@@ -528,7 +528,7 @@ def test_active_realtime_session_close_defers_until_finish_abort(monkeypatch) ->
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_server_args",
+        "get_serving",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()
@@ -625,7 +625,7 @@ def test_stop_cleans_waiting_running_parked_and_held_sessions_once(monkeypatch) 
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_server_args",
+        "get_serving",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()

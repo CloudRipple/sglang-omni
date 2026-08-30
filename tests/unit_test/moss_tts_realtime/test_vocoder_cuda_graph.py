@@ -20,7 +20,7 @@ from sglang_omni.models.moss_tts_realtime.vocoder_decoder import (
     configure_moss_tts_realtime_vocoder_decoder,
 )
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.accelerator
 
 CODEC_GLOB = (
     "/opt/scratch/cache/hf/hub/models--OpenMOSS-Team--MOSS-Audio-Tokenizer/snapshots/*"

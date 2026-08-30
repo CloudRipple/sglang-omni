@@ -197,7 +197,7 @@ def _scheduler() -> MossTTSRealtimeScheduler:
     scheduler.inbox = Queue()
     scheduler.outbox = Queue()
     scheduler.is_entry_rank = True
-    scheduler.model_worker = SimpleNamespace()
+    scheduler.model_worker = SimpleNamespace(model_info=lambda: {})
     scheduler.tp_rank = 0
     scheduler.tp_size = 1
     scheduler._engine_paused = False

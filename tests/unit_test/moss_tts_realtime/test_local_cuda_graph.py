@@ -149,7 +149,7 @@ def test_local_graph_replay_failure_disables_future_replays() -> None:
     assert snapshot["local_cuda_graph_disabled"] == 1
 
 
-@pytest.mark.gpu
+@pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_local_compute_graph_is_logit_exact() -> None:
     torch.manual_seed(17)

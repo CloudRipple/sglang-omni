@@ -462,20 +462,22 @@ def test_wake_batch_rebuild_matches_installed_schedule_batch_contract(
     from sglang.srt.sampling import sampling_batch_info as sampling_batch_info_module
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
-    global_args = SimpleNamespace(
-        speculative_algorithm=None,
-        enable_deterministic_inference=False,
-        enable_custom_logit_processor=False,
-    )
-    monkeypatch.setattr(
-        schedule_batch_module,
-        "get_server_args",
-        lambda: global_args,
+    # sglang 0.5.18 reads deterministic/logit-processor toggles off the exec
+    # config bag, and Req.is_prefill_only reads the spec bag; init_new takes
+    # spec_algorithm as a parameter.
+    exec_bag = SimpleNamespace(
+        deterministic=SimpleNamespace(enable_deterministic_inference=False),
+        features=SimpleNamespace(enable_custom_logit_processor=False),
     )
     monkeypatch.setattr(
         sampling_batch_info_module,
-        "get_server_args",
-        lambda: global_args,
+        "get_exec",
+        lambda: exec_bag,
+    )
+    monkeypatch.setattr(
+        schedule_batch_module,
+        "get_spec",
+        lambda: SimpleNamespace(speculative_algorithm=None),
     )
 
     scheduler = _scheduler()

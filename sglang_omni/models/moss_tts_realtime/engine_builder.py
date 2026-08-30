@@ -320,8 +320,6 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
         token_to_kv_pool_allocator: Any,
         server_args: Any,
         model_config: Any,
-        prefill_manager: Any,
-        decode_manager: Any,
         model_runner: Any,
         request_builder: Any,
         result_adapter: Any,
@@ -337,12 +335,11 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
             server_args=server_args,
             model_config=model_config,
-            prefill_manager=prefill_manager,
-            decode_manager=decode_manager,
             model_runner=model_runner,
             request_builder=request_builder,
             result_adapter=result_adapter,
             abort_callback=self.make_abort_callback(),
+            request_finished_callback=self.make_request_finished_callback(),
             **self.extra_scheduler_kwargs(),
         )
 

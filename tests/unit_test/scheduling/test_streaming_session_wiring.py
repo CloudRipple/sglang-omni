@@ -49,7 +49,6 @@ def _compat_server_args(*, enable_streaming_session: bool) -> SimpleNamespace:
 def _compat_scheduler(tree_cache: Any) -> OmniScheduler:
     scheduler = object.__new__(OmniScheduler)
     scheduler.tree_cache = tree_cache
-    scheduler.prefill_manager = None
     scheduler.device = torch.device("cpu")
     return scheduler
 
@@ -111,7 +110,7 @@ def test_tree_cache_does_not_wrap_native_streaming_cache(monkeypatch) -> None:
     assert isinstance(tree_cache, NativeStreamingCache)
 
 
-def test_infrastructure_prefill_and_return_share_wrapped_cache(monkeypatch) -> None:
+def test_infrastructure_returns_session_wrapped_cache(monkeypatch) -> None:
     from sglang_omni.model_runner import model_worker as model_worker_module
 
     class FakeWorker:
@@ -151,11 +150,14 @@ def test_infrastructure_prefill_and_return_share_wrapped_cache(monkeypatch) -> N
         gpu_id=0,
     )
 
-    tree_cache = infrastructure[1]
-    prefill_manager = infrastructure[4]
+    # The prefill/decode managers the 7-tuple used to expose are gone: the
+    # scheduler keeps the wrapped cache through its own session controller
+    # (covered by test_enabled_scheduler_builds_real_controller_on_same_cache).
+    model_worker, tree_cache, req_pool, kv_pool, model_config = infrastructure
     assert isinstance(tree_cache, StreamingSession)
-    assert prefill_manager.tree_cache is tree_cache
-    assert len(infrastructure) == 7
+    assert req_pool is None
+    assert kv_pool is None
+    assert model_config is model_worker.model_config
 
 
 def test_enabled_scheduler_builds_real_controller_on_same_cache() -> None:

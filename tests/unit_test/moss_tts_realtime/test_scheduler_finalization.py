@@ -535,7 +535,7 @@ def test_turn_timeout_cleans_every_scheduler_owned_location_once(
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_server_args",
+        "get_serving",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()
@@ -733,7 +733,7 @@ def test_parked_cleanup_recovers_after_transient_kv_release_failure(
 
     monkeypatch.setattr(
         schedule_batch_module,
-        "get_server_args",
+        "get_serving",
         lambda: SimpleNamespace(strip_thinking_cache=False),
     )
     scheduler = _scheduler()

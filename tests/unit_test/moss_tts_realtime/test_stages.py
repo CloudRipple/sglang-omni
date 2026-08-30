@@ -574,8 +574,6 @@ def test_engine_factory_builds_realtime_scheduler_and_wires_outbox(
             "tree-cache",
             "req-pool",
             "kv-pool",
-            "prefill",
-            "decode",
             worker.model_config,
         )
 
@@ -747,8 +745,6 @@ def test_engine_factory_honors_disabled_cuda_graph(monkeypatch) -> None:
                 "tree-cache",
                 "req-pool",
                 "kv-pool",
-                "prefill",
-                "decode",
                 worker.model_config,
             ),
         )

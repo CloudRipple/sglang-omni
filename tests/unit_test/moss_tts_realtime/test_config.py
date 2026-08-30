@@ -36,29 +36,25 @@ def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     assert stages["vocoder"].terminal is True
     assert stages["vocoder"].can_accept_stream_before_payload is True
 
-    assert stages["preprocessing"].factory_args["codec_model_path"] == (
+    preprocessing_args = config.stage_factory_kwargs("preprocessing")
+    assert preprocessing_args["codec_model_path"] == (
         DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
     )
-    assert stages["preprocessing"].factory_args["ref_audio_cache"] is True
-    assert stages["preprocessing"].factory_args["ref_audio_cache_max_items"] == 8192
-    assert (
-        stages["preprocessing"].factory_args["ref_audio_cache_max_bytes"]
-        == 64 * 1024 * 1024
-    )
-    assert stages["tts_engine"].factory_args["codec_model_path"] == (
-        DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
-    )
-    assert "enable_streaming_session" not in stages["tts_engine"].factory_args
-    assert not any(
-        key.startswith("local_cuda_graph") for key in stages["tts_engine"].factory_args
-    )
-    assert stages["tts_engine"].factory_args["max_active_turns"] == 16
-    assert stages["tts_engine"].factory_args["session_idle_ttl_s"] == 300.0
-    assert stages["vocoder"].factory_args["stream_slots"] == 16
-    assert stages["vocoder"].factory_args["cuda_graph"] is True
-    assert stages["vocoder"].factory_args["cuda_graph_frames"] is None
-    assert stages["vocoder"].factory_args["cuda_graph_min_free_gb"] == 3.0
-    assert stages["vocoder"].factory_args["dtype"] == "bfloat16"
+    assert preprocessing_args["ref_audio_cache"] is True
+    assert preprocessing_args["ref_audio_cache_max_items"] == 8192
+    assert preprocessing_args["ref_audio_cache_max_bytes"] == 64 * 1024 * 1024
+    engine_args = config.stage_factory_kwargs("tts_engine")
+    assert engine_args["codec_model_path"] == DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL
+    assert "enable_streaming_session" not in engine_args
+    assert not any(key.startswith("local_cuda_graph") for key in engine_args)
+    assert engine_args["max_active_turns"] == 16
+    assert engine_args["session_idle_ttl_s"] == 300.0
+    vocoder_args = config.stage_factory_kwargs("vocoder")
+    assert vocoder_args["stream_slots"] == 16
+    assert vocoder_args["cuda_graph"] is True
+    assert vocoder_args["cuda_graph_frames"] is None
+    assert vocoder_args["cuda_graph_min_free_gb"] == 3.0
+    assert vocoder_args["dtype"] == "bfloat16"
 
 
 def test_realtime_coordinator_factory_is_model_scoped() -> None:
@@ -88,17 +84,17 @@ def test_split_pipeline_targets_second_visible_gpu_for_codec() -> None:
     config = MossTTSRealtimeSplitPipelineConfig(model_path="fake-model")
     stages = {stage.name: stage for stage in config.stages}
 
-    assert stages["preprocessing"].factory_args["device"] == "cuda:1"
-    assert stages["vocoder"].factory_args["device"] == "cuda:1"
-    assert stages["tts_engine"].runtime.sglang_server_args.mem_fraction_static == 0.85
+    assert stages["preprocessing"].factory.device == "cuda:1"
+    assert stages["vocoder"].factory.device == "cuda:1"
+    assert stages["tts_engine"].engine.mem_fraction_static == 0.85
 
 
 def test_pipeline_config_round_trip_and_defaults_are_independent() -> None:
     first = MossTTSRealtimePipelineConfig(model_path="fake-model")
     second = MossTTSRealtimePipelineConfig(model_path="fake-model")
-    first.stages[0].factory_args["test_only"] = True
+    first.stages[0].factory.device = "test-only"
 
-    assert "test_only" not in second.stages[0].factory_args
+    assert second.stages[0].factory.device == "cuda:0"
 
     restored = MossTTSRealtimePipelineConfig.model_validate(first.model_dump())
     assert restored.model_dump() == first.model_dump()
@@ -110,9 +106,11 @@ def test_codec_model_path_is_shared_by_all_codec_consumers() -> None:
         codec_model_path="custom-codec",
     )
 
-    for stage in config.stages:
-        if stage.name in {"preprocessing", "tts_engine", "vocoder"}:
-            assert stage.factory_args["codec_model_path"] == "custom-codec"
+    for stage_name in ("preprocessing", "tts_engine", "vocoder"):
+        assert (
+            config.stage_factory_kwargs(stage_name)["codec_model_path"]
+            == "custom-codec"
+        )
 
 
 def test_pipeline_threads_reference_cache_settings() -> None:
@@ -122,15 +120,11 @@ def test_pipeline_threads_reference_cache_settings() -> None:
         ref_audio_cache_max_items=17,
         ref_audio_cache_max_bytes=4096,
     )
-    preprocessing = next(
-        stage
-        for stage in config.stages
-        if stage.factory.endswith("create_preprocessing_executor")
-    )
 
-    assert preprocessing.factory_args["ref_audio_cache"] is False
-    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 17
-    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 4096
+    preprocessing_args = config.stage_factory_kwargs("preprocessing")
+    assert preprocessing_args["ref_audio_cache"] is False
+    assert preprocessing_args["ref_audio_cache_max_items"] == 17
+    assert preprocessing_args["ref_audio_cache_max_bytes"] == 4096
 
 
 @pytest.mark.parametrize(
@@ -174,17 +168,14 @@ def test_pipeline_builds_model_owned_speech_websocket_handler(monkeypatch) -> No
 
 
 def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> None:
-    stages = MossTTSRealtimePipelineConfig(model_path="fake-model").stages
-    stage_by_name = {stage.name: stage for stage in stages}
-    stage_by_name["tts_engine"].factory_args.update(
-        max_sessions=999,
-        max_session_rows=999,
-        max_held_kv_tokens=999,
-        codec_slots=999,
-        max_turn_frames=999,
-        turn_timeout_s=999.0,
-    )
-    stage_by_name["vocoder"].factory_args["stream_slots"] = 999
+    """limits wire into the engine/vocoder factories through code-owned kwargs.
+
+    The wiring replaces factory signature defaults wholesale. The derived
+    session/KV keys the pre-refactor config surface exposed
+    (``max_session_rows``/``max_held_kv_tokens``/``codec_slots``/
+    ``max_turn_frames``) are gone entirely -- the limits schema rejects them
+    and no factory parameter accepts them any more.
+    """
     limits = MossTTSRealtimeResourceLimits(
         max_sessions=7,
         max_held_sessions=5,
@@ -197,25 +188,16 @@ def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> N
         turn_timeout_s=2.5,
         session_idle_ttl_s=3.5,
     )
-
-    config = MossTTSRealtimePipelineConfig(
-        model_path="fake-model",
-        limits=limits,
-        stages=stages,
-    )
-
+    config = MossTTSRealtimePipelineConfig(model_path="fake-model", limits=limits)
     stage_by_name = {stage.name: stage for stage in config.stages}
-    engine_args = stage_by_name["tts_engine"].factory_args
+
+    engine_args = resolve_stage_factory_args(stage_by_name["tts_engine"], config)
     assert "enable_streaming_session" not in engine_args
     for key, value in limits.model_dump().items():
         assert engine_args[key] == value
-    assert "max_session_rows" not in engine_args
-    assert "max_held_kv_tokens" not in engine_args
-    assert "codec_slots" not in engine_args
-    assert "max_turn_frames" not in engine_args
-    assert stage_by_name["vocoder"].factory_args["stream_slots"] == (
-        limits.max_active_turns
-    )
+
+    vocoder_args = config.stage_factory_kwargs("vocoder")
+    assert vocoder_args["stream_slots"] == limits.max_active_turns
 
 
 @pytest.mark.parametrize(
@@ -276,11 +258,11 @@ def test_pipeline_threads_codec_cuda_graph_settings() -> None:
         cuda_graph_frames=[1, 25],
         cuda_graph_min_free_gb=5.5,
     )
-    vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
 
-    assert vocoder.factory_args["cuda_graph"] is False
-    assert vocoder.factory_args["cuda_graph_frames"] == [1, 25]
-    assert vocoder.factory_args["cuda_graph_min_free_gb"] == 5.5
+    vocoder_args = config.stage_factory_kwargs("vocoder")
+    assert vocoder_args["cuda_graph"] is False
+    assert vocoder_args["cuda_graph_frames"] == [1, 25]
+    assert vocoder_args["cuda_graph_min_free_gb"] == 5.5
 
 
 def test_pipeline_threads_vocoder_dtype_setting() -> None:
@@ -288,9 +270,8 @@ def test_pipeline_threads_vocoder_dtype_setting() -> None:
         model_path="fake-model",
         vocoder_dtype="float32",
     )
-    vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
 
-    assert vocoder.factory_args["dtype"] == "float32"
+    assert config.stage_factory_kwargs("vocoder")["dtype"] == "float32"
 
 
 def test_pipeline_realtime_input_stage_must_exist_and_accept_early_updates() -> None:
@@ -307,7 +288,7 @@ def test_pipeline_realtime_input_stage_must_exist_and_accept_early_updates() -> 
                 StageConfig(
                     name="tts_engine",
                     process="pipeline",
-                    factory="fake.factory",
+                    factory_path="fake.factory",
                     terminal=True,
                 )
             ],
