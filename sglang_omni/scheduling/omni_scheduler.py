@@ -1509,7 +1509,14 @@ class OmniScheduler:
         self._emit_stream_output(sched_output, mr_output, skip_rids=skip_rids)
         return GenerationBatchResult(
             logits_output=None,
-            next_token_ids=mr_output.next_token_ids,
+            # The GPU rail has already been published through FutureMap. Use
+            # the runner's pinned copy for scheduler-side .tolist()/bookkeeping
+            # so async resolve does not reintroduce a pageable D2H sync.
+            next_token_ids=(
+                mr_output.host_token_ids
+                if mr_output.host_token_ids is not None
+                else mr_output.next_token_ids
+            ),
             can_run_cuda_graph=mr_output.can_run_cuda_graph,
         )
 

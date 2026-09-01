@@ -109,6 +109,7 @@ class StreamingVocoderBase(
         batch_compute_fn: Callable[[list[Any]], list[Any]] | None = None,
         max_batch_size: int = 1,
         max_batch_wait_ms: int = 0,
+        stream_chunk_batch_wait_ms: float = 0.0,
         request_cost_fn: Callable[[Any], int] | None = None,
         max_batch_cost: int | None = None,
         abort_callback: Callable[[str], None] | None = None,
@@ -124,6 +125,7 @@ class StreamingVocoderBase(
             batch_compute_fn=batch_compute_fn,
             max_batch_size=max_batch_size,
             max_batch_wait_ms=max_batch_wait_ms,
+            stream_chunk_batch_wait_ms=stream_chunk_batch_wait_ms,
             request_cost_fn=request_cost_fn,
             max_batch_cost=max_batch_cost,
             abort_callback=abort_callback,
@@ -247,6 +249,51 @@ class StreamingVocoderBase(
         )
         self._record_completed_stream_request_id(request_id)
         return messages
+
+    def on_stream_done_batch(
+        self, request_ids: list[str]
+    ) -> dict[str, list[OutgoingMessage]]:
+        items: list[tuple[str, StreamStateT]] = []
+        for request_id in request_ids:
+            state = self._get_or_create_stream_state(request_id)
+            if state is None:
+                raise RuntimeError(
+                    f"missing streaming state while finishing {request_id!r}"
+                )
+            items.append((request_id, state))
+        waveforms = self.decode_final_batch(items)
+        outputs: dict[str, list[OutgoingMessage]] = {}
+        for request_id, state in items:
+            payload = self._stream_payloads[request_id]
+            waveform = waveforms.get(request_id)
+            if waveform is None and not self._stream_has_emitted(request_id):
+                waveform = self.fallback_full_decode(request_id, payload, state)
+            messages: list[OutgoingMessage] = []
+            if waveform is not None:
+                self._mark_stream_emitted(request_id)
+                messages.append(self._stream_chunk_message(request_id, waveform))
+            messages.append(
+                OutgoingMessage(
+                    request_id=request_id,
+                    type="result",
+                    data=StagePayload(
+                        request_id=payload.request_id,
+                        request=payload.request,
+                        data=self.final_result_data(request_id, payload, state),
+                    ),
+                )
+            )
+            self._record_completed_stream_request_id(request_id)
+            outputs[request_id] = messages
+        return outputs
+
+    def decode_final_batch(
+        self, items: list[tuple[str, StreamStateT]]
+    ) -> dict[str, torch.Tensor | None]:
+        return {
+            request_id: self.decode_delta(request_id, state, is_final=True)
+            for request_id, state in items
+        }
 
     def clear_stream_state(self, request_id: str) -> None:
         self._emitted_stream_ids.discard(request_id)

@@ -4,21 +4,24 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from functools import cache
 from itertools import accumulate
 
 import torch
 import torch.nn.functional as F
 from sglang.jit_kernel.flash_attention import flash_attn_varlen_func
-
-# note (Zhang Yiyang): SGLang 0.5.16 exposes _is_fa3_supported from sglang.jit_kernel.flash_attention_v3; when upgrading SGLang, update this import if upstream moves the predicate to sglang.kernels.ops.attention.
 from sglang.jit_kernel.flash_attention_v3 import _is_fa3_supported
 from torch import nn
 
+from sglang_omni.models.moss_tts.streaming_codec import StreamingExecutionContext
 from sglang_omni.models.moss_tts.vocoder_kernels import (
     apply_exact_interleaved_rope_inplace,
+    commit_sparse_ring_kv_inplace,
+    prewrite_and_gather_sparse_ring_kv,
 )
 
 # note (Zhang Yiyang): Bound SDPA fallback memory with query chunks.
@@ -27,14 +30,21 @@ _SDPA_QUERY_CHUNK_SIZE = 512
 _LOCAL_CAUSAL_FLASH_QUERY_CHUNK_SIZE = 128
 # note (Zhang Yiyang): Use the direct local-window kernel on Hopper and newer SMs.
 _PACKED_FLASH_DIRECT_MIN_SM = 90
+# Streaming codec positions are monotonic across chunks even though the KV cache
+# is bounded.  Precompute a generous table once per transformer stage so the
+# graph replay path never rebuilds frequencies or launches sin/cos kernels.
+_STREAMING_ROPE_CACHE_POSITIONS = 16_384
+_HF_FLASH_ATTENTION_CONFIG = "flash_attention_2"
 PACKED_FLASH_ATTENTION_BACKEND = "packed_flash_attention"
-SDPA_ATTENTION_BACKEND = "sdpa"
+_SDPA_ATTENTION_BACKEND = "sdpa"
+# Public compatibility name retained for callers that selected SDPA directly.
+SDPA_ATTENTION_BACKEND = _SDPA_ATTENTION_BACKEND
 AUTO_ATTENTION_BACKEND = "auto"
 _SUPPORTED_ATTENTION_BACKENDS: frozenset[str] = frozenset(
     {
         AUTO_ATTENTION_BACKEND,
         PACKED_FLASH_ATTENTION_BACKEND,
-        SDPA_ATTENTION_BACKEND,
+        _SDPA_ATTENTION_BACKEND,
     }
 )
 
@@ -47,6 +57,17 @@ def validate_attention_backend(attention_backend: str) -> str:
             f"got {attention_backend!r}"
         )
     return attention_backend
+
+
+def _preferred_attention_backend(
+    attention_backend: str,
+    attention_implementation: str | None,
+) -> str:
+    if attention_backend != AUTO_ATTENTION_BACKEND:
+        return attention_backend
+    if attention_implementation == _SDPA_ATTENTION_BACKEND:
+        return _SDPA_ATTENTION_BACKEND
+    return PACKED_FLASH_ATTENTION_BACKEND
 
 
 def _packed_flash_device_unavailable_reason(device: torch.device) -> str | None:
@@ -90,7 +111,7 @@ def merge_attention_backend_resolutions(
     resolutions: Sequence[AttentionBackendResolution],
 ) -> AttentionBackendResolution:
     if not resolutions:
-        return AttentionBackendResolution(SDPA_ATTENTION_BACKEND)
+        return AttentionBackendResolution(_SDPA_ATTENTION_BACKEND)
     backends = {resolution.backend for resolution in resolutions}
     if len(backends) != 1:
         raise RuntimeError(
@@ -209,6 +230,122 @@ def _gather_local_flash_kv(
     kv_indices: torch.Tensor | None,
 ) -> torch.Tensor:
     return x if kv_indices is None else x.index_select(0, kv_indices)
+
+
+@dataclass
+class _StreamingState:
+    """Persistent per-module state used by the repository-owned codec."""
+
+    batch_size: int
+    device: torch.device
+    exec_mask: torch.Tensor = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.exec_mask = torch.ones(
+            self.batch_size,
+            device=self.device,
+            dtype=torch.bool,
+        )
+
+    def set_exec_mask(self, exec_mask: torch.Tensor) -> None:
+        if exec_mask.shape != (self.batch_size,):
+            raise ValueError(
+                "streaming exec_mask must have shape "
+                f"({self.batch_size},), got {tuple(exec_mask.shape)}"
+            )
+        self.exec_mask.copy_(exec_mask.to(device=self.device, dtype=torch.bool))
+
+    def reset(self, reset_mask: torch.Tensor) -> None:
+        if reset_mask.shape != (self.batch_size,):
+            raise ValueError(
+                "streaming reset_mask must have shape "
+                f"({self.batch_size},), got {tuple(reset_mask.shape)}"
+            )
+        reset_mask = reset_mask.to(device=self.device, dtype=torch.bool)
+        self.exec_mask.copy_(
+            torch.where(reset_mask, torch.ones_like(self.exec_mask), self.exec_mask)
+        )
+
+
+class _StreamingModule(nn.Module):
+    """Small lifecycle facade shared by codec modules with causal state."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._streaming_state: _StreamingState | None = None
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._streaming_state is not None
+
+    def _streaming_device(self) -> torch.device:
+        parameter = next(self.parameters(), None)
+        if parameter is not None:
+            return parameter.device
+        buffer = next(self.buffers(), None)
+        if buffer is not None:
+            return buffer.device
+        return torch.device("cpu")
+
+    def _init_streaming_state(self, batch_size: int) -> _StreamingState:
+        return _StreamingState(int(batch_size), self._streaming_device())
+
+    @contextmanager
+    def streaming(self, batch_size: int = 1):
+        if batch_size <= 0:
+            raise ValueError(f"streaming batch_size must be positive, got {batch_size}")
+        modules = [
+            module for module in self.modules() if isinstance(module, _StreamingModule)
+        ]
+        if any(module._streaming_state is not None for module in modules):
+            raise RuntimeError("MOSS audio tokenizer is already streaming")
+        states = [module._init_streaming_state(batch_size) for module in modules]
+        for module, state in zip(modules, states, strict=True):
+            module._streaming_state = state
+        try:
+            yield
+        finally:
+            for module in reversed(modules):
+                module._streaming_state = None
+
+    def _set_streaming_exec_mask(self, exec_mask: torch.Tensor) -> None:
+        states = [
+            module._streaming_state
+            for module in self.modules()
+            if isinstance(module, _StreamingModule)
+            and module._streaming_state is not None
+        ]
+        if not states:
+            raise RuntimeError("MOSS audio tokenizer is not streaming")
+        for state in states:
+            state.set_exec_mask(exec_mask)
+
+
+@dataclass
+class _AttentionStreamingState(_StreamingState):
+    cached_keys: torch.Tensor | None
+    cached_values: torch.Tensor | None
+    cached_positions: torch.Tensor | None
+    offset: torch.Tensor
+
+    def reset(self, reset_mask: torch.Tensor) -> None:
+        super().reset(reset_mask)
+        reset_mask = reset_mask.to(device=self.device, dtype=torch.bool)
+        self.offset.copy_(
+            torch.where(reset_mask, torch.zeros_like(self.offset), self.offset)
+        )
+        if self.cached_positions is not None:
+            self.cached_positions[reset_mask] = -1
+
+    def reset_slots(self, state_slot_ids: torch.Tensor) -> None:
+        """Reset only the persistent rows addressed by ``state_slot_ids``."""
+        if state_slot_ids.numel() == 0:
+            return
+        slots = state_slot_ids.to(device=self.device, dtype=torch.long)
+        self.offset.index_fill_(0, slots, 0)
+        self.exec_mask.index_fill_(0, slots, True)
+        if self.cached_positions is not None:
+            self.cached_positions.index_fill_(0, slots, -1)
 
 
 def _single_module(module: nn.Module, singular: str, plural: str) -> nn.Module:
@@ -470,6 +607,97 @@ def _apply_cached_packed_rope(
     return q_out, k_out
 
 
+def _apply_cached_streaming_rope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    offset: torch.Tensor,
+    *,
+    cache: MossPackedRopeCache,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply source-equivalent RoPE to dense streaming rows from a fixed table.
+
+    The regular codec implementation creates frequencies, phases, and two
+    rotation graphs for every transformer layer and every decode step.  The
+    packed cache already contains the exact FP32 table used by the reference
+    implementation, so flattening ``[B, H, T, D]`` into token-major rows lets
+    us reuse the one-kernel CUDA path.  ``offset`` remains a device tensor, which
+    keeps this helper capture-safe.
+    """
+    if q.shape != k.shape:
+        raise ValueError(
+            f"Expected k.shape == q.shape, got k={tuple(k.shape)} q={tuple(q.shape)}"
+        )
+    if q.dim() != 4:
+        raise ValueError(
+            f"streaming RoPE expects [batch, heads, time, dim], got {tuple(q.shape)}"
+        )
+    batch_size, num_heads, sequence_length, head_dim = q.shape
+    if offset.shape != (batch_size,):
+        raise ValueError(
+            f"streaming RoPE offset must have shape ({batch_size},), got "
+            f"{tuple(offset.shape)}"
+        )
+    if sequence_length == 0:
+        return q, k
+    if head_dim <= 0 or head_dim % 2:
+        raise ValueError(f"RoPE requires an even head_dim, got {head_dim}")
+
+    # Keep the table address and shape fixed over all graph replays.  The local
+    # codec's serving contract bounds the generated sequence below this limit;
+    # fail loudly rather than silently wrapping positions if a caller violates
+    # that contract.
+    max_positions = _STREAMING_ROPE_CACHE_POSITIONS
+    if offset.device.type != "cuda":
+        max_offset = int(offset.max().item())
+        if max_offset + sequence_length > max_positions:
+            raise ValueError(
+                "streaming RoPE position exceeds the precomputed table: "
+                f"required={max_offset + sequence_length}, "
+                f"capacity={max_positions}"
+            )
+    cos_sin_cache = cache.get_cos_sin_cache(
+        device=q.device,
+        head_dim=head_dim,
+        max_positions=max_positions,
+    )
+    position_ids = (
+        offset.view(batch_size, 1)
+        + torch.arange(sequence_length, device=q.device, dtype=torch.long).view(1, -1)
+    ).reshape(-1)
+    # The exact Triton kernel requires token-major contiguous rows.  This copy
+    # replaces the much larger FP32 intermediate tensors produced by the source
+    # rotation and is captured once for each graph shape.
+    q_token_major = q.transpose(1, 2).reshape(-1, num_heads, head_dim).contiguous()
+    k_token_major = k.transpose(1, 2).reshape(-1, num_heads, head_dim).contiguous()
+    if apply_exact_interleaved_rope_inplace(
+        q_token_major,
+        k_token_major,
+        cos_sin_cache,
+        position_ids,
+    ):
+        return (
+            q_token_major.view(batch_size, sequence_length, num_heads, head_dim)
+            .transpose(1, 2),
+            k_token_major.view(batch_size, sequence_length, num_heads, head_dim)
+            .transpose(1, 2),
+        )
+    rotated_q, rotated_k = _apply_cached_packed_rope(
+        q_token_major,
+        k_token_major,
+        position_ids,
+        max_positions=max_positions,
+        cache=cache,
+    )
+    return (
+        rotated_q.view(batch_size, sequence_length, num_heads, head_dim).transpose(
+            1, 2
+        ),
+        rotated_k.view(batch_size, sequence_length, num_heads, head_dim).transpose(
+            1, 2
+        ),
+    )
+
+
 def _run_query_chunked_sdpa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -601,7 +829,7 @@ def _merge_attention_heads(output: torch.Tensor, embed_dim: int) -> torch.Tensor
     return output.reshape(*output.shape[:-2], embed_dim)
 
 
-class MossAudioTokenizerAttention(nn.Module):
+class MossAudioTokenizerAttention(_StreamingModule):
     """MOSS-Audio-Tokenizer local-causal attention over codec frames."""
 
     def __init__(
@@ -614,6 +842,7 @@ class MossAudioTokenizerAttention(nn.Module):
         causal: bool,
         context: int | None,
         rope: nn.Module | None,
+        attention_implementation: str | None = None,
         attention_backend: str = AUTO_ATTENTION_BACKEND,
         packed_rope_cache: MossPackedRopeCache | None = None,
     ) -> None:
@@ -636,11 +865,38 @@ class MossAudioTokenizerAttention(nn.Module):
         self.causal = bool(causal)
         self.context = None if context is None else int(context)
         self.rope = rope
+        if attention_implementation not in (
+            None,
+            _HF_FLASH_ATTENTION_CONFIG,
+            _SDPA_ATTENTION_BACKEND,
+        ):
+            raise ValueError(
+                "attention_implementation must be None, 'flash_attention_2', "
+                f"or 'sdpa'; got {attention_implementation!r}"
+            )
+        self.attention_implementation = attention_implementation
         self.attention_backend = validate_attention_backend(attention_backend)
         self._flash_attn_varlen = flash_attn_varlen_func
+        # Keep an immediate rollback for production experiments.  The default
+        # is the preallocated ring path; setting the variable to 0 restores the
+        # previous concat implementation without changing the public API.
+        self._streaming_ring_kv_enabled = os.environ.get(
+            "MOSS_TTS_STREAMING_RING_KV", "1"
+        ).lower() not in {"0", "false", "off", "no"}
         max_period = self.rope.max_period if self.rope is not None else 10000.0
         self._packed_rope_cache = packed_rope_cache or MossPackedRopeCache(
             max_period=max_period
+        )
+
+    def _init_streaming_state(self, batch_size: int) -> _AttentionStreamingState:
+        device = self.in_proj.weight.device
+        return _AttentionStreamingState(
+            int(batch_size),
+            device,
+            cached_keys=None,
+            cached_values=None,
+            cached_positions=None,
+            offset=torch.zeros(batch_size, device=device, dtype=torch.long),
         )
 
     @classmethod
@@ -659,6 +915,11 @@ class MossAudioTokenizerAttention(nn.Module):
             causal=bool(module.causal),
             context=module.context,
             rope=module.rope,
+            attention_implementation=getattr(
+                module,
+                "attention_implementation",
+                None,
+            ),
             attention_backend=attention_backend,
             packed_rope_cache=packed_rope_cache,
         )
@@ -668,8 +929,12 @@ class MossAudioTokenizerAttention(nn.Module):
         device: torch.device,
         dtype: torch.dtype | None,
     ) -> AttentionBackendResolution:
-        if self.attention_backend == SDPA_ATTENTION_BACKEND:
-            return AttentionBackendResolution(SDPA_ATTENTION_BACKEND)
+        preferred = _preferred_attention_backend(
+            self.attention_backend,
+            self.attention_implementation,
+        )
+        if preferred == _SDPA_ATTENTION_BACKEND:
+            return AttentionBackendResolution(_SDPA_ATTENTION_BACKEND)
 
         unavailable_reason = self._packed_flash_unavailable_reason(device, dtype)
         if unavailable_reason is None:
@@ -682,7 +947,7 @@ class MossAudioTokenizerAttention(nn.Module):
                 f"{unavailable_reason}"
             )
         return AttentionBackendResolution(
-            SDPA_ATTENTION_BACKEND,
+            _SDPA_ATTENTION_BACKEND,
             fallback_reason=unavailable_reason,
         )
 
@@ -700,7 +965,13 @@ class MossAudioTokenizerAttention(nn.Module):
         device: torch.device,
         dtype: torch.dtype | None,
     ) -> bool:
-        if self.attention_backend == SDPA_ATTENTION_BACKEND:
+        if (
+            _preferred_attention_backend(
+                self.attention_backend,
+                self.attention_implementation,
+            )
+            != PACKED_FLASH_ATTENTION_BACKEND
+        ):
             return False
         return self._packed_flash_unavailable_reason(device, dtype) is None
 
@@ -749,7 +1020,34 @@ class MossAudioTokenizerAttention(nn.Module):
         position_ids: torch.Tensor | None = None,
         input_lengths: torch.Tensor | None = None,
         local_flash_plan: _LocalCausalFlashPlan | None = None,
+        execution_context: StreamingExecutionContext | None = None,
     ) -> torch.Tensor:
+        state = self._streaming_state
+        if state is not None:
+            if not isinstance(state, _AttentionStreamingState):
+                raise RuntimeError("invalid MOSS attention streaming state")
+            if query.dim() != 3:
+                raise ValueError(
+                    "streaming attention expects a 3D tensor, "
+                    f"got {tuple(query.shape)}"
+                )
+            if execution_context is not None:
+                return self._forward_streaming_indexed(
+                    query,
+                    state,
+                    execution_context,
+                )
+            backend = self.resolve_attention_backend(
+                query.device,
+                self.get_backend_dtype(query),
+            ).backend
+            if backend == PACKED_FLASH_ATTENTION_BACKEND:
+                return self._forward_streaming_flash(query, state)
+            return self._forward_streaming_sdpa(query, state)
+        if execution_context is not None:
+            raise RuntimeError(
+                "streaming execution context requires an active attention state"
+            )
         backend = self.resolve_attention_backend(
             query.device,
             self.get_backend_dtype(query),
@@ -812,6 +1110,814 @@ class MossAudioTokenizerAttention(nn.Module):
                 context=self.context,
             )
         return self.out_proj(_merge_attention_heads(output, self.embed_dim))
+
+    def _forward_streaming_indexed(
+        self,
+        x: torch.Tensor,
+        state: _AttentionStreamingState,
+        execution_context: StreamingExecutionContext,
+    ) -> torch.Tensor:
+        """Run compact rows against an indexed persistent ring KV cache."""
+        if x.dim() != 3:
+            raise ValueError(
+                "indexed streaming attention expects a 3D tensor, "
+                f"got {tuple(x.shape)}"
+            )
+        batch_size, chunk_length, _ = x.shape
+        execution_context.validate(
+            batch_size=batch_size,
+            state_capacity=state.batch_size,
+            device=x.device,
+        )
+        if chunk_length == 0:
+            return self.out_proj(x)
+        if (
+            self._streaming_ring_kv_enabled
+            and self.context is not None
+        ):
+            if chunk_length <= int(self.context):
+                return self._forward_streaming_indexed_ring(
+                    x,
+                    state,
+                    execution_context,
+                )
+        if self.context is None or chunk_length > self.context:
+            return self._forward_streaming_indexed_fallback(
+                x,
+                state,
+                execution_context,
+            )
+
+        slots = execution_context.state_slot_ids
+        valid_rows = execution_context.valid_rows
+        offsets = state.offset.index_select(0, slots)
+        q, current_k, current_v = self._project_qkv(x)
+        if self.rope is not None:
+            q, current_k = _apply_cached_streaming_rope(
+                q,
+                current_k,
+                offsets,
+                cache=self._packed_rope_cache,
+            )
+        cached_keys, cached_values, cached_positions = self._ensure_streaming_cache(
+            state,
+            state.batch_size,
+            x.device,
+            current_k.dtype,
+        )
+        row_keys_before = cached_keys.index_select(0, slots)
+        row_values_before = cached_values.index_select(0, slots)
+        row_positions_before = cached_positions.index_select(0, slots)
+        query_positions = offsets.view(-1, 1) + torch.arange(
+            chunk_length,
+            device=x.device,
+            dtype=torch.long,
+        ).view(1, -1)
+        # Keep the pre-write ring rows in the attention input.  Writing the
+        # current chunk first would evict keys still needed by the earliest
+        # query in a multi-frame chunk when T > 1.
+        all_keys = torch.cat((row_keys_before, current_k), dim=2)
+        all_values = torch.cat((row_values_before, current_v), dim=2)
+        all_positions = torch.cat((
+            row_positions_before,
+            query_positions,
+        ), dim=1)
+        position_delta = query_positions[:, :, None] - all_positions[:, None, :]
+        attention_mask = (all_positions[:, None, :] >= 0) & (position_delta >= 0)
+        attention_mask = attention_mask & (position_delta < int(self.context))
+        output = F.scaled_dot_product_attention(
+            q,
+            all_keys,
+            all_values,
+            attn_mask=attention_mask[:, None, :, :],
+            dropout_p=0.0,
+        )
+        output = output.transpose(1, 2).reshape(
+            batch_size,
+            chunk_length,
+            self.embed_dim,
+        )
+
+        # A state may have been grown by the indexed ring path before a caller
+        # switches back to the compatibility implementation.  Use the actual
+        # allocated ring width so the rollback path remains shape-consistent.
+        cache_capacity = int(cached_keys.shape[2])
+        row_keys = row_keys_before.clone()
+        row_values = row_values_before.clone()
+        write_indices = (
+            torch.arange(chunk_length, device=x.device, dtype=torch.long)
+            + offsets.view(-1, 1)
+        ) % cache_capacity
+        scatter_indices = write_indices.view(
+            batch_size, 1, chunk_length, 1
+        ).expand(-1, self.num_heads, -1, self.head_dim)
+        row_keys.scatter_(2, scatter_indices, current_k)
+        row_values.scatter_(2, scatter_indices, current_v)
+        new_positions = row_positions_before.scatter(
+            1,
+            write_indices,
+            query_positions,
+        )
+        valid_cache_rows = valid_rows.view(-1, 1, 1, 1)
+        row_keys = torch.where(valid_cache_rows, row_keys, row_keys_before)
+        row_values = torch.where(valid_cache_rows, row_values, row_values_before)
+        stored_positions = torch.where(
+            valid_rows.view(-1, 1),
+            new_positions,
+            row_positions_before,
+        )
+        cached_keys.index_copy_(0, slots, row_keys)
+        cached_values.index_copy_(0, slots, row_values)
+        cached_positions.index_copy_(0, slots, stored_positions)
+
+        next_offsets = torch.where(
+            valid_rows,
+            offsets + chunk_length,
+            offsets,
+        )
+        state.offset.index_copy_(0, slots, next_offsets)
+        output = self.out_proj(output)
+        return output.masked_fill(~valid_rows.view(-1, 1, 1), 0)
+
+    def _forward_streaming_indexed_ring(
+        self,
+        x: torch.Tensor,
+        state: _AttentionStreamingState,
+        execution_context: StreamingExecutionContext,
+    ) -> torch.Tensor:
+        """Run indexed streaming attention without per-step KV concatenation.
+
+        The cache owns ``context + T`` slots for the largest chunk observed by
+        the state.  Writing the current chunk before attention is safe because
+        the extra ``T`` slots prevent it from evicting the oldest key needed by
+        the first query.  Absolute positions in the ring mask future tokens
+        from the same chunk and discard the older-than-context tail.
+        """
+        batch_size, chunk_length, _ = x.shape
+        slots = execution_context.state_slot_ids
+        valid_rows = execution_context.valid_rows
+        offsets = state.offset.index_select(0, slots)
+        q, current_k, current_v = self._project_qkv(x)
+        if self.rope is not None:
+            q, current_k = _apply_cached_streaming_rope(
+                q,
+                current_k,
+                offsets,
+                cache=self._packed_rope_cache,
+            )
+
+        # Grow only when a caller changes its chunk size.  The serving graph
+        # warmup visits the largest configured T first, so replay never grows
+        # an address that was captured earlier.
+        cached_keys, cached_values, cached_positions = self._ensure_streaming_cache(
+            state,
+            state.batch_size,
+            x.device,
+            current_k.dtype,
+            cache_length=int(self.context) + chunk_length,
+        )
+        cache_capacity = int(cached_keys.shape[2])
+        write_indices = (
+            offsets.view(-1, 1)
+            + torch.arange(chunk_length, device=x.device, dtype=torch.long).view(1, -1)
+        ) % cache_capacity
+        query_positions = offsets.view(-1, 1) + torch.arange(
+            chunk_length,
+            device=x.device,
+            dtype=torch.long,
+        ).view(1, -1)
+        scatter_indices = write_indices.view(
+            batch_size, 1, chunk_length, 1
+        ).expand(-1, self.num_heads, -1, self.head_dim)
+        prewritten_rows = None
+        if execution_context.scratch_rows_are_disposable:
+            prewritten_rows = prewrite_and_gather_sparse_ring_kv(
+                cached_keys,
+                cached_values,
+                slots,
+                write_indices,
+                current_k,
+                current_v,
+            )
+        prewritten_sparse = prewritten_rows is not None
+        if prewritten_rows is None:
+            prewritten_sparse = (
+                execution_context.scratch_rows_are_disposable
+                and commit_sparse_ring_kv_inplace(
+                    cached_keys,
+                    cached_values,
+                    slots,
+                    write_indices,
+                    current_k,
+                    current_v,
+                )
+            )
+            row_keys = cached_keys.index_select(0, slots)
+            row_values = cached_values.index_select(0, slots)
+        else:
+            row_keys, row_values = prewritten_rows
+        row_positions = cached_positions.index_select(0, slots)
+        if execution_context.scratch_rows_are_disposable:
+            # Graph padding rows address dedicated, non-leaseable scratch
+            # slots. Their cache contents are irrelevant, so mirror vLLM's
+            # graph path and avoid gathering/restoring every overwritten cell.
+            if not prewritten_sparse:
+                row_keys.scatter_(2, scatter_indices, current_k)
+                row_values.scatter_(2, scatter_indices, current_v)
+            new_positions = row_positions.scatter(
+                1,
+                write_indices,
+                query_positions,
+            )
+            stored_positions = new_positions
+        else:
+            # General indexed callers may map an invalid row to state that is
+            # later reused. Preserve only the T overwritten cells instead of
+            # cloning the whole cache row.
+            valid_write = valid_rows.view(-1, 1, 1, 1)
+            old_write_keys = row_keys.gather(2, scatter_indices)
+            old_write_values = row_values.gather(2, scatter_indices)
+            row_keys.scatter_(
+                2,
+                scatter_indices,
+                torch.where(valid_write, current_k, old_write_keys),
+            )
+            row_values.scatter_(
+                2,
+                scatter_indices,
+                torch.where(valid_write, current_v, old_write_values),
+            )
+            new_positions = row_positions.scatter(
+                1,
+                write_indices,
+                query_positions,
+            )
+            stored_positions = torch.where(
+                valid_rows.view(-1, 1),
+                new_positions,
+                row_positions,
+            )
+        next_offsets = torch.where(valid_rows, offsets + chunk_length, offsets)
+
+        # The current chunk is already resident in row_keys/row_values.  The
+        # position mask enforces both causal order and the model's local window.
+        position_delta = query_positions[:, :, None] - new_positions[:, None, :]
+        attention_mask = (new_positions[:, None, :] >= 0) & (position_delta >= 0)
+        attention_mask &= position_delta < int(self.context)
+        output = F.scaled_dot_product_attention(
+            q,
+            row_keys,
+            row_values,
+            attn_mask=attention_mask[:, None, :, :],
+            dropout_p=0.0,
+        )
+        output = output.transpose(1, 2).reshape(
+            batch_size,
+            chunk_length,
+            self.embed_dim,
+        )
+
+        if not prewritten_sparse:
+            cached_keys.index_copy_(0, slots, row_keys)
+            cached_values.index_copy_(0, slots, row_values)
+        cached_positions.index_copy_(0, slots, stored_positions)
+        state.offset.index_copy_(0, slots, next_offsets)
+        output = self.out_proj(output)
+        return output.masked_fill(~valid_rows.view(-1, 1, 1), 0)
+
+    def _forward_streaming_indexed_fallback(
+        self,
+        x: torch.Tensor,
+        state: _AttentionStreamingState,
+        execution_context: StreamingExecutionContext,
+    ) -> torch.Tensor:
+        """Handle unbounded or over-capacity chunks without host synchronization."""
+        batch_size = int(x.shape[0])
+        slots = execution_context.state_slot_ids
+        valid_rows = execution_context.valid_rows
+        cached_keys, cached_values, cached_positions = self._ensure_streaming_cache(
+            state,
+            state.batch_size,
+            x.device,
+            self.get_backend_dtype(x),
+        )
+        if self.context is not None:
+            # Keep the physical cache allocation stable even when another
+            # graph bucket has reserved ``context + T`` slots.  Attention reads
+            # the old ring plus the current chunk before any write, then only
+            # commits the final local-context window in place.
+            offsets = state.offset.index_select(0, slots)
+            q, current_k, current_v = self._project_qkv(x)
+            if self.rope is not None:
+                q, current_k = _apply_cached_streaming_rope(
+                    q,
+                    current_k,
+                    offsets,
+                    cache=self._packed_rope_cache,
+            )
+            row_keys = cached_keys.index_select(0, slots)
+            row_values = cached_values.index_select(0, slots)
+            row_positions = cached_positions.index_select(0, slots)
+            query_positions = offsets.view(-1, 1) + torch.arange(
+                int(x.shape[1]),
+                device=x.device,
+                dtype=torch.long,
+            ).view(1, -1)
+            all_keys = torch.cat((row_keys, current_k), dim=2)
+            all_values = torch.cat((row_values, current_v), dim=2)
+            all_positions = torch.cat((row_positions, query_positions), dim=1)
+            position_delta = query_positions[:, :, None] - all_positions[:, None, :]
+            attention_mask = (all_positions[:, None, :] >= 0) & (position_delta >= 0)
+            attention_mask &= position_delta < int(self.context)
+            output = F.scaled_dot_product_attention(
+                q,
+                all_keys,
+                all_values,
+                attn_mask=attention_mask[:, None, :, :],
+                dropout_p=0.0,
+            )
+            output = output.transpose(1, 2).reshape(
+                batch_size,
+                int(x.shape[1]),
+                self.embed_dim,
+            )
+
+            cache_capacity = int(cached_keys.shape[2])
+            keep_length = min(int(x.shape[1]), int(self.context))
+            keep_start = int(x.shape[1]) - keep_length
+            write_indices = (
+                offsets.view(-1, 1)
+                + keep_start
+                + torch.arange(keep_length, device=x.device, dtype=torch.long).view(
+                    1, -1
+                )
+            ) % cache_capacity
+            scatter_indices = write_indices.view(
+                batch_size, 1, keep_length, 1
+            ).expand(-1, self.num_heads, -1, self.head_dim)
+            valid_write = valid_rows.view(-1, 1, 1, 1)
+            old_write_keys = row_keys.gather(2, scatter_indices)
+            old_write_values = row_values.gather(2, scatter_indices)
+            row_keys.scatter_(
+                2,
+                scatter_indices,
+                torch.where(
+                    valid_write,
+                    current_k[:, :, keep_start:, :],
+                    old_write_keys,
+                ),
+            )
+            row_values.scatter_(
+                2,
+                scatter_indices,
+                torch.where(
+                    valid_write,
+                    current_v[:, :, keep_start:, :],
+                    old_write_values,
+                ),
+            )
+            new_positions = row_positions.scatter(
+                1,
+                write_indices,
+                query_positions[:, keep_start:],
+            )
+            stored_positions = torch.where(
+                valid_rows.view(-1, 1),
+                new_positions,
+                row_positions,
+            )
+            next_offsets = torch.where(
+                valid_rows,
+                offsets + int(x.shape[1]),
+                offsets,
+            )
+            cached_keys.index_copy_(0, slots, row_keys)
+            cached_values.index_copy_(0, slots, row_values)
+            cached_positions.index_copy_(0, slots, stored_positions)
+            state.offset.index_copy_(0, slots, next_offsets)
+            return self.out_proj(output).masked_fill(
+                ~valid_rows.view(-1, 1, 1),
+                0,
+            )
+        old_offsets = state.offset.index_select(0, slots)
+        old_row_keys = cached_keys.index_select(0, slots)
+        old_row_values = cached_values.index_select(0, slots)
+        old_row_positions = cached_positions.index_select(0, slots)
+        row_state = _AttentionStreamingState(
+            batch_size,
+            x.device,
+            cached_keys=old_row_keys,
+            cached_values=old_row_values,
+            cached_positions=old_row_positions,
+            offset=old_offsets,
+        )
+        row_state.exec_mask.copy_(valid_rows)
+        if self.context is None:
+            row_state.exec_mask.fill_(True)
+        output = self._forward_streaming_sdpa(x, row_state)
+
+        next_offsets = torch.where(valid_rows, row_state.offset, old_offsets)
+        state.offset.index_copy_(0, slots, next_offsets)
+        if self.context is None:
+            old_length = int(cached_keys.shape[2])
+            new_length = int(row_state.cached_keys.shape[2])
+            expanded_keys = torch.zeros(
+                state.batch_size,
+                self.num_heads,
+                new_length,
+                self.head_dim,
+                device=cached_keys.device,
+                dtype=cached_keys.dtype,
+            )
+            expanded_values = torch.zeros_like(expanded_keys)
+            expanded_positions = torch.full(
+                (state.batch_size, new_length),
+                -1,
+                device=cached_positions.device,
+                dtype=cached_positions.dtype,
+            )
+            if old_length:
+                expanded_keys[:, :, :old_length] = cached_keys
+                expanded_values[:, :, :old_length] = cached_values
+                expanded_positions[:, :old_length] = cached_positions
+            old_row_keys_expanded = expanded_keys.index_select(0, slots)
+            old_row_values_expanded = expanded_values.index_select(0, slots)
+            old_row_positions_expanded = expanded_positions.index_select(0, slots)
+            state.cached_keys = expanded_keys
+            state.cached_values = expanded_values
+            state.cached_positions = expanded_positions
+        else:
+            old_row_keys_expanded = old_row_keys
+            old_row_values_expanded = old_row_values
+            old_row_positions_expanded = old_row_positions
+
+        valid_cache_rows = valid_rows.view(-1, 1, 1, 1)
+        state.cached_keys.index_copy_(
+            0,
+            slots,
+            torch.where(
+                valid_cache_rows,
+                row_state.cached_keys,
+                old_row_keys_expanded,
+            ),
+        )
+        state.cached_values.index_copy_(
+            0,
+            slots,
+            torch.where(
+                valid_cache_rows,
+                row_state.cached_values,
+                old_row_values_expanded,
+            ),
+        )
+        state.cached_positions.index_copy_(
+            0,
+            slots,
+            torch.where(
+                valid_rows.view(-1, 1),
+                row_state.cached_positions,
+                old_row_positions_expanded,
+            ),
+        )
+        return output.masked_fill(~valid_rows.view(-1, 1, 1), 0)
+
+    def _ensure_streaming_cache(
+        self,
+        state: _AttentionStreamingState,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        cache_length: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if cache_length is None:
+            cache_length = 0 if self.context is None else self.context
+        cache_length = int(cache_length)
+        if cache_length < 0:
+            raise ValueError(f"streaming cache length must be non-negative, got {cache_length}")
+        if (
+            state.cached_keys is None
+            or state.cached_values is None
+            or state.cached_positions is None
+        ):
+            state.cached_keys = torch.zeros(
+                (batch_size, self.num_heads, cache_length, self.head_dim),
+                device=device,
+                dtype=dtype,
+            )
+            state.cached_values = torch.zeros_like(state.cached_keys)
+            state.cached_positions = torch.full(
+                (batch_size, cache_length),
+                -1,
+                device=device,
+                dtype=torch.long,
+            )
+        else:
+            if state.cached_keys.device != device or state.cached_keys.dtype != dtype:
+                state.cached_keys = state.cached_keys.to(device=device, dtype=dtype)
+            if (
+                state.cached_values.device != device
+                or state.cached_values.dtype != dtype
+            ):
+                state.cached_values = state.cached_values.to(
+                    device=device,
+                    dtype=dtype,
+                )
+            if state.cached_positions.device != device:
+                state.cached_positions = state.cached_positions.to(device=device)
+            old_length = int(state.cached_keys.shape[2])
+            if old_length < cache_length:
+                if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "cannot grow the MOSS streaming KV cache during CUDA graph capture"
+                    )
+                old_keys = state.cached_keys
+                old_values = state.cached_values
+                old_positions = state.cached_positions
+                new_keys = torch.zeros(
+                    (batch_size, self.num_heads, cache_length, self.head_dim),
+                    device=device,
+                    dtype=dtype,
+                )
+                new_values = torch.zeros_like(new_keys)
+                new_positions = torch.full(
+                    (batch_size, cache_length),
+                    -1,
+                    device=device,
+                    dtype=torch.long,
+                )
+                valid = old_positions >= 0
+                if bool(valid.any().item()):
+                    row_ids = torch.arange(batch_size, device=device).view(
+                        batch_size, 1
+                    ).expand_as(old_positions)[valid]
+                    target = torch.remainder(old_positions[valid], cache_length)
+                    old_key_rows = old_keys.permute(0, 2, 1, 3)[valid]
+                    old_value_rows = old_values.permute(0, 2, 1, 3)[valid]
+                    new_keys.permute(0, 2, 1, 3)[row_ids, target] = old_key_rows
+                    new_values.permute(0, 2, 1, 3)[row_ids, target] = old_value_rows
+                    new_positions[row_ids, target] = old_positions[valid]
+                state.cached_keys = new_keys
+                state.cached_values = new_values
+                state.cached_positions = new_positions
+        return state.cached_keys, state.cached_values, state.cached_positions
+
+    @staticmethod
+    def _build_streaming_kv(
+        cached_k: torch.Tensor,
+        cached_v: torch.Tensor,
+        cached_pos: torch.Tensor,
+        current_k: torch.Tensor,
+        current_v: torch.Tensor,
+        query_positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.cat((cached_k, current_k), dim=2),
+            torch.cat((cached_v, current_v), dim=2),
+            torch.cat((cached_pos, query_positions), dim=1),
+        )
+
+    def _update_streaming_cache(
+        self,
+        state: _AttentionStreamingState,
+        cached_k: torch.Tensor,
+        cached_v: torch.Tensor,
+        cached_pos: torch.Tensor,
+        all_k: torch.Tensor,
+        all_v: torch.Tensor,
+        key_positions: torch.Tensor,
+    ) -> None:
+        exec_mask = state.exec_mask.view(-1, 1, 1, 1)
+        position_exec_mask = state.exec_mask.view(-1, 1)
+        if self.context is None:
+            if not bool(state.exec_mask.all().item()):
+                raise RuntimeError(
+                    "streaming exec_mask requires finite attention context"
+                )
+            state.cached_keys = all_k.contiguous()
+            state.cached_values = all_v.contiguous()
+            state.cached_positions = key_positions.contiguous()
+            return
+        new_cached_k = all_k[:, :, -self.context :, :].contiguous()
+        new_cached_v = all_v[:, :, -self.context :, :].contiguous()
+        new_cached_pos = key_positions[:, -self.context :].contiguous()
+        state.cached_keys = torch.where(exec_mask, new_cached_k, cached_k)
+        state.cached_values = torch.where(exec_mask, new_cached_v, cached_v)
+        state.cached_positions = torch.where(
+            position_exec_mask,
+            new_cached_pos,
+            cached_pos,
+        )
+
+    def _streaming_qkv(
+        self,
+        x: torch.Tensor,
+        state: _AttentionStreamingState,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        batch_size, chunk_length, _ = x.shape
+        q, current_k, current_v = self._project_qkv(x)
+        if self.rope is not None:
+            q, current_k = _apply_cached_streaming_rope(
+                q,
+                current_k,
+                state.offset,
+                cache=self._packed_rope_cache,
+            )
+        query_positions = state.offset.view(-1, 1) + torch.arange(
+            chunk_length,
+            device=x.device,
+            dtype=torch.long,
+        ).view(1, -1)
+        cached_k, cached_v, cached_pos = self._ensure_streaming_cache(
+            state,
+            batch_size,
+            current_k.device,
+            current_k.dtype,
+        )
+        all_k, all_v, key_positions = self._build_streaming_kv(
+            cached_k,
+            cached_v,
+            cached_pos,
+            current_k,
+            current_v,
+            query_positions,
+        )
+        return (
+            q,
+            all_k,
+            all_v,
+            query_positions,
+            key_positions,
+            cached_k,
+            cached_v,
+            cached_pos,
+        )
+
+    def _finish_streaming_attention(
+        self,
+        output: torch.Tensor,
+        *,
+        state: _AttentionStreamingState,
+        chunk_length: int,
+        cached_k: torch.Tensor,
+        cached_v: torch.Tensor,
+        cached_pos: torch.Tensor,
+        all_k: torch.Tensor,
+        all_v: torch.Tensor,
+        key_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        self._update_streaming_cache(
+            state,
+            cached_k,
+            cached_v,
+            cached_pos,
+            all_k,
+            all_v,
+            key_positions,
+        )
+        state.offset.copy_(
+            torch.where(
+                state.exec_mask,
+                state.offset + chunk_length,
+                state.offset,
+            )
+        )
+        return self.out_proj(output)
+
+    def _forward_streaming_sdpa(
+        self,
+        x: torch.Tensor,
+        state: _AttentionStreamingState,
+    ) -> torch.Tensor:
+        batch_size, chunk_length, _ = x.shape
+        if chunk_length == 0:
+            return self.out_proj(x)
+        (
+            q,
+            all_k,
+            all_v,
+            query_positions,
+            key_positions,
+            cached_k,
+            cached_v,
+            cached_pos,
+        ) = self._streaming_qkv(x, state)
+        delta = query_positions[:, :, None] - key_positions[:, None, :]
+        attention_mask = (key_positions[:, None, :] >= 0) & (delta >= 0)
+        if self.context is not None:
+            attention_mask &= delta < self.context
+        output = F.scaled_dot_product_attention(
+            q,
+            all_k,
+            all_v,
+            attn_mask=attention_mask[:, None, :, :],
+            dropout_p=0.0,
+        )
+        output = output.transpose(1, 2).reshape(
+            batch_size,
+            chunk_length,
+            self.embed_dim,
+        )
+        return self._finish_streaming_attention(
+            output,
+            state=state,
+            chunk_length=chunk_length,
+            cached_k=cached_k,
+            cached_v=cached_v,
+            cached_pos=cached_pos,
+            all_k=all_k,
+            all_v=all_v,
+            key_positions=key_positions,
+        )
+
+    def _forward_streaming_flash(
+        self,
+        x: torch.Tensor,
+        state: _AttentionStreamingState,
+    ) -> torch.Tensor:
+        batch_size, chunk_length, _ = x.shape
+        if chunk_length == 0:
+            return self.out_proj(x)
+        if self._flash_attn_varlen is None:
+            return self._forward_streaming_sdpa(x, state)
+        (
+            q,
+            all_k,
+            all_v,
+            _,
+            key_positions,
+            cached_k,
+            cached_v,
+            cached_pos,
+        ) = self._streaming_qkv(x, state)
+        query_chunks = []
+        key_chunks = []
+        value_chunks = []
+        cumulative_query_lengths = [0]
+        cumulative_key_lengths = [0]
+        max_key_length = 0
+        for batch_index in range(batch_size):
+            valid_keys = key_positions[batch_index] >= 0
+            query_chunk = q[batch_index].transpose(0, 1).contiguous()
+            key_chunk = (
+                all_k[batch_index, :, valid_keys, :].transpose(0, 1).contiguous()
+            )
+            value_chunk = (
+                all_v[batch_index, :, valid_keys, :].transpose(0, 1).contiguous()
+            )
+            query_chunks.append(query_chunk)
+            key_chunks.append(key_chunk)
+            value_chunks.append(value_chunk)
+            cumulative_query_lengths.append(
+                cumulative_query_lengths[-1] + query_chunk.shape[0]
+            )
+            cumulative_key_lengths.append(
+                cumulative_key_lengths[-1] + key_chunk.shape[0]
+            )
+            max_key_length = max(max_key_length, int(key_chunk.shape[0]))
+        output = self._flash_attn_varlen(
+            torch.cat(query_chunks, dim=0),
+            torch.cat(key_chunks, dim=0),
+            torch.cat(value_chunks, dim=0),
+            torch.tensor(
+                cumulative_query_lengths,
+                device=x.device,
+                dtype=torch.int32,
+            ),
+            torch.tensor(
+                cumulative_key_lengths,
+                device=x.device,
+                dtype=torch.int32,
+            ),
+            chunk_length,
+            max_key_length,
+            causal=self.causal,
+            window_size=self._flash_window_size(),
+        )
+        output = output.reshape(batch_size, chunk_length, self.embed_dim)
+        return self._finish_streaming_attention(
+            output,
+            state=state,
+            chunk_length=chunk_length,
+            cached_k=cached_k,
+            cached_v=cached_v,
+            cached_pos=cached_pos,
+            all_k=all_k,
+            all_v=all_v,
+            key_positions=key_positions,
+        )
+
+    def _flash_window_size(self) -> tuple[int, int]:
+        return _flash_window_size(self.causal, self.context)
 
     def _project_qkv(
         self, x: torch.Tensor

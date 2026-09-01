@@ -8,7 +8,11 @@ import torch
 from sglang.kernels.ops.sampling.murmur_hash import murmur_hash32
 from sglang.srt.layers.sampler import multinomial_with_seed
 
-from sglang_omni.models.moss_tts.sampling_kernels import seeded_gumbel_argmax
+from sglang_omni.models.moss_tts.sampling_kernels import (
+    sample_seeded_branchless,
+    sample_seeded_compact_topk,
+    seeded_gumbel_argmax,
+)
 
 pytestmark = pytest.mark.accelerator
 
@@ -76,3 +80,34 @@ def test_seeded_gumbel_argmax_rejects_strided_output() -> None:
     assert output.stride(0) == 2
     with pytest.raises(ValueError, match="output must have stride 1"):
         seeded_gumbel_argmax(scores, seeds, positions, output)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_compact_topk_preserves_seeded_default_distribution() -> None:
+    device = torch.device("cuda")
+    torch.manual_seed(20260821)
+    logits = torch.randn(8, 1024, device=device, dtype=torch.float32)
+    temperature = torch.full((8,), 1.7, device=device)
+    top_p = torch.full((8,), 0.8, device=device)
+    top_k = torch.full((8,), 25, device=device, dtype=torch.long)
+    seeds = torch.arange(8, device=device, dtype=torch.long) + 17
+    positions = torch.arange(8, device=device, dtype=torch.long) * 13
+
+    expected = sample_seeded_branchless(
+        logits,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        seeds=seeds,
+        positions=positions,
+    )
+    actual = sample_seeded_compact_topk(
+        logits,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        seeds=seeds,
+        positions=positions,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(expected, actual)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 
 import pytest
@@ -17,7 +18,10 @@ from sglang_omni.models.moss_tts.audio_tokenizer import (
     MossAudioTokenizerProjectedTransformer,
     MossAudioTokenizerTransformerLayer,
     MossAudioTokenizerVocoderDecoder,
+    _ResidualLFQ,
+    _RotaryEmbedding,
 )
+from sglang_omni.models.moss_tts.streaming_codec import StreamingExecutionContext
 
 
 class _FakeLayerScale(nn.Module):
@@ -1223,6 +1227,281 @@ def test_exact_packed_rope_matches_reference_cuda(dtype: torch.dtype) -> None:
 
     assert torch.equal(actual_q.cpu(), reference_q)
     assert torch.equal(actual_k.cpu(), reference_k)
+
+
+def test_sparse_ring_kv_kernel_rejects_cpu_tensors() -> None:
+    cached_keys = torch.zeros(3, 2, 7, 4, dtype=torch.bfloat16)
+    cached_values = torch.zeros_like(cached_keys)
+    current = torch.zeros(2, 2, 3, 4, dtype=torch.bfloat16)
+
+    assert not vocoder_kernels.commit_sparse_ring_kv_inplace(
+        cached_keys,
+        cached_values,
+        torch.tensor([0, 2]),
+        torch.tensor([[5, 6, 0], [1, 2, 3]]),
+        current,
+        current,
+    )
+
+
+def test_sparse_ring_kv_kernel_matches_full_row_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    if vocoder_kernels._sparse_ring_kv_commit_kernel is None:
+        pytest.skip("requires Triton")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    state_capacity, batch_size = 7, 3
+    num_heads, cache_capacity, chunk_length, head_dim = 2, 7, 3, 4
+    slots = torch.tensor([5, 1, 4], device=device)
+    write_indices = torch.tensor(
+        [[5, 6, 0], [1, 2, 3], [4, 5, 6]],
+        device=device,
+    )
+    projected = torch.randn(
+        batch_size,
+        chunk_length,
+        3,
+        num_heads,
+        head_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    current_k = projected.permute(2, 0, 3, 1, 4)[1]
+    current_v = projected.permute(2, 0, 3, 1, 4)[2]
+    assert not current_k.is_contiguous()
+    assert not current_v.is_contiguous()
+
+    cached_keys = torch.randn(
+        state_capacity,
+        num_heads,
+        cache_capacity,
+        head_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    cached_values = torch.randn_like(cached_keys)
+    expected_keys = cached_keys.clone()
+    expected_values = cached_values.clone()
+    expected_key_rows = expected_keys.index_select(0, slots)
+    expected_value_rows = expected_values.index_select(0, slots)
+    scatter_indices = write_indices[:, None, :, None].expand(
+        -1,
+        num_heads,
+        -1,
+        head_dim,
+    )
+    expected_key_rows.scatter_(2, scatter_indices, current_k)
+    expected_value_rows.scatter_(2, scatter_indices, current_v)
+    expected_keys.index_copy_(0, slots, expected_key_rows)
+    expected_values.index_copy_(0, slots, expected_value_rows)
+
+    assert vocoder_kernels.commit_sparse_ring_kv_inplace(
+        cached_keys,
+        cached_values,
+        slots,
+        write_indices,
+        current_k,
+        current_v,
+    )
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(cached_keys, expected_keys, rtol=0, atol=0)
+    torch.testing.assert_close(cached_values, expected_values, rtol=0, atol=0)
+
+
+def test_sparse_ring_kv_prewrite_gather_rejects_cpu_tensors() -> None:
+    cached_keys = torch.zeros(3, 2, 7, 4, dtype=torch.bfloat16)
+    cached_values = torch.zeros_like(cached_keys)
+    current = torch.zeros(2, 2, 3, 4, dtype=torch.bfloat16)
+
+    assert vocoder_kernels.prewrite_and_gather_sparse_ring_kv(
+        cached_keys,
+        cached_values,
+        torch.tensor([0, 2]),
+        torch.tensor([[5, 6, 0], [1, 2, 3]]),
+        current,
+        current,
+    ) is None
+
+
+def test_sparse_ring_kv_prewrite_gather_matches_reference_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    if vocoder_kernels._sparse_ring_kv_prewrite_gather_kernel is None:
+        pytest.skip("requires Triton")
+
+    torch.manual_seed(4)
+    device = torch.device("cuda")
+    state_capacity, batch_size = 7, 3
+    num_heads, cache_capacity, chunk_length, head_dim = 2, 7, 3, 4
+    slots = torch.tensor([5, 1, 4], device=device)
+    write_indices = torch.tensor(
+        [[5, 6, 0], [1, 2, 3], [4, 5, 6]],
+        device=device,
+    )
+    projected = torch.randn(
+        batch_size,
+        chunk_length,
+        3,
+        num_heads,
+        head_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    current_k = projected.permute(2, 0, 3, 1, 4)[1]
+    current_v = projected.permute(2, 0, 3, 1, 4)[2]
+    cached_keys = torch.randn(
+        state_capacity,
+        num_heads,
+        cache_capacity,
+        head_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    cached_values = torch.randn_like(cached_keys)
+
+    expected_keys = cached_keys.clone()
+    expected_values = cached_values.clone()
+    expected_row_keys = expected_keys.index_select(0, slots)
+    expected_row_values = expected_values.index_select(0, slots)
+    scatter_indices = write_indices[:, None, :, None].expand(
+        -1,
+        num_heads,
+        -1,
+        head_dim,
+    )
+    expected_row_keys.scatter_(2, scatter_indices, current_k)
+    expected_row_values.scatter_(2, scatter_indices, current_v)
+    expected_keys.index_copy_(0, slots, expected_row_keys)
+    expected_values.index_copy_(0, slots, expected_row_values)
+
+    rows = vocoder_kernels.prewrite_and_gather_sparse_ring_kv(
+        cached_keys,
+        cached_values,
+        slots,
+        write_indices,
+        current_k,
+        current_v,
+    )
+    assert rows is not None
+    row_keys, row_values = rows
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(row_keys, expected_row_keys, rtol=0, atol=0)
+    torch.testing.assert_close(row_values, expected_row_values, rtol=0, atol=0)
+    torch.testing.assert_close(cached_keys, expected_keys, rtol=0, atol=0)
+    torch.testing.assert_close(cached_values, expected_values, rtol=0, atol=0)
+
+
+def test_indexed_ring_sparse_prewrite_matches_full_row_cuda(monkeypatch) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    if vocoder_kernels._sparse_ring_kv_commit_kernel is None:
+        pytest.skip("requires Triton")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    source = _FakeAttention(hidden_size=8, num_heads=2).to(
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    source.context = 4
+    fused = MossAudioTokenizerAttention.from_module(source)
+    reference = MossAudioTokenizerAttention.from_module(copy.deepcopy(source))
+    execution_context = StreamingExecutionContext(
+        state_slot_ids=torch.tensor([0, 3], device=device),
+        valid_rows=torch.tensor([True, False], device=device),
+        scratch_rows_are_disposable=True,
+    )
+    chunks = [
+        torch.randn(2, 2, 8, device=device, dtype=torch.bfloat16)
+        for _ in range(4)
+    ]
+
+    with fused.streaming(batch_size=4):
+        fused_outputs = [
+            fused(chunk, execution_context=execution_context) for chunk in chunks
+        ]
+        fused_state = fused._streaming_state
+        assert fused_state is not None
+        fused_cache = (
+            fused_state.cached_keys.clone(),
+            fused_state.cached_values.clone(),
+            fused_state.cached_positions.clone(),
+            fused_state.offset.clone(),
+        )
+
+    monkeypatch.setattr(
+        attention_impl,
+        "commit_sparse_ring_kv_inplace",
+        lambda *_args, **_kwargs: False,
+    )
+    with reference.streaming(batch_size=4):
+        reference_outputs = [
+            reference(chunk, execution_context=execution_context) for chunk in chunks
+        ]
+        reference_state = reference._streaming_state
+        assert reference_state is not None
+        reference_cache = (
+            reference_state.cached_keys.clone(),
+            reference_state.cached_values.clone(),
+            reference_state.cached_positions.clone(),
+            reference_state.offset.clone(),
+        )
+
+    for actual, expected in zip(fused_outputs, reference_outputs, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for actual, expected in zip(fused_cache, reference_cache, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_cached_streaming_rope_matches_reference(device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    torch.manual_seed(11)
+    torch_device = torch.device(device)
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    q = torch.randn(2, 3, 5, 64, device=torch_device, dtype=dtype)
+    k = torch.randn_like(q)
+    offsets = torch.tensor([3, 17], device=torch_device, dtype=torch.long)
+
+    reference_q, reference_k = _RotaryEmbedding(10000.0)(q, k, offsets)
+    actual_q, actual_k = attention_impl._apply_cached_streaming_rope(
+        q,
+        k,
+        offsets,
+        cache=attention_impl.MossPackedRopeCache(max_period=10000.0),
+    )
+
+    assert torch.equal(actual_q, reference_q)
+    assert torch.equal(actual_k, reference_k)
+
+
+def test_residual_lfq_decode_cache_is_bit_identical() -> None:
+    torch.manual_seed(23)
+    quantizer = _ResidualLFQ(
+        {
+            "input_dim": 4,
+            "rvq_dim": 4,
+            "output_dim": 4,
+            "num_quantizers": 3,
+            "codebook_size": 7,
+            "codebook_dim": 2,
+        },
+        device="cpu",
+    )
+    codes = torch.randint(0, 7, (3, 2, 5), dtype=torch.long)
+
+    reference = quantizer.decode_codes(codes)
+    quantizer.build_decode_cache()
+    cached = quantizer.decode_codes(codes)
+
+    assert torch.equal(cached, reference)
+    quantizer.clear_decode_cache()
+    assert torch.equal(quantizer.decode_codes(codes), reference)
 
 
 def test_transformer_layer_uses_source_modules_for_primitive_ops() -> None:

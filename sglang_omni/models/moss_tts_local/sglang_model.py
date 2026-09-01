@@ -27,11 +27,14 @@ from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.qwen3 import Qwen3Model
 from sglang.srt.utils import add_prefix
 
-from sglang_omni.models.moss_tts.sampling_kernels import sample_seeded_branchless
+from sglang_omni.models.moss_tts.sampling_kernels import (
+    sample_seeded_branchless,
+    sample_seeded_compact_topk,
+)
 from sglang_omni.models.moss_tts_local.local_transformer import MossTTSLocalTransformer
+from sglang_omni.models.moss_tts_local.moss_qwen3_backbone import MossLocalQwen3Model
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
@@ -91,7 +94,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
             for _ in range(self.config.channels):
                 self.embedding_list.append(PPMissingLayer())
 
-        self.model = Qwen3Model(
+        self.model = MossLocalQwen3Model(
             config=self.config.language_config,
             quant_config=quant_config,
             prefix=add_prefix("model", prefix),
@@ -133,8 +136,23 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         # above. Allocated here, before any frame/backbone graph capture, so
         # its addresses are fixed for the process lifetime.
         self._state_pool = MossTTSLocalDecodeStatePool(self)
+        self._compact_topk_sampling = os.environ.get(
+            "MOSS_TTS_LOCAL_COMPACT_TOPK", "0"
+        ) == "1"
+        # The runner routes only default-profile rows to this implementation;
+        # custom top-k requests stay on the general full-vocabulary sampler.
+        self._frame_sampler_impl = (
+            sample_seeded_compact_topk
+            if self._compact_topk_sampling
+            else sample_seeded_branchless
+        )
+        self._sample_seeded_branchless = self._frame_sampler_impl
         self._compiled_frame_sampler: Callable[..., torch.Tensor] | None = None
         self._frame_compile_configured = False
+        # Optional whole-frame Inductor specializations.  Compiling one local
+        # ``step`` in isolation is slower on the tiny B=16 GEMMs; the useful
+        # unit is the complete 12-codebook frame, including seeded sampling.
+        self._compiled_frame_decoders: dict[int, Callable[..., Any]] = {}
 
     def acquire_row(self, rid: str) -> int:
         """Assign (or return the existing) decode-state pool row for ``rid``."""
@@ -375,11 +393,77 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
             )
             self._ensure_frame_compile_config()
             self._compiled_frame_sampler = torch.compile(
-                sample_seeded_branchless,
+                self._frame_sampler_impl,
                 mode=compile_mode,
             )
             self._sample_seeded_branchless = self._compiled_frame_sampler
-            logger.info(f"Compiled MOSS-TTS Local frame sampler (mode={compile_mode})")
+            logger.info(
+                "Compiled MOSS-TTS Local frame sampler (mode=%s, compact_topk=%s)",
+                compile_mode,
+                self._compact_topk_sampling,
+            )
+
+    def _compile_frame_decoder(self, batch_size: int) -> Callable[..., Any] | None:
+        """Compile one fixed-batch whole-frame local decode specialization.
+
+        The frame sampler and local transformer are deliberately compiled as
+        one unit.  A per-step wrapper loses the data dependency from sampled
+        codebook ``c`` to the embedding at ``c + 1`` and was measured slower
+        than the existing CUDA-graph path.  This specialization is opt-in and
+        only used for the configured hot batch bucket; any compiler failure
+        falls back to the existing graph body.
+        """
+        batch_size = int(batch_size)
+        cached = self._compiled_frame_decoders.get(batch_size)
+        if cached is not None:
+            return cached
+        if not self._compact_topk_sampling:
+            logger.warning(
+                "Skipping whole-frame compile for bs=%d because compact top-k "
+                "sampling is disabled",
+                batch_size,
+            )
+            return None
+
+        from sglang.srt.compilation.torch_compile_decoration import (
+            set_torch_compile_config,
+        )
+
+        set_torch_compile_config()
+        compile_mode = os.environ.get("MOSS_TTS_LOCAL_FRAME_COMPILE_MODE", "default")
+
+        # Keep the existing compiled sampler for non-specialized buckets, but
+        # bake the raw compact sampler into this outer graph.  Nested
+        # ``torch.compile`` wrappers introduce graph breaks on some Torch
+        # versions; the raw implementation is capture-safe and is inlined by
+        # the outer compiler.
+        def frame_decoder(**kwargs: torch.Tensor):
+            return self._decode_frame_graphable(
+                **kwargs,
+                sampler=self._frame_sampler_impl,
+            )
+
+        try:
+            compiled = torch.compile(
+                frame_decoder,
+                dynamic=False,
+                mode=compile_mode,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to configure whole-frame compile for bs=%d; using "
+                "the existing frame graph",
+                batch_size,
+                exc_info=True,
+            )
+            return None
+        self._compiled_frame_decoders[batch_size] = compiled
+        logger.info(
+            "Configured MOSS-TTS Local whole-frame compile for bs=%d (mode=%s)",
+            batch_size,
+            compile_mode,
+        )
+        return compiled
 
     @torch.no_grad()
     def _decode_frame_graphable(
@@ -393,6 +477,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         audio_top_k: torch.Tensor,
         seeds: torch.Tensor,
         base_positions: torch.Tensor,
+        sampler: Callable[..., torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Branchless frame decode used both eagerly and under graph capture.
 
@@ -408,11 +493,12 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         embeddings, summed in the same channel order as
         ``_prepare_multi_modal_inputs``.
         """
+        sampler = self._sample_seeded_branchless if sampler is None else sampler
         local_hidden = self.local_transformer.step(
             hidden_states.to(dtype=self.dtype), 0
         )
         text_logits = F.linear(local_hidden, self.local_text_lm_head.weight).float()
-        stop_choice = self._sample_seeded_branchless(
+        stop_choice = sampler(
             text_logits,
             temperature=text_temperature,
             top_p=text_top_p,
@@ -430,7 +516,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         for channel in range(self.n_vq):
             head_weight = self._audio_embedding_weight(channel)
             logits = F.linear(current, head_weight).float()
-            code = self._sample_seeded_branchless(
+            code = sampler(
                 logits,
                 temperature=audio_temperature,
                 top_p=audio_top_p,
@@ -448,7 +534,14 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         return stop_choice, torch.stack(codes, dim=-1), feedback
 
     @torch.no_grad()
-    def init_frame_decode_graphs(self, batch_sizes: list[int]) -> None:
+    def init_frame_decode_graphs(
+        self,
+        batch_sizes: list[int],
+        *,
+        compile_local_frame: bool = False,
+        compile_local_frame_batch_size: int = 16,
+        compile_local_frame_batch_sizes: list[int] | None = None,
+    ) -> None:
         """Capture the per-frame local decode (1 + n_vq micro-steps plus all
         13 seeded sampling passes) into one CUDA graph per batch-size bucket.
 
@@ -469,7 +562,23 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         )
         self.local_transformer.freeze_kv_cache()
         self._ensure_frame_sampler_compile()
-        frame_decode = self._decode_frame_graphable
+        compile_batch_sizes = (
+            set()
+            if not compile_local_frame
+            else {
+                int(size)
+                for size in (
+                    compile_local_frame_batch_sizes
+                    if compile_local_frame_batch_sizes is not None
+                    else [compile_local_frame_batch_size]
+                )
+            }
+        )
+        if compile_batch_sizes and min(compile_batch_sizes) < 1:
+            raise ValueError(
+                "compile_local_frame batch sizes must be >= 1; got "
+                f"{sorted(compile_batch_sizes)}"
+            )
         self._frame_graphs: dict[
             int,
             tuple[
@@ -478,6 +587,11 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         ] = {}
 
         for bucket in buckets:
+            frame_decode = self._decode_frame_graphable
+            if bucket in compile_batch_sizes:
+                compiled = self._compile_frame_decoder(bucket)
+                if compiled is not None:
+                    frame_decode = compiled
             static_inputs = {
                 "hidden_states": torch.zeros(
                     bucket, self.hidden_size, device=device, dtype=self.dtype

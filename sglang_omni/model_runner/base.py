@@ -7,6 +7,7 @@ pass, sampling, logit post-processing, and output extraction.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -522,9 +523,26 @@ class ModelRunner:
         if host_token_ids is None:
             outputs = self.output_processor.process(batch_result, scheduler_output)
         else:
-            outputs = self.output_processor.process(
-                batch_result, scheduler_output, host_token_ids=host_token_ids
+            process = self.output_processor.process
+            try:
+                parameters = inspect.signature(process).parameters
+            except (TypeError, ValueError):
+                parameters = None
+            accepts_host_token_ids = parameters is None or (
+                "host_token_ids" in parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
             )
+            if accepts_host_token_ids:
+                outputs = process(
+                    batch_result, scheduler_output, host_token_ids=host_token_ids
+                )
+            else:
+                # Keep compatibility with small downstream output processors
+                # that predate the optional host-token rail.
+                outputs = process(batch_result, scheduler_output)
         self.post_process_outputs(batch_result, scheduler_output, outputs)
         skip_rids = (skip_rids or set()) | self.finalize_skip_rids(scheduler_output)
         advanced_steps = []

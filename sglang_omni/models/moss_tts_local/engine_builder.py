@@ -8,6 +8,9 @@ from typing import Any
 
 from sglang_omni.models.moss_tts_local import request_builders
 from sglang_omni.models.moss_tts_local import stages as moss_local_stages
+from sglang_omni.models.moss_tts_local.request_builders import (
+    MOSS_STREAM_TRANSPORT_BATCH_FRAMES,
+)
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
 
@@ -21,6 +24,11 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
         *,
         enable_async_decode: bool,
         async_decode_min_batch_size: int,
+        stream_transport_batch_frames: int = MOSS_STREAM_TRANSPORT_BATCH_FRAMES,
+        compile_ar_backbone: bool = False,
+        compile_local_frame: bool = False,
+        compile_local_frame_batch_size: int = 16,
+        compile_local_frame_batch_sizes: list[int] | None = None,
         prefill_coalesce_requests: int = 0,
         prefill_coalesce_wait_ms: float = 60.0,
         total_gpu_memory_fraction: float | None,
@@ -29,6 +37,31 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
     ) -> None:
         self.enable_async_decode = enable_async_decode
         self.async_decode_min_batch_size = async_decode_min_batch_size
+        self.stream_transport_batch_frames = int(stream_transport_batch_frames)
+        self.compile_ar_backbone = bool(compile_ar_backbone)
+        self.compile_local_frame = bool(compile_local_frame)
+        self.compile_local_frame_batch_size = int(compile_local_frame_batch_size)
+        if self.compile_local_frame_batch_size < 1:
+            raise ValueError(
+                "compile_local_frame_batch_size must be >= 1; got "
+                f"{self.compile_local_frame_batch_size}"
+            )
+        self.compile_local_frame_batch_sizes = (
+            None
+            if compile_local_frame_batch_sizes is None
+            else sorted({int(size) for size in compile_local_frame_batch_sizes})
+        )
+        if (
+            self.compile_local_frame_batch_sizes is not None
+            and (
+                not self.compile_local_frame_batch_sizes
+                or self.compile_local_frame_batch_sizes[0] < 1
+            )
+        ):
+            raise ValueError(
+                "compile_local_frame_batch_sizes must contain positive ints; "
+                f"got {compile_local_frame_batch_sizes}"
+            )
         self.prefill_coalesce_requests = prefill_coalesce_requests
         self.prefill_coalesce_wait_ms = prefill_coalesce_wait_ms
         self.total_gpu_memory_fraction = total_gpu_memory_fraction
@@ -51,7 +84,7 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
             "dtype": dtype,
             "disable_cuda_graph": False,
             "disable_overlap_schedule": True,
-            "enable_torch_compile": False,
+            "enable_torch_compile": self.compile_ar_backbone,
             "max_prefill_tokens": 8192,
             "sampling_backend": "pytorch",
             "trust_remote_code": True,
@@ -119,7 +152,21 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
         server_args: Any,
     ) -> None:
         del checkpoint_dir, device, gpu_id, server_args
+        self.model_worker = model_worker
         self.model = model_worker.model_runner.model
+
+    def compile_model(self, model: Any, server_args: Any) -> None:
+        if not self.compile_ar_backbone or not bool(
+            getattr(server_args, "enable_torch_compile", False)
+        ):
+            return
+        moss_local_stages._compile_moss_local_backbone(
+            model,
+            max_batch_size=int(getattr(server_args, "max_running_requests", 16)),
+        )
+        # This is a model-owned decode hook; avoid wrapping the same layers a
+        # second time in SGLang's generic compiler.
+        server_args.enable_torch_compile = False
 
     def post_cuda_graph_setup(self, model: Any, server_args: Any) -> None:
         from sglang_omni.scheduling.generation_batch_policy import (
@@ -130,14 +177,23 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
         # (1 + n_vq micro-steps and 13 seeded sampling passes per frame):
         # eager it is kernel-launch-bound at ~22 ms/frame independent of batch
         # size.
-        model.init_frame_decode_graphs(list(get_decode_cuda_graph_bs(server_args)))
+        model.init_frame_decode_graphs(
+            list(get_decode_cuda_graph_bs(server_args)),
+            compile_local_frame=self.compile_local_frame,
+            compile_local_frame_batch_size=self.compile_local_frame_batch_size,
+            compile_local_frame_batch_sizes=self.compile_local_frame_batch_sizes,
+        )
 
     def make_model_runner(self, model_worker: Any, output_proc: Any) -> Any:
         model_runner_mod = importlib.import_module(
             "sglang_omni.models.moss_tts_local.model_runner"
         )
 
-        return model_runner_mod.MossTTSLocalModelRunner(model_worker, output_proc)
+        return model_runner_mod.MossTTSLocalModelRunner(
+            model_worker,
+            output_proc,
+            stream_transport_batch_frames=self.stream_transport_batch_frames,
+        )
 
     def make_adapters(self, model: Any) -> tuple[Any, Any]:
         return request_builders.make_moss_tts_local_scheduler_adapters(model=model)

@@ -18,7 +18,13 @@ def _payload(request_id: str, *, stream: bool = False) -> StagePayload:
 
 
 class _TestStreamingScheduler(StreamingSimpleScheduler):
-    def __init__(self, *, max_batch_size: int = 4, max_batch_wait_ms: int = 0):
+    def __init__(
+        self,
+        *,
+        max_batch_size: int = 4,
+        max_batch_wait_ms: int = 0,
+        stream_chunk_batch_wait_ms: float = 0.0,
+    ):
         self.single_calls: list[str] = []
         self.batch_calls: list[list[str]] = []
         self.stream_state: set[str] = set()
@@ -27,6 +33,7 @@ class _TestStreamingScheduler(StreamingSimpleScheduler):
             batch_compute_fn=self._compute_batch,
             max_batch_size=max_batch_size,
             max_batch_wait_ms=max_batch_wait_ms,
+            stream_chunk_batch_wait_ms=stream_chunk_batch_wait_ms,
         )
 
     def is_streaming_payload(self, payload: StagePayload) -> bool:
@@ -71,6 +78,19 @@ class _TestStreamingScheduler(StreamingSimpleScheduler):
         for payload in payloads:
             payload.data = {"batch": payload.request_id}
         return payloads
+
+
+class _BatchTerminalScheduler(_TestStreamingScheduler):
+    _can_batch_streaming_requests = True
+    _stream_chunk_batch_max = 4
+
+    def __init__(self, **kwargs) -> None:
+        self.done_batches: list[list[str]] = []
+        super().__init__(**kwargs)
+
+    def on_stream_done_batch(self, request_ids: list[str]):
+        self.done_batches.append(list(request_ids))
+        return super().on_stream_done_batch(request_ids)
 
 
 def _drain_results(scheduler: StreamingSimpleScheduler) -> list[OutgoingMessage]:
@@ -140,6 +160,29 @@ def test_streaming_simple_scheduler_done_before_payload_finalizes_later() -> Non
     assert out.data == {"done": "req"}
     assert "req" not in scheduler._pending_done
     assert "req" not in scheduler.stream_state
+
+
+def test_streaming_terminal_payloads_batch_across_interleaved_done() -> None:
+    scheduler = _BatchTerminalScheduler(max_batch_size=2)
+    scheduler._pending_done.add("a")
+    first = IncomingMessage("a", "new_request", _payload("a", stream=True))
+    scheduler.inbox.put(IncomingMessage("b", "stream_done"))
+    scheduler.inbox.put(
+        IncomingMessage("b", "new_request", _payload("b", stream=True))
+    )
+    scheduler.inbox.put(IncomingMessage("c", "stream_done"))
+    scheduler.inbox.put(
+        IncomingMessage("c", "new_request", _payload("c", stream=True))
+    )
+
+    batch = scheduler._collect_new_request_batch(first)
+    scheduler._handle_new_request_batch(batch)
+
+    assert [msg.request_id for msg in batch] == ["a", "b", "c"]
+    assert scheduler.done_batches == [["a", "b", "c"]]
+    assert [msg.request_id for msg in _drain_results(scheduler)] == ["a", "b", "c"]
+    assert not scheduler._pending_done
+    assert not scheduler.stream_state
 
 
 def test_streaming_simple_scheduler_ignores_late_non_streaming_done() -> None:
@@ -239,6 +282,30 @@ def test_stream_chunk_batch_coalesces_queued_chunks_into_one_pump() -> None:
     scheduler._handle_message(_chunk("a", "x"), None)
     assert scheduler.pump_batches == [["a", "b", "c"]]
     assert [m.data["chunk"] for m in _drain_results(scheduler)] == ["x", "y", "z"]
+
+
+def test_stream_chunk_batch_waits_for_a_late_chunk(monkeypatch) -> None:
+    scheduler = _BatchStreamingScheduler(
+        max_batch_size=4,
+        stream_chunk_batch_wait_ms=1.0,
+    )
+    def always_empty():
+        raise queue.Empty
+
+    get_calls = 0
+
+    def late_get(timeout=None):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            return _chunk("c", "z")
+        raise queue.Empty
+
+    monkeypatch.setattr(scheduler.inbox, "get_nowait", always_empty)
+    monkeypatch.setattr(scheduler.inbox, "get", late_get)
+    batch = scheduler._collect_stream_chunk_batch(_chunk("a", "x"))
+
+    assert [msg.request_id for msg in batch] == ["a", "c"]
 
 
 def test_stream_chunk_batch_can_stop_before_duplicate_request() -> None:

@@ -11,6 +11,7 @@ from sglang.srt.layers.sampler import multinomial_with_seed
 from triton.language.extra import libdevice
 
 _UINT32_MAX_F64 = tl.constexpr(float(torch.iinfo(torch.uint32).max))
+_COMPACT_TOP_K_WIDTH = 50
 
 
 @triton.jit
@@ -75,6 +76,77 @@ def _seeded_gumbel_argmax_kernel(
     )
 
 
+@triton.jit
+def _murmur_hash32_matrix_kernel(
+    seeds_ptr,
+    positions_ptr,
+    token_ids_ptr,
+    output_ptr,
+    num_rows,
+    num_cols,
+    SEED_STRIDE: tl.constexpr,
+    POSITION_STRIDE: tl.constexpr,
+    TOKEN_ROW_STRIDE: tl.constexpr,
+    TOKEN_COL_STRIDE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Hash row-specific original token ids for compact candidate sampling."""
+
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_SIZE)
+    valid = (row < num_rows) & (cols < num_cols)
+    seed = tl.load(seeds_ptr + row * SEED_STRIDE).to(tl.uint64)
+    position = tl.load(positions_ptr + row * POSITION_STRIDE).to(tl.uint32)
+    token_ids = tl.load(
+        token_ids_ptr
+        + row * TOKEN_ROW_STRIDE
+        + cols * TOKEN_COL_STRIDE,
+        mask=valid,
+        other=0,
+    ).to(tl.uint32)
+
+    hash_value: tl.uint32 = 0
+    hash_value = murmur3_mix(hash_value, (seed & 0xFFFFFFFF).to(tl.uint32))
+    hash_value = murmur3_mix(
+        hash_value,
+        ((seed >> 32) & 0xFFFFFFFF).to(tl.uint32),
+    )
+    hash_value = murmur3_mix(hash_value, position)
+    hash_value = murmur3_mix(hash_value, token_ids)
+    hash_value ^= 16
+    hash_value = fmix32(hash_value)
+    tl.store(
+        output_ptr + row * num_cols + cols,
+        hash_value,
+        mask=valid,
+    )
+
+
+def _murmur_hash32_matrix(
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    rows, width = token_ids.shape
+    output = torch.empty(token_ids.shape, dtype=torch.uint32, device=token_ids.device)
+    block_size = triton.next_power_of_2(width)
+    _murmur_hash32_matrix_kernel[(rows,)](
+        seeds,
+        positions,
+        token_ids,
+        output,
+        rows,
+        width,
+        SEED_STRIDE=seeds.stride(0),
+        POSITION_STRIDE=positions.stride(0),
+        TOKEN_ROW_STRIDE=token_ids.stride(0),
+        TOKEN_COL_STRIDE=token_ids.stride(1),
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+    )
+    return output
+
+
 def seeded_gumbel_argmax(
     scores: torch.Tensor,
     seeds: torch.Tensor,
@@ -137,7 +209,14 @@ def multinomial_with_seed_and_token_ids(
     """Seeded Gumbel-max using original vocabulary ids as RNG columns."""
 
     seed = seed.to(torch.uint64)
-    hashed = murmur_hash32(seed, positions, token_ids)
+    if token_ids.ndim == 2:
+        # ``murmur_hash32`` accepts one token column per row. Flatten the
+        # candidate matrix while broadcasting each row's seed/position, then
+        # restore the matrix for the final argmax. The 1D path remains the
+        # original control-token implementation.
+        hashed = _murmur_hash32_matrix(seed, positions, token_ids)
+    else:
+        hashed = murmur_hash32(seed, positions, token_ids)
     noise = hashed.to(torch.float64) / torch.iinfo(torch.uint32).max
     noise.log_().clamp_(min=torch.finfo(noise.dtype).min).neg_()
     noise.log_().neg_()
@@ -190,8 +269,67 @@ def sample_seeded_branchless(
     return torch.where(fallback, torch.argmax(logits, dim=-1), sampled)
 
 
+def sample_seeded_compact_topk(
+    logits: torch.Tensor,
+    *,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+) -> torch.Tensor:
+    """Seeded sampling over a bounded top-k candidate matrix.
+
+    The local-depth defaults use ``top_k=50`` for text and ``top_k=25`` for
+    audio.  ``torch.topk`` therefore replaces the full-vocabulary sort, while
+    :func:`multinomial_with_seed_and_token_ids` hashes the original token ids
+    so the retained candidates keep the production RNG mapping.  Callers must
+    route requests with ``top_k`` outside ``(0, 50]`` to the general sampler.
+    Ties at the top-k boundary retain ``torch.topk``'s ordering semantics.
+    """
+
+    vocab = int(logits.shape[-1])
+    width = min(_COMPACT_TOP_K_WIDTH, vocab)
+    do_sample = temperature > 0
+    safe_temp = torch.where(do_sample, temperature, torch.ones_like(temperature))
+    scores = logits / safe_temp.unsqueeze(1)
+
+    top_scores, token_ids = torch.topk(scores, k=width, dim=-1, sorted=True)
+    ranks = torch.arange(width, device=logits.device, dtype=torch.long).view(1, -1)
+    # For the supported path top_k is positive and <= width.  The inactive
+    # branch still keeps all candidates when vocab <= width (e.g. the 2-token
+    # control head), avoiding a special graph shape for text sampling.
+    k_clamped = top_k.to(device=logits.device, dtype=torch.long).clamp(
+        min=1, max=width
+    )
+    active = (top_k > 0) & (top_k < vocab)
+    keep = (~active).unsqueeze(1) | (ranks < k_clamped.unsqueeze(1))
+    compact_scores = top_scores.masked_fill(~keep, float("-inf"))
+
+    p_active = (top_p > 0.0) & (top_p < 1.0)
+    probs_sorted = torch.softmax(compact_scores, dim=-1)
+    cumulative = torch.cumsum(probs_sorted, dim=-1)
+    remove = (cumulative > top_p.unsqueeze(1)) & p_active.unsqueeze(1)
+    remove[..., 1:] = remove[..., :-1].clone()
+    remove[..., 0] = False
+    compact_scores = compact_scores.masked_fill(remove, float("-inf"))
+
+    probs = torch.softmax(compact_scores, dim=-1)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    sampled_local = multinomial_with_seed_and_token_ids(
+        compact_scores,
+        seeds,
+        positions,
+        token_ids,
+    )
+    sampled = token_ids.gather(-1, sampled_local.unsqueeze(-1)).squeeze(-1)
+    fallback = (~do_sample) | (probs.sum(dim=-1) <= 0)
+    return torch.where(fallback, torch.argmax(logits, dim=-1), sampled)
+
+
 __all__ = [
     "multinomial_with_seed_and_token_ids",
     "sample_seeded_branchless",
+    "sample_seeded_compact_topk",
     "seeded_gumbel_argmax",
 ]

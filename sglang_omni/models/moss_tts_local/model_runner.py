@@ -31,11 +31,25 @@ class MossTTSLocalModelRunner(ModelRunner):
 
     _outbox: Any | None = None
     _vocoder_target = "vocoder"
+    _stream_transport_batch_frames = MOSS_STREAM_TRANSPORT_BATCH_FRAMES
 
-    def __init__(self, tp_worker: Any, output_processor: Any):
+    def __init__(
+        self,
+        tp_worker: Any,
+        output_processor: Any,
+        *,
+        stream_transport_batch_frames: int = MOSS_STREAM_TRANSPORT_BATCH_FRAMES,
+    ):
         super().__init__(tp_worker, output_processor)
         self._outbox: Any | None = None
         self._vocoder_target = "vocoder"
+        stream_transport_batch_frames = int(stream_transport_batch_frames)
+        if stream_transport_batch_frames < 1:
+            raise ValueError(
+                "stream_transport_batch_frames must be >= 1, got "
+                f"{stream_transport_batch_frames}"
+            )
+        self._stream_transport_batch_frames = stream_transport_batch_frames
 
     def set_stream_outbox(self, outbox: Any) -> None:
         self._outbox = outbox
@@ -54,7 +68,11 @@ class MossTTSLocalModelRunner(ModelRunner):
         if not pending:
             return
         first_sent = data.stream_first_batch_sent
-        threshold = 1 if not first_sent else MOSS_STREAM_TRANSPORT_BATCH_FRAMES
+        threshold = (
+            1
+            if not first_sent
+            else max(int(self._stream_transport_batch_frames), 1)
+        )
         if not force and len(pending) < threshold:
             return
         rows = pending[0] if len(pending) == 1 else torch.stack(pending)
@@ -73,7 +91,7 @@ class MossTTSLocalModelRunner(ModelRunner):
     def on_request_finished(self, request_id: str, req_data: Any) -> None:
         # post_process_outputs only force-flushes on the audio end token; any
         # other stop (max_new_tokens, scheduler stop) would strand up to
-        # MOSS_STREAM_TRANSPORT_BATCH_FRAMES - 1 frames, and the terminal
+        # stream_transport_batch_frames - 1 frames, and the terminal
         # payload carries no audio to recover them from.
         self._flush_stream_rows(request_id, req_data, force=True)
 
@@ -261,6 +279,9 @@ class MossTTSLocalModelRunner(ModelRunner):
         next_text = rows[:, 0]
         next_token_ids = self._row_radix_token_ids(rows, next_text, end_id)
         result.next_token_ids = next_token_ids
+        # Keep CPU-side reporting on the pinned rail while the device tensor
+        # remains the FutureMap input for the next decode step.
+        self._stage_token_ids(result, next_token_ids)
 
     def _run_frame_decode(self, result: Any, forward_batch: Any, requests: list):
         """GPU half shared by sync ``_collect_frame`` and async
@@ -373,6 +394,11 @@ class MossTTSLocalModelRunner(ModelRunner):
         use_graph = (
             not has_audio_repetition_penalty and batch_size <= frame_graph_max_bs
         )
+        if use_graph and getattr(self.model, "_compact_topk_sampling", False):
+            # The compact graph sampler is specialized to the checkpoint
+            # defaults. Request-level top-k overrides use the eager full-vocab
+            # sampler so their distribution and tie behavior remain unchanged.
+            use_graph = pool.rows_match_compact_topk(pool_rows)
         if use_graph:
             stop_choice, codes, feedback = self.model.decode_frame_graphed(
                 hidden_states,
@@ -470,6 +496,7 @@ class MossTTSLocalModelRunner(ModelRunner):
         rows, end_id = self._run_frame_decode(result, forward_batch, requests)
         next_token_ids = self._row_radix_token_ids(rows, rows[:, 0], end_id)
         result.next_token_ids = next_token_ids
+        self._stage_token_ids(result, next_token_ids)
         return next_token_ids.clone()
 
     def post_decode_resolve(

@@ -11,8 +11,23 @@ from torch.nn import functional as F
 def _pointwise_conv1d_parameters(
     module: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if not isinstance(module, nn.Conv1d):
-        raise TypeError(f"expected Conv1d, got {module.__class__.__name__}")
+    # Weight-normalized Conv1d modules are exposed as
+    # ``ParametrizedConv1d``.  They retain the pointwise Conv1d contract and
+    # provide a materialized ``weight`` property, so inspect the contract
+    # instead of requiring the concrete class.
+    if not all(
+        hasattr(module, attribute)
+        for attribute in (
+            "kernel_size",
+            "stride",
+            "padding",
+            "dilation",
+            "groups",
+            "weight",
+            "bias",
+        )
+    ):
+        raise TypeError(f"expected pointwise Conv1d, got {module.__class__.__name__}")
     if (
         module.kernel_size != (1,)
         or module.stride != (1,)
@@ -86,6 +101,10 @@ class MossAudioTokenizerQuantizerDecoder:
         ).view(-1, 1, 1)
         self._output_weight = output_weight
         self._output_bias = output_bias
+
+    @property
+    def device(self) -> torch.device:
+        return self._flat_codebooks.device
 
     def decode_codes(self, codes: torch.Tensor) -> torch.Tensor:
         if codes.ndim != 3:

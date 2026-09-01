@@ -101,6 +101,7 @@ class MossTTSLocalDecodeStatePool:
         self._rid_to_row: dict[str, int] = {}
         self._params_written_rids: set[str] = set()
         self._audio_repetition_penalty_rows: set[int] = set()
+        self._compact_topk_rows: set[int] = set()
         # Real rows 0..P-2 are assignable; the padding row stays out of the
         # free list so it is never handed to a request.
         self._free_rows: list[int] = list(range(self.padding_row))
@@ -148,6 +149,7 @@ class MossTTSLocalDecodeStatePool:
         self.audio_repetition_penalty[row_idx] = 0.0
         self.audio_token_presence[row_idx].zero_()
         self._audio_repetition_penalty_rows.discard(int(row_idx))
+        self._compact_topk_rows.discard(int(row_idx))
 
     def write_params(self, row_idx: int, data: Any) -> None:
         """Write the seven request-static sampling fields into ``row_idx``.
@@ -168,6 +170,10 @@ class MossTTSLocalDecodeStatePool:
         except AttributeError:
             audio_repetition_penalty = 1.0
         self.audio_repetition_penalty[row_idx] = audio_repetition_penalty
+        if int(data.text_top_k) == 50 and int(data.audio_top_k) == 25:
+            self._compact_topk_rows.add(int(row_idx))
+        else:
+            self._compact_topk_rows.discard(int(row_idx))
         if audio_repetition_penalty == 1.0:
             self._audio_repetition_penalty_rows.discard(int(row_idx))
         else:
@@ -223,6 +229,10 @@ class MossTTSLocalDecodeStatePool:
     def rows_have_audio_repetition_penalty(self, pool_rows: list[int]) -> bool:
         """Return whether any host row has a non-default audio penalty."""
         return any(int(row) in self._audio_repetition_penalty_rows for row in pool_rows)
+
+    def rows_match_compact_topk(self, pool_rows: list[int]) -> bool:
+        """Whether every active row uses the compact sampler's default widths."""
+        return all(int(row) in self._compact_topk_rows for row in pool_rows)
 
     def update_audio_history(self, row_t: torch.Tensor, rows: torch.Tensor) -> None:
         """Mark generated audio codes as present for future repetition penalty."""

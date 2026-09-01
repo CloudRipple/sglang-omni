@@ -40,6 +40,7 @@ class StreamingSimpleScheduler:
     """
 
     _can_batch_stream_chunks: bool = False
+    _can_batch_streaming_requests: bool = False
     _stream_chunk_batch_max: int | None = None
     _stream_chunk_batch_distinct_requests: bool = False
 
@@ -50,6 +51,7 @@ class StreamingSimpleScheduler:
         batch_compute_fn: Callable[[list[Any]], list[Any]] | None = None,
         max_batch_size: int = 1,
         max_batch_wait_ms: int = 0,
+        stream_chunk_batch_wait_ms: float = 0.0,
         request_cost_fn: Callable[[Any], int] | None = None,
         max_batch_cost: int | None = None,
         abort_callback: Callable[[str], None] | None = None,
@@ -62,6 +64,9 @@ class StreamingSimpleScheduler:
         self._batch_fn = batch_compute_fn
         self._max_batch_size = max(int(max_batch_size), 1)
         self._max_batch_wait_s = max(float(max_batch_wait_ms), 0.0) / 1000.0
+        self._stream_chunk_batch_wait_s = (
+            max(float(stream_chunk_batch_wait_ms), 0.0) / 1000.0
+        )
         self._request_cost_fn = request_cost_fn
         self._max_batch_cost = (
             max(int(max_batch_cost), 0) if max_batch_cost is not None else None
@@ -113,6 +118,13 @@ class StreamingSimpleScheduler:
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
         del request_id
         return []
+
+    def on_stream_done_batch(
+        self, request_ids: list[str]
+    ) -> dict[str, list[OutgoingMessage]]:
+        return {
+            request_id: self.on_stream_done(request_id) for request_id in request_ids
+        }
 
     def clear_stream_state(self, request_id: str) -> None:
         del request_id
@@ -250,16 +262,25 @@ class StreamingSimpleScheduler:
         self, first_msg: IncomingMessage
     ) -> list[IncomingMessage]:
         batch = [first_msg]
+        first_is_streaming = self.is_streaming_payload(first_msg.data)
         if (
             self._batch_fn is None
-            or self._max_batch_size <= 1
-            or self.is_streaming_payload(first_msg.data)
+            or (
+                first_is_streaming
+                and not self._can_batch_streaming_requests
+            )
         ):
             return batch
 
         batch_cost = self._message_cost(first_msg)
         deadline = time.monotonic() + self._max_batch_wait_s
-        while len(batch) < self._max_batch_size:
+        cap = (
+            self._stream_chunk_batch_max or self._max_batch_size
+            if first_is_streaming
+            else self._max_batch_size
+        )
+        cap = max(int(cap), 1)
+        while len(batch) < cap:
             try:
                 msg = self.inbox.get_nowait()
             except _queue_mod.Empty:
@@ -279,8 +300,12 @@ class StreamingSimpleScheduler:
                     and msg.request_id not in self._stream_payloads
                 ):
                     # Note(Chenchen Hong): Done-before-payload only latches state,
-                    # so defer it and keep looking for terminal payloads that can batch.
-                    self._pending_messages.append(msg)
+                    # so consume it and keep looking for terminal payloads that can batch.
+                    if first_is_streaming and self._can_batch_streaming_requests:
+                        with self._state_lock:
+                            self._pending_done.add(msg.request_id)
+                    else:
+                        self._pending_messages.append(msg)
                     continue
                 self._pending_messages.append(msg)
                 break
@@ -290,7 +315,10 @@ class StreamingSimpleScheduler:
                 self._emit_error(msg.request_id, exc)
                 self.abort(msg.request_id)
                 continue
-            if is_streaming:
+            if is_streaming != first_is_streaming:
+                self._pending_messages.append(msg)
+                break
+            if is_streaming and not self._can_batch_streaming_requests:
                 self._pending_messages.append(msg)
                 break
             if self._max_batch_cost is not None:
@@ -310,8 +338,12 @@ class StreamingSimpleScheduler:
     def _collect_stream_chunk_batch(
         self, first_msg: IncomingMessage
     ) -> list[IncomingMessage]:
-        """Front-pushback of the first non-chunk message preserves arrival order; no blocking
-        wait, so only already-queued chunks coalesce."""
+        """Drain a bounded stream-chunk coalescing window.
+
+        A zero window retains the historical greedy drain. With a positive
+        window, an empty inbox may receive a few late chunks while the first
+        non-chunk or duplicate-request message is still pushed back in order.
+        """
         batch = [first_msg]
         seen_request_ids = (
             {first_msg.request_id}
@@ -321,11 +353,18 @@ class StreamingSimpleScheduler:
         cap = self._stream_chunk_batch_max or max(self._max_batch_size, 1)
         if cap <= 1:
             return batch
+        deadline = time.monotonic() + self._stream_chunk_batch_wait_s
         while len(batch) < cap:
             try:
                 msg = self.inbox.get_nowait()
             except _queue_mod.Empty:
-                break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    msg = self.inbox.get(timeout=remaining)
+                except _queue_mod.Empty:
+                    break
             if msg.type != "stream_chunk":
                 self._pending_messages.appendleft(msg)
                 break
@@ -372,10 +411,13 @@ class StreamingSimpleScheduler:
             else:
                 non_streaming.append(msg)
 
-        for msg in streaming:
-            if self._is_aborted(msg.request_id):
-                continue
-            self._handle_streaming_new_request(msg.request_id, msg.data)
+        if self._can_batch_streaming_requests:
+            self._handle_streaming_new_request_batch(streaming)
+        else:
+            for msg in streaming:
+                if self._is_aborted(msg.request_id):
+                    continue
+                self._handle_streaming_new_request(msg.request_id, msg.data)
 
         if non_streaming:
             self._run_non_streaming_batch(non_streaming, loop)
@@ -468,15 +510,66 @@ class StreamingSimpleScheduler:
         return item
 
     def _handle_streaming_new_request(self, request_id: str, payload: Any) -> None:
-        with self._abort_lock:
-            self._aborted_request_ids.discard(request_id)
+        self._handle_streaming_new_request_batch(
+            [IncomingMessage(request_id=request_id, type="new_request", data=payload)]
+        )
+
+    def _handle_streaming_new_request_batch(
+        self, batch: list[IncomingMessage]
+    ) -> None:
+        ready_done: list[str] = []
+        for msg in batch:
+            request_id = msg.request_id
+            if self._is_aborted(request_id):
+                continue
+            payload = msg.data
+            with self._abort_lock:
+                self._aborted_request_ids.discard(request_id)
+            with self._state_lock:
+                self._completed_non_streaming_request_ids.discard(request_id)
+                self._stream_payloads[request_id] = payload
+                self.on_streaming_new_request(request_id, payload)
+                if request_id in self._pending_done:
+                    self._pending_done.discard(request_id)
+                    ready_done.append(request_id)
+        if ready_done:
+            self._handle_stream_done_batch(ready_done)
+
+    def _handle_stream_done_batch(self, request_ids: list[str]) -> None:
+        ready: list[str] = []
+        failed: list[str] = []
         with self._state_lock:
-            self._completed_non_streaming_request_ids.discard(request_id)
-            self._stream_payloads[request_id] = payload
-            self.on_streaming_new_request(request_id, payload)
-            if request_id in self._pending_done:
-                self._pending_done.discard(request_id)
-                self._handle_stream_done(request_id)
+            for request_id in request_ids:
+                if self._is_aborted(request_id):
+                    continue
+                if request_id not in self._stream_payloads:
+                    if request_id not in self._completed_non_streaming_request_ids:
+                        self._pending_done.add(request_id)
+                    continue
+                ready.append(request_id)
+            if not ready:
+                return
+            try:
+                outputs = self.on_stream_done_batch(ready)
+                if set(outputs) != set(ready):
+                    raise RuntimeError(
+                        "on_stream_done_batch must return every ready request id; "
+                        f"ready={ready}, returned={list(outputs)}"
+                    )
+            except Exception as exc:
+                for request_id in ready:
+                    self._emit_error(request_id, exc)
+                    self._abort_state(request_id)
+                    failed.append(request_id)
+            else:
+                for request_id in ready:
+                    for out in outputs[request_id]:
+                        if not self._is_aborted(request_id):
+                            self.outbox.put(out)
+                    if not self._is_aborted(request_id):
+                        self._clear_request_state(request_id)
+        for request_id in failed:
+            self._cleanup_aborted_request(request_id)
 
     def _handle_stream_chunk(self, request_id: str, item: Any) -> None:
         item = self._validate_stream_chunk_item(request_id, item)
@@ -506,17 +599,7 @@ class StreamingSimpleScheduler:
             self.on_stream_chunk_batch(items)
 
     def _handle_stream_done(self, request_id: str) -> None:
-        with self._state_lock:
-            if request_id not in self._stream_payloads:
-                if request_id in self._completed_non_streaming_request_ids:
-                    return
-                self._pending_done.add(request_id)
-                return
-            for out in self.on_stream_done(request_id):
-                if not self._is_aborted(request_id):
-                    self.outbox.put(out)
-            if not self._is_aborted(request_id):
-                self._clear_request_state(request_id)
+        self._handle_stream_done_batch([request_id])
 
     # Compatibility wrappers for existing tests and subclasses.
     def _on_streaming_new_request(self, request_id: str, payload: Any) -> None:
