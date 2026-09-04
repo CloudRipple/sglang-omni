@@ -98,7 +98,9 @@ def test_tree_cache_does_not_wrap_native_streaming_cache(monkeypatch) -> None:
         def supports_streaming_session() -> bool:
             return True
 
-    monkeypatch.setattr(cache_module, "RadixCache", NativeStreamingCache)
+    # The lru default selects EvictHeapRadixCache; a cache that natively
+    # supports streaming sessions must not be wrapped in StreamingSession.
+    monkeypatch.setattr(cache_module, "EvictHeapRadixCache", NativeStreamingCache)
 
     tree_cache = cache_module.create_tree_cache(
         _server_args(enable_streaming_session=True),

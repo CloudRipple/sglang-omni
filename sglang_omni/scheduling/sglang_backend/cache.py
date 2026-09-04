@@ -42,7 +42,7 @@ def create_tree_cache(
         tree_cache = RadixCache(params)
 
     if (
-        server_args.enable_streaming_session
+        getattr(server_args, "enable_streaming_session", False)
         and not tree_cache.supports_streaming_session()
     ):
         from sglang.srt.session.streaming_session import StreamingSession
