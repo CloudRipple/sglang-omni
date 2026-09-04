@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import queue
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -210,6 +211,18 @@ def _metadata(**extra: Any) -> dict[str, Any]:
     }
 
 
+def _metadata(**extra: Any) -> dict[str, Any]:
+    return {
+        "stream": True,
+        "modality": "audio_codes",
+        "n_vq": N_VQ,
+        # Session identity rides every chunk, mirroring the engine's
+        # stream_metadata stamping; the vocoder keys its codec slot by it.
+        "session_id": "session-1",
+        **extra,
+    }
+
+
 def _stream_item(row: torch.Tensor, chunk_id: int, **metadata: Any) -> StreamItem:
     return StreamItem(
         chunk_id=chunk_id,
@@ -331,7 +344,18 @@ def test_ramp_final_flush_and_terminal_order() -> None:
     np.testing.assert_array_equal(_stream_audio(messages, "req"), _reference(rows))
     assert messages[-1].data.data["sample_rate"] == SAMPLE_RATE
     assert scheduler._session is not None
+    # The successful turn keeps the session's slot: no reset, lease stays.
+    assert scheduler._session.active_leases == 1
+    assert list(scheduler._codec_sessions) == ["session-1"]
+
+    # Session close releases the slot and resets the causal state.
+    result = scheduler.admin("close_realtime_session", {"session_id": "session-1"})
+    assert result["success"] is True
+    assert result["data"]["released"] is True
     assert scheduler._session.active_leases == 0
+    assert not scheduler._codec_sessions
+    for state in codec.state_modules:
+        assert (state._streaming_state.offsets == 0).all()
 
 
 def test_equal_ramp_steps_coalesce_without_cross_slot_drift() -> None:
@@ -342,8 +366,8 @@ def test_equal_ramp_steps_coalesce_without_cross_slot_drift() -> None:
     for index in range(6):
         items.extend(
             [
-                ("a", _stream_item(rows_a[index], index)),
-                ("b", _stream_item(rows_b[index], index)),
+                ("a", _stream_item(rows_a[index], index, session_id="session-a")),
+                ("b", _stream_item(rows_b[index], index, session_id="session-b")),
             ]
         )
 
@@ -480,12 +504,12 @@ def test_staggered_requests_keep_their_exact_next_ramp_size() -> None:
     scheduler, codec = _scheduler(stream_slots=2)
     rows_a = _rows(3, seed=31)
     rows_b = _rows(3, seed=32)
-    scheduler._on_chunk("a", _stream_item(rows_a[0], 0))
+    scheduler._on_chunk("a", _stream_item(rows_a[0], 0, session_id="session-a"))
     scheduler.on_stream_chunk_batch(
         [
             ("a", _stream_item(rows_a[1], 1)),
             ("a", _stream_item(rows_a[2], 2)),
-            ("b", _stream_item(rows_b[0], 0)),
+            ("b", _stream_item(rows_b[0], 0, session_id="session-b")),
         ]
     )
     scheduler.on_stream_chunk_batch(
@@ -572,24 +596,44 @@ def test_shared_exec_mask_only_advances_active_eager_slot(stream_slots: int) -> 
 
 
 def test_masked_release_preserves_peer_and_reused_slot_starts_fresh() -> None:
-    scheduler, _ = _scheduler(stream_slots=2)
+    scheduler, codec = _scheduler(stream_slots=2)
     rows_a = _rows(3, seed=4)
     rows_b = _rows(6, seed=5)
     scheduler.on_stream_chunk_batch(
         [
-            *(("a", _stream_item(row, index)) for index, row in enumerate(rows_a)),
-            *(("b", _stream_item(row, index)) for index, row in enumerate(rows_b[:3])),
+            *(
+                ("a", _stream_item(row, index, session_id="session-a"))
+                for index, row in enumerate(rows_a)
+            ),
+            *(
+                ("b", _stream_item(row, index, session_id="session-b"))
+                for index, row in enumerate(rows_b[:3])
+            ),
         ]
     )
-    released_slot = scheduler._stream_states["a"].slot
+    a_slot = scheduler._stream_states["a"].slot
+    states = _active_fake_states(codec)
 
+    # A successful turn drains PCM but keeps the session's slot warm: the peer
+    # is untouched and nothing returns to the pool.
     _finish(scheduler, rows_a, request_id="a")
+    assert scheduler._session is not None
+    assert scheduler._session.active_leases == 2
+    assert all(int(state.offsets[a_slot]) == 3 for state in states)
+
+    # Session close releases-and-resets that slot; the peer stream is untouched.
+    result = scheduler.admin("close_realtime_session", {"session_id": "session-a"})
+    assert result["success"] is True
+    assert result["data"]["released"] is True
+    assert all(int(state.offsets[a_slot]) == 0 for state in states)
+
     for index, row in enumerate(rows_b[3:], start=3):
         scheduler._on_chunk("b", _stream_item(row, index))
 
+    # A new session reuses the reset slot and starts from a fresh causal state.
     rows_c = _rows(1, seed=6)
-    scheduler._on_chunk("c", _stream_item(rows_c[0], 0))
-    assert scheduler._stream_states["c"].slot == released_slot
+    scheduler._on_chunk("c", _stream_item(rows_c[0], 0, session_id="session-c"))
+    assert scheduler._stream_states["c"].slot == a_slot
     _finish(scheduler, rows_c, request_id="c")
     _finish(scheduler, rows_b, request_id="b")
 
@@ -601,8 +645,10 @@ def test_masked_release_preserves_peer_and_reused_slot_starts_fresh() -> None:
 def test_slot_exhaustion_errors_without_displacing_live_request() -> None:
     scheduler, _ = _scheduler(stream_slots=1)
     row = _rows(1, seed=7)[0]
-    scheduler._on_chunk("live", _stream_item(row, 0))
-    scheduler._on_chunk("overflow", _stream_item(row, 0))
+    scheduler._on_chunk("live", _stream_item(row, 0, session_id="session-live"))
+    scheduler._on_chunk(
+        "overflow", _stream_item(row, 0, session_id="session-overflow")
+    )
 
     messages = _drain(scheduler)
     error = next(message for message in messages if message.request_id == "overflow")
@@ -623,9 +669,11 @@ def test_codec_model_info_tracks_acquire_release_reuse_and_exhaustion() -> None:
     assert initial["codec_free_slots"] == 1
     assert initial["codec_decoder_dtype"] == "float32"
 
-    scheduler._on_chunk("live", _stream_item(row, 0))
+    scheduler._on_chunk("live", _stream_item(row, 0, session_id="session-live"))
     leased_slot = scheduler._stream_states["live"].slot
-    scheduler._on_chunk("overflow", _stream_item(row, 0))
+    scheduler._on_chunk(
+        "overflow", _stream_item(row, 0, session_id="session-overflow")
+    )
     active = scheduler.admin("model_info")["data"]
     assert active["codec_active_slots"] == 1
     assert active["codec_free_slots"] == 0
@@ -661,8 +709,9 @@ def test_codec_reset_failure_quarantines_slot_and_reports_error() -> None:
         raise RuntimeError("injected codec reset failure")
 
     streaming_state.reset = fail_reset
+    # Aborts release the session's slot; the failing reset quarantines it.
     with pytest.raises(RuntimeError, match="injected codec reset failure"):
-        scheduler.clear_stream_state("live")
+        scheduler.abort("live")
 
     snapshot = scheduler.admin("model_info")["data"]
     assert snapshot["codec_active_slots"] == 0
@@ -682,8 +731,8 @@ def test_shared_codec_step_failure_aborts_every_participant() -> None:
 
     scheduler.on_stream_chunk_batch(
         [
-            ("a", _stream_item(rows_a[0], 0)),
-            ("b", _stream_item(rows_b[0], 0)),
+            ("a", _stream_item(rows_a[0], 0, session_id="session-a")),
+            ("b", _stream_item(rows_b[0], 0, session_id="session-b")),
         ]
     )
 
@@ -1043,8 +1092,9 @@ def test_audio_eos_without_real_frames_emits_only_terminal_result() -> None:
     messages = _drain(scheduler)
     assert [message.type for message in messages] == ["result"]
     assert codec.batch_decode_calls == 0
-    assert scheduler._session is not None
-    assert scheduler._session.active_leases == 0
+    # A turn that never streamed a codec frame never binds a slot.
+    assert scheduler._session is None
+    assert not scheduler._codec_sessions
 
 
 def test_offline_decode_borrows_free_slot_without_advancing_live_stream() -> None:
@@ -1079,3 +1129,176 @@ def test_offline_decode_fails_when_all_fixed_slots_are_leased() -> None:
         scheduler._vocode(
             _payload(_rows(2, seed=15), request_id="offline", stream=False)
         )
+
+
+def test_turns_of_one_session_share_one_slot_and_continue_codec_state() -> None:
+    """The issue-1812 contract: turn boundaries inside a session do not reset
+    the causal codec state."""
+    scheduler, codec = _scheduler(stream_slots=2)
+    rows_t1 = _rows(8, seed=40)
+    rows_t2 = _rows(4, seed=41)
+
+    for index, row in enumerate(rows_t1):
+        scheduler._on_chunk("turn-1", _stream_item(row, index))
+    _finish(scheduler, rows_t1, request_id="turn-1")
+
+    entry = scheduler._codec_sessions["session-1"]
+    slot = entry.slot
+    states = _active_fake_states(codec)
+    assert all(int(state.offsets[slot]) == 8 for state in states)
+
+    # Turn 2 of the same session reuses the slot and continues the context:
+    # all four frames stream in, and ramp emissions continue per contract.
+    for index, row in enumerate(rows_t2):
+        scheduler._on_chunk("turn-2", _stream_item(row, index, session_id="session-1"))
+
+    assert scheduler._codec_sessions["session-1"].slot == slot
+    assert scheduler._stream_states["turn-2"].slot == slot
+    # The first frame of turn 2 decodes against the 8-frame history: the fake
+    # codec prices it with offset_units = 2 states * 8 committed frames.
+    row0_value = float(rows_t2[0].sum()) + 1000.0 * (2 * 8)
+    messages = _drain(scheduler)
+    audio = _stream_audio(messages, "turn-2")
+    assert audio[0] == pytest.approx(row0_value)
+
+    _finish(scheduler, rows_t2, request_id="turn-2")
+    assert all(int(state.offsets[slot]) == 12 for state in states)
+    assert scheduler._session is not None
+    assert scheduler._session.active_leases == 1
+
+
+def test_new_turn_after_session_close_restarts_from_fresh_codec_state() -> None:
+    scheduler, codec = _scheduler(stream_slots=1)
+    rows_t1 = _rows(3, seed=50)
+    rows_t2 = _rows(3, seed=51)
+
+    for index, row in enumerate(rows_t1):
+        scheduler._on_chunk("turn-1", _stream_item(row, index))
+    _finish(scheduler, rows_t1, request_id="turn-1")
+    slot = scheduler._codec_sessions["session-1"].slot
+    states = _active_fake_states(codec)
+    assert all(int(state.offsets[slot]) == 3 for state in states)
+
+    result = scheduler.admin("close_realtime_session", {"session_id": "session-1"})
+    assert result["data"]["released"] is True
+    assert not scheduler._codec_sessions
+    assert all(int(state.offsets[slot]) == 0 for state in states)
+
+    scheduler._on_chunk("turn-2", _stream_item(rows_t2[0], 0, session_id="session-1"))
+    assert scheduler._stream_states["turn-2"].slot == slot
+    row0_value = float(rows_t2[0].sum())  # fresh context: zero history offset
+    messages = _drain(scheduler)
+    audio = _stream_audio(messages, "turn-2")
+    assert audio[0] == pytest.approx(row0_value)
+
+
+def test_sessions_are_isolated_and_never_share_a_slot() -> None:
+    scheduler, _ = _scheduler(stream_slots=2)
+    row = _rows(1, seed=60)[0]
+
+    scheduler._on_chunk("a", _stream_item(row, 0, session_id="session-a"))
+    scheduler._on_chunk("b", _stream_item(row, 0, session_id="session-b"))
+
+    entry_a = scheduler._codec_sessions["session-a"]
+    entry_b = scheduler._codec_sessions["session-b"]
+    assert entry_a.slot != entry_b.slot
+
+    # Closing a session with a live turn defers until that turn's final flush;
+    # the peer session is untouched throughout.
+    scheduler.admin("close_realtime_session", {"session_id": "session-a"})
+    assert scheduler._codec_sessions["session-a"].closing is True
+    assert "session-b" in scheduler._codec_sessions
+    assert scheduler._stream_states["b"].slot == entry_b.slot
+
+    _finish(scheduler, _rows(1, seed=60), request_id="a")
+    assert "session-a" not in scheduler._codec_sessions
+    assert "session-b" in scheduler._codec_sessions
+
+    scheduler.abort("b")
+    assert not scheduler._codec_sessions
+
+
+def test_close_marker_defers_release_until_final_pcm_is_drained() -> None:
+    scheduler, codec = _scheduler(stream_slots=1)
+    rows = _rows(5, seed=70)
+    for index, row in enumerate(rows[:4]):
+        scheduler._on_chunk("turn-1", _stream_item(row, index))
+    early_messages = _drain(scheduler)
+
+    # Engine-side ephemeral close rides the turn's stream edge ahead of the
+    # terminal result; the slot release must wait for the final flush.
+    marker = StreamItem(
+        chunk_id=4,
+        data=torch.empty(0, dtype=torch.long),
+        from_stage="tts_engine",
+        metadata=_metadata(
+            session_control="close",
+            session_id="session-1",
+        ),
+    )
+    scheduler.on_stream_chunk_batch([("turn-1", marker)])
+
+    entry = scheduler._codec_sessions["session-1"]
+    assert entry.closing is True
+    assert scheduler._session is not None
+    assert scheduler._session.active_leases == 1
+
+    # The buffered fifth frame still decodes before the release lands.
+    scheduler._on_chunk("turn-1", _stream_item(rows[4], 4))
+    _finish(scheduler, rows, request_id="turn-1")
+
+    assert not scheduler._codec_sessions
+    assert scheduler._session.active_leases == 0
+    late_messages = _drain(scheduler)
+    messages = [
+        *early_messages,
+        *[message for message in late_messages if message.type != "result"],
+    ]
+    np.testing.assert_array_equal(_stream_audio(messages, "turn-1"), _reference(rows))
+
+
+def test_close_marker_for_unknown_session_is_a_no_op() -> None:
+    scheduler, _ = _scheduler(stream_slots=1)
+    marker = StreamItem(
+        chunk_id=0,
+        data=torch.empty(0, dtype=torch.long),
+        from_stage="tts_engine",
+        metadata=_metadata(
+            session_control="close",
+            session_id="session-elsewhere",
+        ),
+    )
+    scheduler.on_stream_chunk_batch([("some-request", marker)])
+    assert not scheduler._stream_states
+    assert not scheduler._codec_sessions
+    assert not _drain(scheduler)
+
+
+def test_idle_sweep_releases_slots_after_double_engine_ttl() -> None:
+    scheduler, codec = _scheduler(stream_slots=1)
+    scheduler._session_idle_ttl_s = 0.05
+    row = _rows(1, seed=80)[0]
+    scheduler._on_chunk("turn-1", _stream_item(row, 0))
+    _finish(scheduler, _rows(1, seed=80), request_id="turn-1")
+
+    states = _active_fake_states(codec)
+    slot = scheduler._codec_sessions["session-1"].slot
+    assert all(int(state.offsets[slot]) == 1 for state in states)
+
+    # Not yet beyond 2 * TTL: a new turn still sees the warm context.
+    scheduler._on_chunk("turn-2", _stream_item(row, 0, session_id="session-1"))
+    assert scheduler._stream_states["turn-2"].slot == slot
+    scheduler.abort("turn-2")  # releases (abort semantics)
+    assert not scheduler._codec_sessions
+
+    # Back to fresh demand after the entry aged past the sweep threshold.
+    scheduler._on_chunk("turn-3", _stream_item(row, 0, session_id="session-1"))
+    _finish(scheduler, _rows(1, seed=80), request_id="turn-3")
+    with scheduler._state_lock:
+        scheduler._sweep_idle_codec_sessions_locked(
+            time.monotonic() + 10 * scheduler._session_idle_ttl_s
+        )
+    assert not scheduler._codec_sessions
+    assert scheduler._session is not None
+    assert scheduler._session.active_leases == 0
+    assert all(int(state.offsets[slot]) == 0 for state in states)

@@ -255,7 +255,7 @@ def test_codec_loader_reads_only_requested_component_weights(
         torch.testing.assert_close(value.float(), expected_weights[name])
 
 
-def test_codec_memory_estimate_scales_streaming_state_with_active_turns(
+def test_codec_memory_estimate_scales_streaming_state_with_stream_slots(
     monkeypatch,
 ) -> None:
     import transformers
@@ -309,7 +309,7 @@ def test_codec_memory_estimate_scales_streaming_state_with_active_turns(
 
     decoder_bytes, state_bytes = stages.estimate_moss_tts_realtime_codec_memory(
         "codec",
-        max_active_turns=4,
+        stream_slots=4,
     )
 
     assert decoder_bytes == 40
@@ -863,6 +863,7 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
         cuda_graph_frames=[1, 3],
         cuda_graph_min_free_gb=5.0,
         dtype="float32",
+        session_idle_ttl_s=12.0,
     )
 
     assert result is scheduler
@@ -879,6 +880,7 @@ def test_create_vocoder_executor_threads_slot_limit(monkeypatch) -> None:
                 "cuda_graph": False,
                 "cuda_graph_frames": [1, 3],
                 "cuda_graph_min_free_gb": 5.0,
+                "session_idle_ttl_s": 12.0,
             },
         ),
         "warmup": 1,

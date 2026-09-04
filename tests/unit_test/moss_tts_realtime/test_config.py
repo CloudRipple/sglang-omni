@@ -50,7 +50,10 @@ def test_default_pipeline_declares_realtime_streaming_topology() -> None:
     assert engine_args["max_active_turns"] == 16
     assert engine_args["session_idle_ttl_s"] == 300.0
     vocoder_args = config.stage_factory_kwargs("vocoder")
-    assert vocoder_args["stream_slots"] == 16
+    # Slots are session-scoped now: every held session plus every active turn
+    # may own one (64 + 16 by default), and the idle sweep tracks the engine TTL.
+    assert vocoder_args["stream_slots"] == 80
+    assert vocoder_args["session_idle_ttl_s"] == 300.0
     assert vocoder_args["cuda_graph"] is True
     assert vocoder_args["cuda_graph_frames"] is None
     assert vocoder_args["cuda_graph_min_free_gb"] == 3.0
@@ -197,7 +200,10 @@ def test_pipeline_resource_limits_authoritatively_override_stage_defaults() -> N
         assert engine_args[key] == value
 
     vocoder_args = config.stage_factory_kwargs("vocoder")
-    assert vocoder_args["stream_slots"] == limits.max_active_turns
+    assert vocoder_args["stream_slots"] == (
+        limits.max_held_sessions + limits.max_active_turns
+    )
+    assert vocoder_args["session_idle_ttl_s"] == limits.session_idle_ttl_s
 
 
 @pytest.mark.parametrize(

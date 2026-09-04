@@ -167,6 +167,14 @@ def test_ephemeral_offline_turns_release_sessions_after_success() -> None:
         assert scheduler._moss_tts_realtime_sessions == {}
         assert scheduler.session_controller.sessions == {}
         assert scheduler.tree_cache.slots == {}
+        # The session-close marker rides the turn's stream edge ahead of the
+        # terminal result so the vocoder releases the codec slot after the
+        # final PCM flush.
+        marker = scheduler.outbox.get_nowait()
+        assert marker.type == "stream"
+        assert marker.request_id == request_id
+        assert marker.metadata["session_control"] == "close"
+        assert marker.metadata["session_id"] == session_id
         output = scheduler.outbox.get_nowait()
         assert output.type == "result"
         assert output.data == {"phase": "completed"}

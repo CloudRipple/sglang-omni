@@ -45,7 +45,7 @@ def test_falls_back_when_process_accounting_is_unavailable(monkeypatch) -> None:
     assert builder.profile_total_gpu_memory_fraction is None
 
 
-def test_derives_colocated_codec_reserve_from_hbm_and_active_turns(
+def test_derives_colocated_codec_reserve_from_hbm_and_session_slots(
     monkeypatch,
 ) -> None:
     from sglang_omni.models.moss_tts_realtime import stages
@@ -55,13 +55,14 @@ def test_derives_colocated_codec_reserve_from_hbm_and_active_turns(
     builder = _builder(
         codec_model_path="codec",
         max_sessions=16,
+        max_held_sessions=5,
         max_active_turns=16,
     )
     builder.gpu_id = 2
     calls: dict[str, Any] = {}
 
-    def fake_estimate(model_path: str, *, max_active_turns: int) -> tuple[int, int]:
-        calls["estimate"] = (model_path, max_active_turns)
+    def fake_estimate(model_path: str, *, stream_slots: int) -> tuple[int, int]:
+        calls["estimate"] = (model_path, stream_slots)
         return 3 * gib, 2 * gib
 
     monkeypatch.setattr(
@@ -80,7 +81,8 @@ def test_derives_colocated_codec_reserve_from_hbm_and_active_turns(
 
     builder._derive_colocated_codec_memory_budget()
 
-    assert calls == {"gpu_id": 2, "estimate": ("codec", 16)}
+    # Session-scoped streaming slots: held sessions plus active turns.
+    assert calls == {"gpu_id": 2, "estimate": ("codec", 21)}
     assert builder.gpu_memory_bytes == 80 * gib
     assert builder.codec_decoder_bytes == 3 * gib
     assert builder.codec_streaming_state_bytes == 2 * gib

@@ -42,6 +42,7 @@ from sglang_omni.models.moss_tts_realtime.request_state import (
     apply_moss_tts_realtime_input_update,
 )
 from sglang_omni.proto.messages import InputUpdateMessage
+from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.types import SchedulerRequest
 
@@ -3118,6 +3119,25 @@ class MossTTSRealtimeScheduler(OmniScheduler):
                 reason=reason,
             ),
         )
+        if request_id is not None:
+            # The vocoder keys its codec slot lease to the session, but the
+            # request's stream edge is still open here (the terminal result
+            # follows in this outbox), so ride it with a session-close marker.
+            # The vocoder drains the turn's pending PCM at stream_done and only
+            # then releases the session slot.
+            self.outbox.put(
+                OutgoingMessage(
+                    request_id=request_id,
+                    type="stream",
+                    data=torch.empty(0, dtype=torch.long),
+                    metadata={
+                        "stream": True,
+                        "modality": "audio_codes",
+                        "session_control": "close",
+                        "session_id": session_state.session_id,
+                    },
+                )
+            )
         self._refresh_resource_high_water()
         return True
 

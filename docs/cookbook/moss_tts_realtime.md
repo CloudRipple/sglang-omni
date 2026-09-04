@@ -348,6 +348,26 @@ configured and is reused by subsequent turns.
   `audio`; this adds the preceding user utterance and acoustics to the turn
   context.
 
+### Voice Continuity Across Turns
+
+A session's voice stays continuous across committed turns: the model keeps its
+multi-turn KV context, and the streaming codec keeps its causal decoder state
+as well. Codec state is leased to the session (not to an individual turn), so
+turn N+1's audio continues exactly where turn N ended — there is no per-turn
+acoustic reset.
+
+The codec context is released and reset only on session close, idle session
+expiry (`session_idle_ttl_s`), a `turn.cancel`/abort, or an internal failure.
+A cancelled turn's partial audio is deliberately discarded from the causal
+context so it cannot leak into the next turn.
+
+The streaming codec pool holds one slot per held session plus per active turn
+(`limits.max_held_sessions + limits.max_active_turns`, 80 by default). Idle
+sessions retain their slot until close or TTL expiry, so deployments that keep
+many long-idle sessions should budget the slot memory accordingly (the engine
+startup log and `/model_info` report the derived codec reserve and the current
+`codec_held_sessions` count).
+
 ## Bridging an LLM SSE Stream
 
 For a voice assistant, forward the first non-empty text-bearing SSE delta

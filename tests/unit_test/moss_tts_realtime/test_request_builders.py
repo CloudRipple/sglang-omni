@@ -209,6 +209,10 @@ def test_offline_state_defaults_match_hf_sampling_contract() -> None:
         "stream": True,
         "modality": "audio_codes",
         "n_vq": N_VQ,
+        # Chunk-level identity stamps keep the vocoder session-keyed even when
+        # the terminal payload arrives after the audio chunks.
+        "session_id": "offline:offline",
+        "turn_id": "offline",
     }
 
 

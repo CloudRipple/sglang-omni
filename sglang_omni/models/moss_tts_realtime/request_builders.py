@@ -540,6 +540,11 @@ def build_moss_tts_realtime_state(
             {
                 "stream": True,
                 "modality": "audio_codes",
+                # Session identity must ride every chunk: stream items reach the
+                # vocoder long before the terminal payload, and the vocoder keys
+                # its codec slot to the session, not to the per-turn request.
+                "session_id": session_id,
+                "turn_id": turn_id,
                 **({"n_vq": int(num_codebooks)} if num_codebooks is not None else {}),
             }
             if stream

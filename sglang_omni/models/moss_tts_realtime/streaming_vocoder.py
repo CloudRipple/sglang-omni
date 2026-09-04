@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -232,8 +233,9 @@ class _CodecStreamSession:
             raise RuntimeError("MOSS-TTS-Realtime codec session is closed")
         if not self._free_slots:
             raise RuntimeError(
-                "MOSS-TTS-Realtime codec stream slots are exhausted; "
-                "increase max_active_turns or reduce active turns"
+                "MOSS-TTS-Realtime codec stream slots are exhausted "
+                "(slots stay leased to a realtime session until session close, "
+                "idle TTL, abort, or failure); increase stream_slots"
             )
         slot = self._free_slots.pop()
         self._leased_slots.add(slot)
@@ -491,6 +493,23 @@ class _RealtimeStreamState:
     identity_latched: bool = False
 
 
+@dataclass
+class _CodecSessionEntry:
+    """Session-scoped codec slot ownership.
+
+    The leased slot is keyed by ``session_id`` and survives per-turn request
+    teardown: the causal codec state continues across a session's turns. The
+    lease ends with release+reset only on session close, idle TTL sweep, abort,
+    or decode failure. ``closing`` marks a session whose close arrived while a
+    turn was still draining; the release lands at that request's teardown.
+    """
+
+    slot: int
+    live_request_ids: set[str] = field(default_factory=set)
+    closing: bool = False
+    last_active_at: float = 0.0
+
+
 @dataclass(frozen=True)
 class _CoalescedStepPlan:
     step_frames: int
@@ -516,9 +535,14 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         cuda_graph: bool = True,
         cuda_graph_frames: list[int] | None = None,
         cuda_graph_min_free_gb: float = 3.0,
+        session_idle_ttl_s: float = 300.0,
     ) -> None:
         if stream_slots < 1:
             raise ValueError(f"stream_slots must be >= 1, got {stream_slots}")
+        if float(session_idle_ttl_s) <= 0:
+            raise ValueError(
+                f"session_idle_ttl_s must be positive, got {session_idle_ttl_s}"
+            )
         missing = [
             name
             for name in ("streaming", "_decode_frame", "batch_decode", "apply")
@@ -583,6 +607,10 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         self._resource_totals: Counter[str] = Counter()
         self._active_slots_high_water = 0
         self._pending_frames_high_water = 0
+        self._session_idle_ttl_s = float(session_idle_ttl_s)
+        # Session-scoped codec slot leases: a session's causal codec state
+        # survives its turns. Slot pool changes only through the helpers below.
+        self._codec_sessions: dict[str, _CodecSessionEntry] = {}
         super().__init__(
             self._vocode,
             batch_compute_fn=self._vocode_batch,
@@ -694,6 +722,11 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             "codec_live_stream_states": len(self._stream_states),
             "codec_pending_frames": pending_frames,
             "codec_pending_frames_high_water": self._pending_frames_high_water,
+            "codec_held_sessions": len(self._codec_sessions),
+            "codec_closing_sessions": sum(
+                1 for entry in self._codec_sessions.values() if entry.closing
+            ),
+            "codec_session_idle_ttl_s": self._session_idle_ttl_s,
             "codec_streaming_state_count": (
                 session.streaming_state_count if session is not None else 0
             ),
@@ -726,6 +759,37 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         action: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if action == "close_realtime_session":
+            payload = payload or {}
+            session_id = payload.get("session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                return {
+                    "success": False,
+                    "message": "close_realtime_session requires session_id",
+                    "error": "session_id must be a non-empty string",
+                    "data": {},
+                }
+            with self._state_lock:
+                entry = self._codec_sessions.get(session_id)
+                released = False
+                if entry is not None:
+                    entry.closing = True
+                    if not entry.live_request_ids:
+                        self._release_codec_session_locked(
+                            session_id,
+                            entry,
+                            reason="session_close",
+                        )
+                        released = True
+                return {
+                    "success": True,
+                    "message": "ok",
+                    "data": {
+                        "session_id": session_id,
+                        "held": entry is not None,
+                        "released": released,
+                    },
+                }
         del payload
         if action != "model_info":
             return {
@@ -744,6 +808,9 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         self._ensure_session_graphed()
 
     def on_serving_stop(self) -> None:
+        # The request stream states were cleared by the caller already; drop
+        # the session lease bookkeeping before tearing down the slot pool.
+        self._codec_sessions.clear()
         if self._session is not None:
             self._session.close()
             self._session = None
@@ -751,6 +818,41 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             self._emit_codec_event("codec-session", "session_close")
 
     def create_stream_state(self, request_id: str) -> _RealtimeStreamState:
+        # Slot acquisition is session-keyed and happens lazily at contract
+        # latch: the request may start from pre-payload chunks, and the session
+        # id arrives in their metadata. The idle sweep runs here as well so slot
+        # reclamation piggybacks on new demand.
+        self._sweep_idle_codec_sessions_locked(time.monotonic())
+        return _RealtimeStreamState(slot=None)
+
+    def _bind_session_slot_locked(
+        self,
+        request_id: str,
+        state: _RealtimeStreamState,
+    ) -> None:
+        """Acquire-or-reuse the codec slot owned by the state session."""
+        session_id = state.session_id
+        if session_id is None:
+            raise RuntimeError(
+                "MOSS-TTS-Realtime stream chunk has no session_id in its "
+                "metadata; the engine must stamp stream_metadata with the "
+                "session identity before the first codec frame"
+            )
+        entry = self._codec_sessions.get(session_id)
+        now = time.monotonic()
+        if entry is not None:
+            state.slot = entry.slot
+            entry.live_request_ids.add(request_id)
+            entry.last_active_at = now
+            if len(entry.live_request_ids) > 1:
+                logger.warning(
+                    "MOSS-TTS-Realtime session %s has %d concurrent codec "
+                    "requests sharing slot %d",
+                    session_id,
+                    len(entry.live_request_ids),
+                    entry.slot,
+                )
+            return
         try:
             session = self._ensure_session_graphed()
             slot = session.acquire()
@@ -761,16 +863,100 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             self._emit_codec_event(
                 request_id,
                 "slot_acquire_error",
+                session_id=session_id,
                 error=str(exc),
             )
             raise
+        self._codec_sessions[session_id] = _CodecSessionEntry(
+            slot=slot,
+            live_request_ids={request_id},
+            last_active_at=now,
+        )
+        state.slot = slot
         self._resource_totals["codec_slot_acquire_total"] += 1
         self._active_slots_high_water = max(
             self._active_slots_high_water,
             session.active_leases,
         )
-        self._emit_codec_event(request_id, "slot_acquire", slot=slot)
-        return _RealtimeStreamState(slot=slot)
+        self._emit_codec_event(
+            request_id,
+            "slot_acquire",
+            slot=slot,
+            session_id=session_id,
+        )
+
+    def _sweep_idle_codec_sessions_locked(self, now: float) -> None:
+        """Reap sessions whose slots outlived the engine-side session TTL.
+
+        Engine-side KV reaping frees a session at ``session_idle_ttl_s``; the
+        codec lease must outlive that (an in-flight close must not strand the
+        slot, and a later sweep would only mask real leaks), so the sweep
+        threshold stays strictly above the engine TTL. Runs opportunistically
+        under ``_state_lock`` where demand already serializes.
+        """
+        idle_cutoff = self._session_idle_ttl_s * 2
+        for session_id, entry in list(self._codec_sessions.items()):
+            if entry.live_request_ids or entry.closing:
+                continue
+            if now - entry.last_active_at < idle_cutoff:
+                continue
+            self._release_codec_session_locked(session_id, entry, reason="idle_ttl")
+
+    def _release_codec_session_locked(
+        self,
+        session_id: str,
+        entry: _CodecSessionEntry,
+        *,
+        reason: str,
+    ) -> None:
+        """Release a session's slot to the pool with a fresh causal reset.
+
+        Requires ``_state_lock`` (held by every caller path: chunk pump,
+        completion/abort teardown, admin, and serving stop).
+        """
+        slot = entry.slot
+        self._codec_sessions.pop(session_id, None)
+        self._return_slot_to_pool_locked(
+            next(iter(entry.live_request_ids), session_id),
+            slot,
+            reason=f"session_{reason}",
+        )
+        self._resource_totals[f"codec_session_release_{reason}_total"] += 1
+        self._emit_codec_event(
+            next(iter(entry.live_request_ids), session_id),
+            "session_slot_release",
+            slot=slot,
+            session_id=session_id,
+            reason=reason,
+        )
+
+    def _handle_session_control_item(
+        self,
+        request_id: str,
+        control: Any,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        if control != "close":
+            raise RuntimeError(
+                f"MOSS-TTS-Realtime codec session control must be 'close', "
+                f"got {control!r} for {request_id!r}"
+            )
+        session_id = metadata.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise RuntimeError(
+                "MOSS-TTS-Realtime codec session control is missing session_id"
+            )
+        entry = self._codec_sessions.get(session_id)
+        if entry is None:
+            # Idempotent: the session may never have decoded (or is gone).
+            return
+        entry.closing = True
+        if not entry.live_request_ids:
+            self._release_codec_session_locked(
+                session_id,
+                entry,
+                reason="session_close",
+            )
 
     def latch_stream_contract(
         self,
@@ -799,6 +985,16 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             ):
                 state.turn_index = turn_index
             state.identity_latched = True
+        # The codec slot lease is session-keyed: bind it once the session id
+        # is known. Only chunk arrivals bind -- a terminal-payload latch for a
+        # request that never carried an audio chunk must not hold a slot (the
+        # offline fallback path decodes without one).
+        if (
+            state.slot is None
+            and state.session_id is not None
+            and origin != "payload"
+        ):
+            self._bind_session_slot_locked(request_id, state)
         if origin == "payload":
             return
         metadata: Mapping[str, Any] = source
@@ -989,30 +1185,78 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             )
         return output
 
+    def _return_slot_to_pool_locked(
+        self,
+        request_id: str,
+        slot: int,
+        *,
+        reason: str,
+    ) -> None:
+        """Reset and free a slot at the pool level (session table unchanged)."""
+        if self._session is None:
+            return
+        try:
+            self._session.release(slot)
+        except Exception as exc:
+            self._resource_totals["codec_slot_release_error_total"] += 1
+            self._resource_totals["codec_slot_reset_error_total"] += 1
+            self._emit_codec_event(
+                request_id,
+                "slot_release_error",
+                slot=slot,
+                error=str(exc),
+            )
+            raise
+        self._resource_totals["codec_slot_release_total"] += 1
+        self._emit_codec_event(request_id, "slot_release", slot=slot, reason=reason)
+
     def _release_state_slot(
         self,
         request_id: str,
         state: _RealtimeStreamState,
     ) -> None:
+        """Detach the per-request slot view and apply the session release policy.
+
+        The slot itself is session-owned: a successful turn keeps the lease so
+        the next turn continues the causal codec state. The lease is released
+        (and its streaming state reset) only when this teardown is abort-driven
+        or the session is closing; an orphaned slot (no session entry, e.g. a
+        bind that failed halfway) always returns to the pool.
+        """
         slot = state.slot
         if slot is None:
             return
         state.slot = None
-        if self._session is not None:
-            try:
-                self._session.release(slot)
-            except Exception as exc:
-                self._resource_totals["codec_slot_release_error_total"] += 1
-                self._resource_totals["codec_slot_reset_error_total"] += 1
-                self._emit_codec_event(
+        session_id = state.session_id
+        entry = (
+            self._codec_sessions.get(session_id)
+            if session_id is not None
+            else None
+        )
+        if entry is None:
+            self._return_slot_to_pool_locked(request_id, slot, reason="orphan")
+            return
+        entry.live_request_ids.discard(request_id)
+        entry.last_active_at = time.monotonic()
+        if self._is_aborted(request_id):
+            if entry.live_request_ids:
+                # Not protocol-possible today (one active turn per session);
+                # never cut a live sibling off the shared slot.
+                logger.warning(
+                    "MOSS-TTS-Realtime session %s kept slot %d: abort of %s "
+                    "while %d request(s) still live",
+                    session_id,
+                    slot,
                     request_id,
-                    "slot_release_error",
-                    slot=slot,
-                    error=str(exc),
+                    len(entry.live_request_ids),
                 )
-                raise
-            self._resource_totals["codec_slot_release_total"] += 1
-            self._emit_codec_event(request_id, "slot_release", slot=slot)
+                return
+            self._release_codec_session_locked(session_id, entry, reason="abort")
+            return
+        if entry.closing and not entry.live_request_ids:
+            self._release_codec_session_locked(
+                session_id, entry, reason="session_close"
+            )
 
     def decode_delta(
         self,
@@ -1033,7 +1277,10 @@ class MossTTSRealtimeStreamingVocoderScheduler(
                 codes = torch.stack(state.pending[:step_frames], dim=1)
                 del state.pending[:step_frames]
                 audio_parts.append(session.step({state.slot: codes})[state.slot])
-        self._release_state_slot(request_id, state)
+        # No slot release here: the codec slot is session-scoped. Draining the
+        # final PCM keeps the causal codec state alive for the session's next
+        # turn; release+reset is owned by release_stream_resources on close,
+        # idle TTL, abort, or failure.
         if not audio_parts:
             return None
         return torch.cat(audio_parts, dim=-1)
@@ -1077,7 +1324,22 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         request_id: str,
         state: _RealtimeStreamState,
     ) -> None:
-        self._release_state_slot(request_id, state)
+        # Stage threads may abort without holding the serving lock; the session
+        # table and the slot pool both live under _state_lock everywhere else.
+        with self._state_lock:
+            self._release_state_slot(request_id, state)
+
+    def _ingest_stream_item(
+        self, request_id: str, item: Any
+    ) -> _RealtimeStreamState | None:
+        """Divert codec session-control markers before any state handling."""
+        metadata = item.metadata if isinstance(item.metadata, Mapping) else {}
+        control = metadata.get("session_control")
+        if control is None:
+            return super()._ingest_stream_item(request_id, item)
+        with self._state_lock:
+            self._handle_session_control_item(request_id, control, metadata)
+        return None
 
     def _prepare_codes(
         self,

@@ -236,18 +236,23 @@ def _streaming_state_bytes(codec: torch.nn.Module) -> int:
 def estimate_moss_tts_realtime_codec_memory(
     model_path: str = DEFAULT_MOSS_TTS_REALTIME_CODEC_MODEL,
     *,
-    max_active_turns: int,
+    stream_slots: int,
 ) -> tuple[int, int]:
-    """Return decoder-component and fixed-slot streaming-state bytes."""
-    if max_active_turns < 1:
-        raise ValueError("max_active_turns must be positive")
+    """Return decoder-component and fixed-slot streaming-state bytes.
+
+    ``stream_slots`` is the fixed width of the ``codec.streaming()`` context --
+    since slots are session-scoped, callers pass the session-held slot total
+    (held sessions plus active turns), not the per-turn decode width.
+    """
+    if stream_slots < 1:
+        raise ValueError("stream_slots must be positive")
 
     checkpoint_dir = str(resolve_checkpoint(model_path))
     try:
         codec = _create_moss_tts_realtime_codec_shell(checkpoint_dir)
         codec.encoder = torch.nn.ModuleList()
         decoder_component_bytes = _module_tensor_bytes(codec)
-        with torch.no_grad(), codec.streaming(max_active_turns):
+        with torch.no_grad(), codec.streaming(stream_slots):
             streaming_state_bytes = _streaming_state_bytes(codec)
     except Exception as exc:
         raise RuntimeError(_INSTALL_HINT) from exc
@@ -488,6 +493,7 @@ def create_vocoder_executor(
     cuda_graph_frames: list[int] | None = None,
     cuda_graph_min_free_gb: float = 3.0,
     dtype: str | torch.dtype = "bfloat16",
+    session_idle_ttl_s: float = 300.0,
 ) -> MossTTSRealtimeStreamingVocoderScheduler:
     resolved_device = _resolve_codec_device(device, gpu_id)
     decoder_dtype = resolve_dtype(dtype)
@@ -514,6 +520,7 @@ def create_vocoder_executor(
         cuda_graph=cuda_graph,
         cuda_graph_frames=cuda_graph_frames,
         cuda_graph_min_free_gb=cuda_graph_min_free_gb,
+        session_idle_ttl_s=session_idle_ttl_s,
     )
     scheduler.warmup_now()
     return scheduler

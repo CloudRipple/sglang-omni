@@ -124,7 +124,11 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
 
         decoder_bytes, streaming_state_bytes = estimate_moss_tts_realtime_codec_memory(
             self.codec_model_path,
-            max_active_turns=self.limits.max_active_turns,
+            # Streaming codec slots are session-scoped (held across a session's
+            # turns), so the pool tops out at held sessions plus active turns.
+            stream_slots=(
+                self.limits.max_held_sessions + self.limits.max_active_turns
+            ),
         )
         runtime_margin_bytes = max(
             2 * 1024**3,

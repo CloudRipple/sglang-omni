@@ -166,7 +166,14 @@ class MossTTSRealtimePipelineConfig(PipelineConfig):
         if stage_name == "vocoder":
             return {
                 "codec_model_path": self.codec_model_path,
-                "stream_slots": self.limits.max_active_turns,
+                # Slots are leased per realtime session, not per turn: a held
+                # (warm) session keeps its codec streaming state across turns.
+                # Size the pool so every held session plus every active turn
+                # can own one slot without contention.
+                "stream_slots": (
+                    self.limits.max_held_sessions + self.limits.max_active_turns
+                ),
+                "session_idle_ttl_s": self.limits.session_idle_ttl_s,
                 "cuda_graph": self.cuda_graph,
                 "cuda_graph_frames": self.cuda_graph_frames,
                 "cuda_graph_min_free_gb": self.cuda_graph_min_free_gb,

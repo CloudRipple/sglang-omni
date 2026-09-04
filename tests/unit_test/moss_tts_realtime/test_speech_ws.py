@@ -118,7 +118,7 @@ class RealtimeSpeechClient:
         self.realtime_opens: list[dict[str, Any]] = []
         self.updates: list[tuple[str, InputUpdateMessage]] = []
         self.aborted: list[str] = []
-        self.closed_sessions: list[tuple[str, str]] = []
+        self.closed_sessions: list[tuple[str, tuple[str, ...]]] = []
         self._done_events: dict[str, asyncio.Event] = {}
 
     def health(self) -> dict[str, Any]:
@@ -166,9 +166,11 @@ class RealtimeSpeechClient:
     ) -> dict[str, Any]:
         assert action == "close_realtime_session"
         assert payload is not None
-        assert stages is not None and len(stages) == 1
+        # Session close targets the engine stage plus the vocoder stage so the
+        # session-keyed codec slot is released together with the engine KV.
+        assert stages is not None and len(stages) == 2
         assert timeout_s == 30.0
-        self.closed_sessions.append((payload["session_id"], stages[0]))
+        self.closed_sessions.append((payload["session_id"], tuple(stages)))
         return {"success": True, "message": "closed"}
 
 
@@ -402,7 +404,7 @@ def test_realtime_endpoint_streams_two_turns_and_preserves_input_ids() -> None:
 
     assert len(client_impl.requests) == 2
     assert len(client_impl.closed_sessions) == 1
-    assert client_impl.closed_sessions[0][1] == "tts_engine"
+    assert client_impl.closed_sessions[0][1] == ("tts_engine", "vocoder")
     assert tokenizer.len_calls == 1
 
 
@@ -509,7 +511,7 @@ def test_realtime_custom_input_stage_is_used_for_updates_and_session_close() -> 
         assert websocket.receive_json()["type"] == "session.closed"
 
     assert configured["session_id"] == client_impl.closed_sessions[0][0]
-    assert client_impl.closed_sessions[0][1] == custom_stage
+    assert client_impl.closed_sessions[0][1] == (custom_stage, "vocoder")
     assert client_impl.realtime_opens[0] == {
         "request_id": started["request_id"],
         "session_id": configured["session_id"],

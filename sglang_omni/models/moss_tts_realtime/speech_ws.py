@@ -839,10 +839,13 @@ class MossTTSRealtimeSpeechWebSocketSession:
             return
         self._backend_session_closed = True
         try:
+            # Target both lifecycle owners: the engine releases the session KV
+            # and the streaming vocoder releases the session-keyed codec slot.
+            # Both admin handlers are idempotent for unknown sessions.
             result = await self.client.admin(
                 "close_realtime_session",
                 {"session_id": self.session_id},
-                stages=[self.realtime_input_stage],
+                stages=[self.realtime_input_stage, "vocoder"],
                 timeout_s=30.0,
             )
             if not bool(result.get("success", False)):
