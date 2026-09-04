@@ -1590,7 +1590,9 @@ def test_factory_captures_graphs_before_returning(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("trigger", ["chunk", "slot_starved", "no_chunk_done"])
-def test_streaming_reuses_graphed_session_after_nonstreaming(monkeypatch, trigger) -> None:
+def test_streaming_reuses_graphed_session_after_nonstreaming(
+    monkeypatch, trigger
+) -> None:
     """Non-streaming traffic leaves the graphed startup session intact; later streaming work
     reuses it with no re-capture. Streaming sessions are created by the first-chunk path
     (_ensure_slot), or by the factory warmup; a slot-starved finish and a no-chunk finish use
