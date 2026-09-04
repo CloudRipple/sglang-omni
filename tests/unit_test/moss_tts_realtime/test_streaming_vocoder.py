@@ -646,9 +646,7 @@ def test_slot_exhaustion_errors_without_displacing_live_request() -> None:
     scheduler, _ = _scheduler(stream_slots=1)
     row = _rows(1, seed=7)[0]
     scheduler._on_chunk("live", _stream_item(row, 0, session_id="session-live"))
-    scheduler._on_chunk(
-        "overflow", _stream_item(row, 0, session_id="session-overflow")
-    )
+    scheduler._on_chunk("overflow", _stream_item(row, 0, session_id="session-overflow"))
 
     messages = _drain(scheduler)
     error = next(message for message in messages if message.request_id == "overflow")
@@ -671,9 +669,7 @@ def test_codec_model_info_tracks_acquire_release_reuse_and_exhaustion() -> None:
 
     scheduler._on_chunk("live", _stream_item(row, 0, session_id="session-live"))
     leased_slot = scheduler._stream_states["live"].slot
-    scheduler._on_chunk(
-        "overflow", _stream_item(row, 0, session_id="session-overflow")
-    )
+    scheduler._on_chunk("overflow", _stream_item(row, 0, session_id="session-overflow"))
     active = scheduler.admin("model_info")["data"]
     assert active["codec_active_slots"] == 1
     assert active["codec_free_slots"] == 0

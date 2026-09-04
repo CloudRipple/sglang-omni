@@ -114,9 +114,7 @@ from sglang_omni.serve.speech_limits import (
 )
 from sglang_omni.serve.speech_service import SpeechRequestValidator
 from sglang_omni.serve.speech_voices import SpeakerSampleStore
-from sglang_omni.serve.speech_ws import (
-    SpeechWebSocketSession,
-)
+from sglang_omni.serve.speech_ws import SpeechWebSocketSession
 from sglang_omni.serve.streaming import STREAM_DONE_SENTINEL
 from sglang_omni.serve.streaming import (
     ClosableStreamingResponse as _ClosableStreamingResponse,

@@ -989,11 +989,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
         # is known. Only chunk arrivals bind -- a terminal-payload latch for a
         # request that never carried an audio chunk must not hold a slot (the
         # offline fallback path decodes without one).
-        if (
-            state.slot is None
-            and state.session_id is not None
-            and origin != "payload"
-        ):
+        if state.slot is None and state.session_id is not None and origin != "payload":
             self._bind_session_slot_locked(request_id, state)
         if origin == "payload":
             return
@@ -1228,11 +1224,7 @@ class MossTTSRealtimeStreamingVocoderScheduler(
             return
         state.slot = None
         session_id = state.session_id
-        entry = (
-            self._codec_sessions.get(session_id)
-            if session_id is not None
-            else None
-        )
+        entry = self._codec_sessions.get(session_id) if session_id is not None else None
         if entry is None:
             self._return_slot_to_pool_locked(request_id, slot, reason="orphan")
             return

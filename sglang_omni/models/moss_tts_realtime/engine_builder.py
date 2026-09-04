@@ -126,9 +126,7 @@ class MossTTSRealtimeEngineBuilder(TtsEngineBuilder):
             self.codec_model_path,
             # Streaming codec slots are session-scoped (held across a session's
             # turns), so the pool tops out at held sessions plus active turns.
-            stream_slots=(
-                self.limits.max_held_sessions + self.limits.max_active_turns
-            ),
+            stream_slots=(self.limits.max_held_sessions + self.limits.max_active_turns),
         )
         runtime_margin_bytes = max(
             2 * 1024**3,
