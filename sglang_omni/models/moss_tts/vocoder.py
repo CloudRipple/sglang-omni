@@ -148,8 +148,8 @@ def decode_codes_batch(
     ``[channels, samples_i]`` per item.
 
     ``interleaved_channels`` mirrors the codec's channel-interleave restore:
-    the decoder emits ``[B, 1, T * C]`` with channels packed into the sample
-    axis, which is de-interleaved into ``[B, C, T]`` before slicing.
+    the decoder emits ``[B, 1, T * C]`` with channels interleaved into the
+    sample axis, which is de-interleaved into ``[B, C, T]`` before slicing.
     """
     if not codes_rows:
         return []
@@ -196,7 +196,14 @@ def decode_codes_batch(
         if interleaved_channels > 1:
             # note (Zhang Yiyang): de-interleave [B, 1, T * C] -> [B, C, T];
             # same math as the codec's _restore_channels_from_codec
-            # channel-interleave branch.
+            # channel-interleave branch (including its floor length division —
+            # interleaved lengths are per-channel lengths * C by construction).
+            if audio.ndim != 3 or int(audio.shape[1]) != 1:
+                raise ValueError(
+                    "MOSS batched decoder must emit interleaved audio "
+                    f"[B, 1, T * {interleaved_channels}], got "
+                    f"{tuple(audio.shape)}"
+                )
             audio = (
                 audio.squeeze(1)
                 .contiguous()

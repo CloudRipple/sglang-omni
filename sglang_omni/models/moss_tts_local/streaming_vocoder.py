@@ -375,8 +375,8 @@ class MossTTSLocalStreamingVocoderScheduler(
         )
         self._compute_dtype = getattr(codec, "compute_dtype", None)
         # note (Zhang Yiyang): matches the codec's _restore_channels_from_codec:
-        # stereo v2 decoders interleave channels into the sample axis, so packed
-        # outputs must be de-interleaved before slicing.
+        # stereo v2 decoders interleave channels into the sample axis, so the
+        # interleaved layout must be restored before slicing.
         number_channels = int(getattr(codec, "number_channels", 1) or 1)
         self._interleaved_channels = (
             number_channels
