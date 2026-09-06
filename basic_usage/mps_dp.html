@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 02, 2026"/>
+    <meta name="docbuild:last-update" content="Sep 06, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_npu.html">Installation — Ascend NPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="nav bd-sidenav">
@@ -236,6 +237,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Omni Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tts.html">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="process_topology.html">Process Topology, Replicas, and GPU Sharing</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="process_topology_migration.html">Process Topology Migration</a></li>
 <li class="toctree-l1"><a class="reference internal" href="omni_router.html">SGLang-Omni Rust Router</a></li>
@@ -567,6 +569,14 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span>--model-path<span c
 <code class="docutils literal notranslate"><span class="pre">--&lt;engine-stage&gt;.engine.max_total_tokens</span></code>), for the same KV-sizing
 reasons described under the script recipe below. Route traffic with the
 <a class="reference internal" href="omni_router.html"><span class="std std-doc">Omni Router</span></a>.</p>
+<p>Process-level replicas can size their pools in bytes instead, with
+<code class="docutils literal notranslate"><span class="pre">engine.kv_cache_bytes</span></code> per stage and <code class="docutils literal notranslate"><span class="pre">total_reserve_bytes</span></code> for the replica’s
+full footprint. The budgets are then checked against the card before any
+replica is spawned: colocation requires a declared footprint, the summed
+reserves and fractions must fit the card, and the summed KV pools alone must
+too. <code class="docutils literal notranslate"><span class="pre">engine.kv_cache_bytes</span></code> and <code class="docutils literal notranslate"><span class="pre">engine.max_total_tokens</span></code> are mutually
+exclusive on one stage, since the lower token cap would silently shrink the
+byte-derived pool.</p>
 <p>The runtime owns the full lifecycle. Every managed process is verified against
 the daemon’s client list before serving starts, because a process that misses
 the pipe directory silently falls back to time slicing. A watchdog fails the
@@ -600,8 +610,10 @@ The state root is created with mode <code class="docutils literal notranslate"><
 non-symlink directory owned by the current user with that mode. Native MPS
 rejects <code class="docutils literal notranslate"><span class="pre">CUDA_MPS_PIPE_DIRECTORY</span></code> in the parent, pipeline, or stage environment
 instead of overwriting or joining an external daemon. It likewise rejects
-<code class="docutils literal notranslate"><span class="pre">SGLANG_OMNI_WEIGHT_SHARE</span></code> in those locations: CUDA IPC weight sharing remains
-the one deployment shape that still uses <code class="docutils literal notranslate"><span class="pre">examples/mps_dp/launch.sh</span></code> below.</p>
+<code class="docutils literal notranslate"><span class="pre">SGLANG_OMNI_WEIGHT_SHARE</span></code> in those locations: inside one pipeline, CUDA IPC
+weight sharing is requested with <code class="docutils literal notranslate"><span class="pre">--weight-share</span> <span class="pre">on</span></code> and the runtime assigns
+replica roles itself, while the <code class="docutils literal notranslate"><span class="pre">examples/mps_dp/launch.sh</span></code> recipe below sets
+that variable for its own separate serve processes.</p>
 </section>
 <section id="deploy">
 <h2>Deploy<a class="headerlink" href="#deploy" title="Link to this heading">#</a></h2>
@@ -632,7 +644,12 @@ numactl<span class="w"> </span>-H<span class="w"> </span><span class="p">|</span
 <p>Both profiles set <code class="docutils literal notranslate"><span class="pre">mem_fraction_static</span></code> to <code class="docutils literal notranslate"><span class="pre">0.85</span></code>; <code class="docutils literal notranslate"><span class="pre">MF</span></code> can override it. When <code class="docutils literal notranslate"><span class="pre">CONFIG</span></code> is unset, the existing <code class="docutils literal notranslate"><span class="pre">MODEL</span></code> and <code class="docutils literal notranslate"><span class="pre">MAX_TOTAL_TOKENS</span></code> interface remains available. Launching replicas sequentially avoids overlapping memory profiling and CUDA-graph capture during startup.</p>
 <p>Identical <code class="docutils literal notranslate"><span class="pre">--mem-fraction-static</span></code> flags do <strong>not</strong> mean identical KV capacity. <code class="docutils literal notranslate"><span class="pre">--mem-fraction-static</span></code> budgets model weights and the KV pool against the GPU memory available when each replica starts. Roughly, the profiled KV memory is the requested fraction of free memory measured before model loading, minus model and fixed runtime allocations. It is a per-replica budget, not an additive share of the card. Because replicas start sequentially, earlier ones have already reserved memory, so later ones see a smaller free pool and allocate fewer KV tokens even when every flag is the same (in one run, three sequential <code class="docutils literal notranslate"><span class="pre">mf=0.27</span></code> replicas received 97,503 / 53,149 / 20,961 KV tokens).</p>
 <p><img alt="What same-GPU DP spends in VRAM and what it reclaims" src="../_images/same-gpu-dp-vram.svg" /></p>
-<p>Memory profiling does not coordinate KV allocation across independent replica processes. For <code class="docutils literal notranslate"><span class="pre">N</span> <span class="pre">&gt;</span> <span class="pre">1</span></code>, the launcher therefore requires one common <code class="docutils literal notranslate"><span class="pre">max_total_tokens</span></code> value, either from the pipeline config or from <code class="docutils literal notranslate"><span class="pre">MAX_TOTAL_TOKENS</span></code>. SGLang treats this value as an upper bound; the launcher rejects startup unless every replica resolves exactly that capacity. The cap applies independently to each replica; it is not divided across the pool. It is also independent of the request-level <code class="docutils literal notranslate"><span class="pre">max_new_tokens</span></code> limit and does not distribute requests between replicas.</p>
+<p>Memory profiling does not coordinate KV allocation across independent replica processes. For <code class="docutils literal notranslate"><span class="pre">N</span> <span class="pre">&gt;</span> <span class="pre">1</span></code>, every replica must resolve the same KV capacity, which can come from either sizing knob but never both:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">engine.kv_cache_bytes</span></code> in the pipeline config sizes every replica’s pool deterministically; the launcher verifies all replicas resolved the same capacity and rejects a simultaneous <code class="docutils literal notranslate"><span class="pre">MAX_TOTAL_TOKENS</span></code>, since a lower token cap would silently shrink the byte-derived pool.</p></li>
+<li><p>Without a byte budget, the launcher requires one common <code class="docutils literal notranslate"><span class="pre">max_total_tokens</span></code> value, from the pipeline config or from <code class="docutils literal notranslate"><span class="pre">MAX_TOTAL_TOKENS</span></code>, and rejects startup unless every replica resolves exactly that capacity.</p></li>
+</ul>
+<p>Either cap applies independently to each replica; it is not divided across the pool. It is also independent of the request-level <code class="docutils literal notranslate"><span class="pre">max_new_tokens</span></code> limit and does not distribute requests between replicas.</p>
 <p>The H100 Higgs DP3 profile uses <code class="docutils literal notranslate"><span class="pre">100000</span></code> tokens per replica. The H200 Higgs DP8 profile uses <code class="docutils literal notranslate"><span class="pre">30000</span></code> tokens per replica, preserving GPU memory headroom for non-KV runtime allocations, including the colocated audio encoder and vocoder. These values are specific to their configurations, not universal hardware defaults. Recalculate the cap after changing the model, GPU, runtime, replica count, memory settings, or CUDA-graph settings. If a replica cannot allocate the common cap, lower it or reduce the replica count.</p>
 <p>The H200 profile’s <code class="docutils literal notranslate"><span class="pre">30000</span></code>-token KV pool is smaller than the worst-case demand from 64 requests each generating up to 2048 new tokens, even before accounting for input tokens. Therefore, <code class="docutils literal notranslate"><span class="pre">max_running_requests=64</span></code> is an admission ceiling rather than a guarantee that 64 long requests can decode concurrently. If the pool fills, SGLang retracts requests and returns them to the waiting queue until KV capacity becomes available.</p>
 <ol class="arabic simple" start="3">
@@ -684,6 +701,9 @@ numactl<span class="w"> </span>-H<span class="w"> </span><span class="p">|</span
 <section id="shared-weights-across-replicas-opt-in-default-off">
 <h2>Shared weights across replicas (opt-in, default off)<a class="headerlink" href="#shared-weights-across-replicas-opt-in-default-off" title="Link to this heading">#</a></h2>
 <p>By default every replica loads its own full copy of the AR backbone (7.60 GiB for Higgs 3-4B — about a third of a DP3 footprint). Since all replicas run the same read-only weights on the same GPU, the launcher can instead share <strong>one</strong> copy over CUDA IPC:</p>
+<blockquote>
+<div><p>If your replicas live inside one pipeline (<code class="docutils literal notranslate"><span class="pre">processes.&lt;name&gt;.num_replicas</span></code> with a repeated <code class="docutils literal notranslate"><span class="pre">replica_devices</span></code> entry), prefer <code class="docutils literal notranslate"><span class="pre">sgl-omni</span> <span class="pre">serve</span> <span class="pre">--weight-share</span> <span class="pre">on</span></code>: the runtime assigns leader and follower roles, orders startup and shutdown around them, and needs no environment variable. See <a class="reference internal" href="process_topology.html"><span class="std std-doc">Process Topology, Replicas, and GPU Sharing</span></a>. The <code class="docutils literal notranslate"><span class="pre">WEIGHT_SHARE=1</span></code> recipe below covers the other shape, several independent <code class="docutils literal notranslate"><span class="pre">serve</span></code> processes supervised by the script; the architecture support table applies to both.</p>
+</div></blockquote>
 <p><strong>Scope and contract.</strong> This is opt-in (<code class="docutils literal notranslate"><span class="pre">WEIGHT_SHARE=1</span></code>, default off) and gated to <strong>validated architectures with tp=pp=1</strong>; anything else is rejected before any resource is created, because a model that writes per-request state into a shared parameter would corrupt co-located replicas. An architecture audit alone does not enable sharing: a model is supported only after the documented launcher command passed end-to-end validation (shared N=2 boot under MPS, health, attach verification, concurrent-request correctness, clean teardown) at the current revision. <code class="docutils literal notranslate"><span class="pre">WEIGHT_SHARE=1</span></code> requires <code class="docutils literal notranslate"><span class="pre">CONFIG</span></code>, so the supported-config check runs in preflight, before the MPS daemon, state directory, or any replica exists. Each supported architecture carries a share policy: registered tensors the model writes at serving time (per-step decode staging scratch) are classified <strong>replica-private</strong> — every replica keeps its own storage for them and only the immutable weights alias one storage. Leader and follower derive the classification from the same policy and fail closed on any disagreement (it is part of the manifest). Sharing is a whole-group lifecycle: the leader must outlive followers, restart the whole run together (never a single replica), online weight updates are refused while sharing is active, and each follower requires an explicit <code class="docutils literal notranslate"><span class="pre">MAX_TOTAL_TOKENS</span></code> (its dummy weights are freed before KV profiling, so KV sizing must be pinned). <code class="docutils literal notranslate"><span class="pre">autodp.sh</span></code> sizes a <strong>maximum <em>estimated</em></strong> DP (boot-validated), not an absolute safe maximum; because its sizing assumes sharing, it defaults <code class="docutils literal notranslate"><span class="pre">WEIGHT_SHARE=1</span></code>, while <code class="docutils literal notranslate"><span class="pre">launch.sh</span></code> itself defaults off.</p>
 <p>A model is either <strong>supported</strong> or <strong>not supported</strong>; there is no intermediate tier. Supported means all of the following passed at the current revision, with commands and logs recorded in the PR: the documented <code class="docutils literal notranslate"><span class="pre">launch.sh</span></code> command boots <code class="docutils literal notranslate"><span class="pre">N=2</span></code> with <code class="docutils literal notranslate"><span class="pre">WEIGHT_SHARE=1</span></code> under a private MPS daemon, every replica passes its health check and MPS attach verification, the follower attaches the leader’s weights over CUDA IPC and holds no second resident copy of the shared weights after boot, concurrent requests across replicas return correct outputs (byte-identical audio to the single-replica baseline for TTS; word-identical transcripts for ASR, where timestamp fields may jitter under batching), and teardown leaves no replica process or MPS client behind. This is one-H100 end-to-end smoke validation — executable support evidence at the current revision, not a long-term stability or CI claim.</p>
 <div class="pst-scrollable-table-container"><table class="table">
@@ -1082,7 +1102,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 02, 2026.
+  Last updated on Sep 06, 2026.
   <br/>
 </p>
   </div>

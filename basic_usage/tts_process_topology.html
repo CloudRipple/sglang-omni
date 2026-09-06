@@ -57,11 +57,11 @@
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
     <link rel="next" title="Process Topology Migration" href="process_topology_migration.html" />
-    <link rel="prev" title="TTS Model Usage" href="tts.html" />
+    <link rel="prev" title="Process Topology, Replicas, and GPU Sharing" href="process_topology.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 02, 2026"/>
+    <meta name="docbuild:last-update" content="Sep 06, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_npu.html">Installation — Ascend NPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="nav bd-sidenav">
@@ -236,6 +237,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Omni Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tts.html">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="process_topology.html">Process Topology, Replicas, and GPU Sharing</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="process_topology_migration.html">Process Topology Migration</a></li>
 <li class="toctree-l1"><a class="reference internal" href="omni_router.html">SGLang-Omni Rust Router</a></li>
@@ -524,6 +526,11 @@ config.</p>
 <span class="w">    </span><span class="nt">process</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pipeline</span>
 </pre></div>
 </div>
+<p>MOSS-TTS delay ships the isolated layout as its default, with declared GPU
+memory fractions 0.10 / 0.72 / 0.18 for <code class="docutils literal notranslate"><span class="pre">preprocessing</span></code>, <code class="docutils literal notranslate"><span class="pre">tts_engine</span></code> and
+<code class="docutils literal notranslate"><span class="pre">vocoder</span></code>. <code class="docutils literal notranslate"><span class="pre">config_cls:</span> <span class="pre">MossTTSSingleProcessPipelineConfig</span></code> selects the
+single-process variant, which the bounded 24 GB and 32 GB configurations and
+the MPS DP2 recipe pin because their measured budgets describe that layout.</p>
 <section id="changing-placement-at-launch">
 <h2>Changing Placement at Launch<a class="headerlink" href="#changing-placement-at-launch" title="Link to this heading">#</a></h2>
 <p>The same field is set from the command line with the dotted spelling, without
@@ -568,10 +575,15 @@ stages whose fractions are missing.</p></li>
 <p>Not every handoff tolerates a process boundary: some stages exchange state
 through process-local registries a second process cannot read (for example,
 MOSS-TTS pipelines hand prepared requests from preprocessing to the AR engine
-through a process-local queue, and Qwen3-TTS keeps prepared requests in
-process-local module state). Splitting such an edge fails at serving time
-rather than at config validation — keep those stages in one process as the
-shipped configs do.</p>
+through a process-local queue). A model declares those edges through
+<code class="docutils literal notranslate"><span class="pre">PipelineConfig.process_local_edges</span></code>, and splitting one is refused during
+topology compilation, before any worker starts.</p>
+<p>Qwen3-TTS keeps prepared requests in process-local module state only while
+<code class="docutils literal notranslate"><span class="pre">preprocessing</span></code> and <code class="docutils literal notranslate"><span class="pre">tts_engine</span></code> share a process; placed in its own process the
+preprocessing stage loads a prompt frontend and ships the prepared prompt
+tensors through <code class="docutils literal notranslate"><span class="pre">tensor_cpu</span></code> payload fields, so that edge can cross too. The
+<code class="docutils literal notranslate"><span class="pre">tensor_cpu</span></code> codec keeps each tensor’s own dtype and lets the relay carry it
+outside the control plane, which <code class="docutils literal notranslate"><span class="pre">typed_tensor</span></code> would not do.</p>
 <p>Ming-Omni-TTS carries preprocessing fields in <code class="docutils literal notranslate"><span class="pre">StagePayload.data</span></code> and serializes the reference encoder’s <code class="docutils literal notranslate"><span class="pre">spk_emb</span></code> and <code class="docutils literal notranslate"><span class="pre">prompt_latent</span></code> tensors with the <code class="docutils literal notranslate"><span class="pre">typed_tensor</span></code> wire codec. Both <code class="docutils literal notranslate"><span class="pre">preprocessing</span> <span class="pre">-&gt;</span> <span class="pre">reference_encode</span></code> and <code class="docutils literal notranslate"><span class="pre">reference_encode</span> <span class="pre">-&gt;</span> <span class="pre">tts_engine</span></code> can therefore cross process boundaries.</p>
 </section>
 <section id="resource-and-performance-trade-offs">
@@ -606,12 +618,12 @@ in model or YAML configuration.</p>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="tts.html"
+       href="process_topology.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">TTS Model Usage</p>
+        <p class="prev-next-title">Process Topology, Replicas, and GPU Sharing</p>
       </div>
     </a>
     <a class="right-next"
@@ -677,7 +689,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 02, 2026.
+  Last updated on Sep 06, 2026.
   <br/>
 </p>
   </div>

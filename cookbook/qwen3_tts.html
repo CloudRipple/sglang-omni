@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 02, 2026"/>
+    <meta name="docbuild:last-update" content="Sep 06, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_npu.html">Installation — Ascend NPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="current nav bd-sidenav">
@@ -236,6 +237,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts.html">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/process_topology.html">Process Topology, Replicas, and GPU Sharing</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/process_topology_migration.html">Process Topology Migration</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/omni_router.html">SGLang-Omni Rust Router</a></li>
@@ -495,6 +497,9 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#breakable-prefill-cuda-graphs">Breakable prefill CUDA graphs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-admission-coalescing">Prefill Admission Coalescing</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#process-topology">Process topology</a></li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synthesizing-speech">Synthesizing Speech</a><ul class="pst-show_toc_level nav section-nav flex-column">
@@ -633,6 +638,49 @@ must be <strong>≥ 1</strong>. Capacity is about <code class="docutils literal 
 HTTP <strong>503</strong> (<code class="docutils literal notranslate"><span class="pre">The</span> <span class="pre">request</span> <span class="pre">queue</span> <span class="pre">is</span> <span class="pre">full.</span></code>) before preprocessing, or later
 if the AR waiting queue or request-build backlog is full. Qwen3-TTS
 defaults to 4 request-build workers with pending depth 16.</p>
+</section>
+<section id="breakable-prefill-cuda-graphs">
+<h3>Breakable prefill CUDA graphs<a class="headerlink" href="#breakable-prefill-cuda-graphs" title="Link to this heading">#</a></h3>
+<p>Non-Base checkpoints (CustomVoice, VoiceDesign) default to the breakable
+prefill CUDA-graph backend with a token ladder up to 512:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Knob</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Default</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_backend_prefill</span></code></p></td>
+<td><p>Prefill graph backend (<code class="docutils literal notranslate"><span class="pre">breakable</span></code> or <code class="docutils literal notranslate"><span class="pre">disabled</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">breakable</span></code> on CustomVoice, unset elsewhere</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_bs_prefill</span></code></p></td>
+<td><p>Prefill token-count ladder to capture</p></td>
+<td><p>shared ladder through <code class="docutils literal notranslate"><span class="pre">512</span></code>, plus a <code class="docutils literal notranslate"><span class="pre">1</span></code> bucket</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_max_bs_prefill</span></code></p></td>
+<td><p>Cap for the ladder</p></td>
+<td><p>top of the ladder</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The default is the shared ladder with one bucket added. A replay falls
+back to eager when its bucket exceeds twice the real token count, and the
+shared ladder starts at 4, so a 1-token prefill lands in bucket 4 and
+misses. Measured over 3203 prefills at 10 and 20 RPS, 1301 of them (40.6%)
+are exactly one token, and they are the only shapes that fall back: 2 and
+3 already replay inside bucket 4. Adding the single <code class="docutils literal notranslate"><span class="pre">1</span></code> bucket takes the
+fallback rate to zero.</p>
+<p>Only CustomVoice takes this default, selected by the checkpoint’s
+<code class="docutils literal notranslate"><span class="pre">tts_model_type</span></code>. Base prefills also carry reference audio, so their shape
+distribution differs, and VoiceDesign has not been measured; both keep the
+eager path.</p>
+<p>Opt out with <code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_backend_prefill</span> <span class="pre">disabled</span></code>. The
+default costs extra graph capture during startup. Raising
+<code class="docutils literal notranslate"><span class="pre">cuda_graph_max_bs_prefill</span></code> on its own regrows the default ladder to the
+new cap; declaring <code class="docutils literal notranslate"><span class="pre">cuda_graph_bs_prefill</span></code> yourself keeps your list as is.</p>
 <p>Raising <code class="docutils literal notranslate"><span class="pre">max_running_requests</span></code> does <strong>not</strong> automatically raise the waiting
 bound. For a ceiling-32 experiment:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
@@ -663,6 +711,80 @@ on successes only; artifacts land in <code class="docutils literal notranslate">
 <p>A closed-loop <code class="docutils literal notranslate"><span class="pre">--concurrencies</span> <span class="pre">16,32,48,64</span></code> sweep is still available for
 comparing healthy vs past-ceiling points, but it does not hold overshoot. Each
 concurrency writes inspectable artifacts under <code class="docutils literal notranslate"><span class="pre">&lt;output-dir&gt;/c&lt;N&gt;/</span></code>.</p>
+</section>
+<section id="prefill-admission-coalescing">
+<h3>Prefill Admission Coalescing<a class="headerlink" href="#prefill-admission-coalescing" title="Link to this heading">#</a></h3>
+<p>Under concurrent load, the <code class="docutils literal notranslate"><span class="pre">tts_engine</span></code> stage can coalesce prefill admission:
+instead of admitting each prepared request into its own prefill batch, the
+scheduler can briefly hold admission so that multiple ready requests are
+prefilled together.</p>
+<p>A prefill step has a largely fixed scheduler cost, so fuller batches can reduce
+prefill overhead. The end-to-end benefit depends on whether that saving
+outweighs the extra admission delay and any resulting reduction in decode
+occupancy.</p>
+<p>Coalescing is <strong>off by default</strong> and opt-in through the <code class="docutils literal notranslate"><span class="pre">tts_engine</span></code> factory
+configuration:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--config<span class="w"> </span>examples/configs/qwen3_tts_1_7b.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tts_engine.factory.prefill_coalesce_requests<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tts_engine.factory.prefill_coalesce_wait_ms<span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
+</pre></div>
+</div>
+<p>or per-stage in YAML:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">stages</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tts_engine</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">factory</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">prefill_coalesce_requests</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">      </span><span class="nt">prefill_coalesce_wait_ms</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30.0</span>
+</pre></div>
+</div>
+<p>The gate engages only when <code class="docutils literal notranslate"><span class="pre">prefill_coalesce_requests</span> <span class="pre">&gt;=</span> <span class="pre">2</span></code>. Once engaged,
+admission is released as soon as any of the following holds:</p>
+<ul class="simple">
+<li><p>decode is idle, so a ready request can start immediately;</p></li>
+<li><p>the waiting queue reaches <code class="docutils literal notranslate"><span class="pre">prefill_coalesce_requests</span></code>;</p></li>
+<li><p>the oldest waiting request has waited <code class="docutils literal notranslate"><span class="pre">prefill_coalesce_wait_ms</span></code>.</p></li>
+</ul>
+<p><code class="docutils literal notranslate"><span class="pre">prefill_coalesce_wait_ms</span></code> is therefore an upper bound on the added admission
+wait. Admission may be released earlier if the target queue size is reached.</p>
+<p>The values above are an example for the Qwen3-TTS workload and are not intended
+as universal defaults. Match both <code class="docutils literal notranslate"><span class="pre">prefill_coalesce_requests</span></code> and
+<code class="docutils literal notranslate"><span class="pre">prefill_coalesce_wait_ms</span></code> to the workload you actually serve. Coalescing is
+most useful when natural prefill batches are small and a short hold can increase
+batching without materially reducing decode occupancy. If the wait is too long,
+the reduced decode occupancy can offset the prefill savings.</p>
+<p>Leave coalescing disabled for latency-sensitive traffic or workloads where the
+added wait does not produce enough additional batching.</p>
+</section>
+<section id="process-topology">
+<h3>Process topology<a class="headerlink" href="#process-topology" title="Link to this heading">#</a></h3>
+<p>By default all three stages share one process. Per-request reference
+preprocessing (speech-tokenizer encode, speaker embedding, prompt embedding)
+then competes with the AR scheduler and the vocoder for the same interpreter,
+which caps single-replica throughput once concurrency passes ~32. Moving the
+preprocessing stage to its own process removes that contention: the stage
+loads a prompt-only frontend (embedding tables, text projection, predictor
+codec embeddings, speaker encoder) plus the speech tokenizer, together about
+2.2 GB of GPU memory for the extra process on a 1.7B checkpoint, and ships the
+prepared prompt tensors to the engine through the payload. Every GPU stage must
+then declare a memory fraction, and the engine’s static fraction has to agree
+with the one it declares:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--preprocessing.process<span class="w"> </span>tts_frontend<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--preprocessing.gpu<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--preprocessing.gpu_memory_fraction<span class="w"> </span><span class="m">0</span>.05<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tts_engine.gpu_memory_fraction<span class="w"> </span><span class="m">0</span>.75<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tts_engine.engine.mem_fraction_static<span class="w"> </span><span class="m">0</span>.75<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--vocoder.gpu_memory_fraction<span class="w"> </span><span class="m">0</span>.12
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--vocoder.process</span> <span class="pre">vocoder</span></code> composes with it (lower <code class="docutils literal notranslate"><span class="pre">tts_engine</span></code> to 0.72 and
+give the vocoder 0.15). Six SeedTTS samples at a fixed seed produced identical
+PCM in both layouts; the extra process costs its CUDA context plus the frontend
+weights.</p>
 </section>
 </section>
 <section id="synthesizing-speech">
@@ -764,14 +886,25 @@ chunks in real time:</p>
 <p>Streaming returns <code class="docutils literal notranslate"><span class="pre">audio/pcm</span></code> 16-bit mono PCM bytes with sample-rate metadata in
 the response headers. See the <a class="reference internal" href="higgs_tts.html#streaming"><span class="std std-ref">Higgs TTS cookbook</span></a>
 for a full Python raw PCM consumer.</p>
-<p>Base/reference-cloning checkpoints use true incremental codec and vocoder
-streaming for both this HTTP endpoint and <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/stream</span></code> WebSocket
-sessions with <code class="docutils literal notranslate"><span class="pre">stream_audio=true</span></code>. CustomVoice and VoiceDesign remain
-non-streaming.</p>
-<p>When <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code> is omitted, Qwen3-TTS Base defaults to <code class="docutils literal notranslate"><span class="pre">8</span></code>
-codec frames for the first vocoder chunk so concurrent streams stay continuous.
-Pass a smaller value only when trading continuity for lower time-to-first-audio.
-Utterances that finish in fewer than <code class="docutils literal notranslate"><span class="pre">8</span></code> generated codec frames never reach the
+<p>All three task types (Base/reference-cloning, CustomVoice and VoiceDesign) use
+true incremental codec and vocoder streaming, for both this HTTP endpoint and
+<code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/stream</span></code> WebSocket sessions with <code class="docutils literal notranslate"><span class="pre">stream_audio=true</span></code>. Pass
+<code class="docutils literal notranslate"><span class="pre">&quot;stream_codec_output&quot;:</span> <span class="pre">false</span></code> on a request, or launch with
+<code class="docutils literal notranslate"><span class="pre">--preprocessing.factory.stream_codec_output</span> <span class="pre">false</span></code>, to restore whole-utterance
+decoding.</p>
+<p>Streamed CustomVoice output on validated voice/language pairs (currently
+Ryan/English with default sampling) withholds the model’s silent bootstrap
+codec frame, removing about 80 ms of leading silence from the first chunk. The
+frame still feeds the vocoder, so every later sample is unchanged, and a
+runtime silence check emits the audio unmodified whenever the first frame is
+not actually silent. Opt out per request with
+<code class="docutils literal notranslate"><span class="pre">&quot;suppress_bootstrap_silence&quot;:</span> <span class="pre">false</span></code> or per deployment with
+<code class="docutils literal notranslate"><span class="pre">--vocoder.factory.suppress_bootstrap_silence</span> <span class="pre">false</span></code>.</p>
+<p>When <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code> is omitted, Qwen3-TTS ramps its first chunks
+<code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">-&gt;</span> <span class="pre">2</span> <span class="pre">-&gt;</span> <span class="pre">4</span></code> codec frames before the steady stride, so first audio leaves after a
+single AR step while the playback cushion is rebuilt within four chunks. Pass an
+explicit value to trade continuity against time-to-first-audio.
+Utterances that finish in fewer than the first chunk’s generated codec frames never reach the
 first chunk, so their audio arrives complete in a single final flush.</p>
 <section id="first-audio-chunk-ramp">
 <h4>First-audio chunk ramp<a class="headerlink" href="#first-audio-chunk-ramp" title="Link to this heading">#</a></h4>
@@ -792,9 +925,10 @@ the steady stride takes over, so <code class="docutils literal notranslate"><spa
 </pre></div>
 </div>
 <p>Smaller early chunks lower time-to-first-audio but start playback with less
-buffered audio, so the continuity cost grows with concurrency: keep
-<code class="docutils literal notranslate"><span class="pre">[2,</span> <span class="pre">4,</span> <span class="pre">8]</span></code> to low concurrency, prefer <code class="docutils literal notranslate"><span class="pre">[4,</span> <span class="pre">8]</span></code> up to moderate concurrency,
-and keep the default schedule for saturated serving. The ramp is mutually
+buffered audio, so the continuity cost grows with concurrency. The default
+<code class="docutils literal notranslate"><span class="pre">[1,</span> <span class="pre">2,</span> <span class="pre">4]</span></code> is the most aggressive schedule and suits low concurrency; prefer
+<code class="docutils literal notranslate"><span class="pre">[2,</span> <span class="pre">4,</span> <span class="pre">8]</span></code> at moderate concurrency and <code class="docutils literal notranslate"><span class="pre">[4,</span> <span class="pre">8]</span></code> for saturated serving, where
+the wider first chunk buys back the playback cushion. The ramp is mutually
 exclusive with the legacy <code class="docutils literal notranslate"><span class="pre">initial_chunk_frames</span></code> /
 <code class="docutils literal notranslate"><span class="pre">stream_initial_followup_stride</span></code> options, its first entry must not exceed the
 steady stride, and a per-request <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code> still overrides
@@ -865,8 +999,16 @@ only the first chunk.</p>
 <td><p>Stream raw PCM audio chunks</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">8</span></code> (model default when omitted)</p></td>
-<td><p>First Base streaming vocoder chunk size in codec frames. Smaller values lower TTFA but underrun more easily; <code class="docutils literal notranslate"><span class="pre">0</span></code> uses the steady stride from the start</p></td>
+<td><p>ramp <code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">-&gt;</span> <span class="pre">2</span> <span class="pre">-&gt;</span> <span class="pre">4</span></code> when omitted</p></td>
+<td><p>First streaming vocoder chunk size in codec frames. An explicit value replaces the ramp’s first chunk only. Smaller values lower TTFA but underrun more easily; <code class="docutils literal notranslate"><span class="pre">0</span></code> uses the steady stride from the start</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">stream_codec_output</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Forward codec frames to the vocoder as they are generated. Set <code class="docutils literal notranslate"><span class="pre">false</span></code> to restore whole-utterance decoding for CustomVoice/VoiceDesign</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">suppress_bootstrap_silence</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Withhold the silent bootstrap codec frame’s audio from streamed CustomVoice output (validated voice/language pairs only, guarded by a runtime silence check). Set <code class="docutils literal notranslate"><span class="pre">false</span></code> to keep the leading silence</p></td>
 </tr>
 </tbody>
 </table>
@@ -1008,6 +1150,9 @@ checkpoint is less prone.</p></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#breakable-prefill-cuda-graphs">Breakable prefill CUDA graphs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-admission-coalescing">Prefill Admission Coalescing</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#process-topology">Process topology</a></li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synthesizing-speech">Synthesizing Speech</a><ul class="pst-show_toc_level nav section-nav flex-column">
@@ -1060,7 +1205,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 02, 2026.
+  Last updated on Sep 06, 2026.
   <br/>
 </p>
   </div>

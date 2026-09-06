@@ -56,12 +56,12 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="TTS Process Topology" href="tts_process_topology.html" />
+    <link rel="next" title="Process Topology, Replicas, and GPU Sharing" href="process_topology.html" />
     <link rel="prev" title="Audio Translations" href="audio_translations.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 02, 2026"/>
+    <meta name="docbuild:last-update" content="Sep 06, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_npu.html">Installation — Ascend NPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="nav bd-sidenav">
@@ -236,6 +237,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Omni Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="process_topology.html">Process Topology, Replicas, and GPU Sharing</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tts_process_topology.html">TTS Process Topology</a></li>
 <li class="toctree-l1"><a class="reference internal" href="process_topology_migration.html">Process Topology Migration</a></li>
 <li class="toctree-l1"><a class="reference internal" href="omni_router.html">SGLang-Omni Rust Router</a></li>
@@ -1138,7 +1140,17 @@ the SGLang-Omni server:</p>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames</span></code></p></td>
 <td><p>int</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
-<td><p>Optional first codec chunk size for streaming TTFA / playback-continuity tuning. When omitted, each model applies its own default: Qwen3-TTS Base uses <code class="docutils literal notranslate"><span class="pre">8</span></code>, Higgs TTS uses <code class="docutils literal notranslate"><span class="pre">20</span></code>, MOSS-TTS Local uses <code class="docutils literal notranslate"><span class="pre">5</span></code>, and ZONOS2 uses <code class="docutils literal notranslate"><span class="pre">40</span></code>. An explicit <code class="docutils literal notranslate"><span class="pre">0</span></code> uses the model’s steady chunk size from the start. Ming-Omni-TTS rejects the field entirely</p></td>
+<td><p>Optional first codec chunk size for streaming TTFA / playback-continuity tuning. When omitted, each model applies its own default: Qwen3-TTS ramps <code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">-&gt;</span> <span class="pre">2</span> <span class="pre">-&gt;</span> <span class="pre">4</span></code> into the steady stride, Higgs TTS uses <code class="docutils literal notranslate"><span class="pre">20</span></code>, MOSS-TTS Local uses <code class="docutils literal notranslate"><span class="pre">5</span></code>, and ZONOS2 uses <code class="docutils literal notranslate"><span class="pre">40</span></code>. An explicit <code class="docutils literal notranslate"><span class="pre">0</span></code> uses the model’s steady chunk size from the start. Ming-Omni-TTS rejects the field entirely</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">stream_codec_output</span></code></p></td>
+<td><p>bool</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Qwen3-TTS only. Forward codec frames to the vocoder as they are generated. Set <code class="docutils literal notranslate"><span class="pre">false</span></code> to restore whole-utterance decoding for CustomVoice / VoiceDesign</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">suppress_bootstrap_silence</span></code></p></td>
+<td><p>bool</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Qwen3-TTS only. Withhold the silent bootstrap codec frame’s audio from streamed CustomVoice output on validated voice/language pairs; an audible first frame is always emitted unchanged. Set <code class="docutils literal notranslate"><span class="pre">false</span></code> to keep the leading silence</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">references</span></code></p></td>
 <td><p>list</p></td>
@@ -1333,11 +1345,11 @@ python<span class="w"> </span>-m<span class="w"> </span>benchmarks.eval.benchmar
       </div>
     </a>
     <a class="right-next"
-       href="tts_process_topology.html"
+       href="process_topology.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">TTS Process Topology</p>
+        <p class="prev-next-title">Process Topology, Replicas, and GPU Sharing</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -1411,7 +1423,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 02, 2026.
+  Last updated on Sep 06, 2026.
   <br/>
 </p>
   </div>
