@@ -419,7 +419,7 @@ window.runMermaid = runMermaid;</script>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 06, 2026"/>
+    <meta name="docbuild:last-update" content="Sep 07, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -1234,9 +1234,9 @@ worker unhealthy when it expires.
 Speech configuration is replayed byte-for-byte; the router extracts routing
 facts while the worker owns protocol-value validation.</p>
 <p>Uploaded voices have one explicit owner configured by
-<code class="docutils literal notranslate"><span class="pre">router.voice_owner_worker_id</span></code>. Voice CRUD and requests that depend on a stored
-voice are pinned to that worker. Stateless speech continues to use normal
-worker selection. The router does not store, replicate, or reconcile
+<code class="docutils literal notranslate"><span class="pre">router.voice_owner_worker_id</span></code>. Voice CRUD and uploaded-name requests are
+pinned to that worker. Preset names and explicit references continue to use
+normal worker selection. The router does not store, replicate, or reconcile
 worker-local voice data. <code class="docutils literal notranslate"><span class="pre">voice_name_policy</span> <span class="pre">=</span> <span class="pre">&quot;preset&quot;</span></code> declares names provided
 by the serving model. <code class="docutils literal notranslate"><span class="pre">voice_name_policy</span> <span class="pre">=</span> <span class="pre">&quot;uploaded&quot;</span></code> declares names resolved
 from worker-local voice state; hybrid pipelines should use <code class="docutils literal notranslate"><span class="pre">uploaded</span></code> so named
@@ -1507,7 +1507,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 06, 2026.
+  Last updated on Sep 07, 2026.
   <br/>
 </p>
   </div>
