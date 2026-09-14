@@ -26,7 +26,10 @@ from sglang_omni.models.moss_tts.hf_loading import (
     moss_transformers_processor_compat,
 )
 from sglang_omni.models.moss_tts.request_builders import _DATA_URI_RE
-from sglang_omni.models.moss_tts_local.config import resolve_vocoder_cuda_graph
+from sglang_omni.models.moss_tts_local.config import (
+    DEFAULT_INITIAL_CHUNK_FRAMES,
+    resolve_vocoder_cuda_graph,
+)
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
@@ -602,6 +605,7 @@ def create_sglang_tts_engine_executor(
     gpu_id: int | None = None,
     dtype: str = "bfloat16",
     server_args_overrides: dict[str, Any] | None = None,
+    initial_chunk_frames: int = DEFAULT_INITIAL_CHUNK_FRAMES,
     enable_async_decode: bool = False,
     async_decode_min_batch_size: int = 2,
     prefill_coalesce_requests: int = 0,
@@ -615,6 +619,7 @@ def create_sglang_tts_engine_executor(
     )
 
     return MossTtsLocalEngineBuilder(
+        initial_chunk_frames=initial_chunk_frames,
         enable_async_decode=enable_async_decode,
         async_decode_min_batch_size=async_decode_min_batch_size,
         prefill_coalesce_requests=prefill_coalesce_requests,
@@ -649,7 +654,7 @@ def create_vocoder_executor(
     max_batch_wait_ms: int = 2,
     stream_slots: int = 16,
     stream_chunk_frames: int = 25,
-    initial_chunk_frames: int = 5,
+    initial_chunk_frames: int = DEFAULT_INITIAL_CHUNK_FRAMES,
     coalesce_floor_frames: int = 5,
     vocoder_cuda_graph: bool | None = None,
     vocoder_cuda_graph_frames: list[int] | None = None,

@@ -9,6 +9,7 @@ import torch
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
+from sglang_omni.models.moss_tts_local.config import DEFAULT_INITIAL_CHUNK_FRAMES
 from sglang_omni.models.moss_tts_local.radix_hash import gpu_radix_row_hash
 from sglang_omni.models.moss_tts_local.request_builders import (
     MOSS_STREAM_TRANSPORT_BATCH_FRAMES,
@@ -31,14 +32,41 @@ class MossTTSLocalModelRunner(ModelRunner):
 
     _outbox: Any | None = None
     _vocoder_target = "vocoder"
+    _stream_rows_copy_stream: torch.cuda.Stream | None = None
 
-    def __init__(self, tp_worker: Any, output_processor: Any):
+    _initial_chunk_frames = DEFAULT_INITIAL_CHUNK_FRAMES
+
+    def __init__(
+        self,
+        tp_worker: Any,
+        output_processor: Any,
+        *,
+        initial_chunk_frames: int = DEFAULT_INITIAL_CHUNK_FRAMES,
+    ):
         super().__init__(tp_worker, output_processor)
+        self._initial_chunk_frames = initial_chunk_frames
         self._outbox: Any | None = None
         self._vocoder_target = "vocoder"
 
     def set_stream_outbox(self, outbox: Any) -> None:
         self._outbox = outbox
+
+    def _copy_stream_rows(
+        self, rows: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        if not rows.is_cuda:
+            return rows, None
+        if self._stream_rows_copy_stream is None:
+            self._stream_rows_copy_stream = torch.cuda.Stream(device=rows.device)
+        copy_stream = self._stream_rows_copy_stream
+        copy_stream.wait_stream(torch.cuda.current_stream(rows.device))
+        with torch.cuda.stream(copy_stream):
+            cpu_rows = torch.empty_like(rows, device="cpu", pin_memory=True)
+            cpu_rows.copy_(rows, non_blocking=True)
+            ready = torch.cuda.Event()
+            ready.record(copy_stream)
+            rows.record_stream(copy_stream)
+        return cpu_rows, ready
 
     def _flush_stream_rows(
         self,
@@ -55,6 +83,13 @@ class MossTTSLocalModelRunner(ModelRunner):
             return
         first_sent = data.stream_first_batch_sent
         threshold = 1 if not first_sent else MOSS_STREAM_TRANSPORT_BATCH_FRAMES
+        # note (Zhang Yiyang): Flush at the first two audio packet boundaries.
+        initial_frames = self._initial_chunk_frames
+        sent_frames = len(data.output_rows) - len(pending)
+        for boundary in (initial_frames, initial_frames * 3):
+            if 0 < sent_frames < boundary:
+                threshold = min(threshold, boundary - sent_frames)
+                break
         if not force and len(pending) < threshold:
             return
         rows = pending[0] if len(pending) == 1 else torch.stack(pending)
@@ -447,10 +482,18 @@ class MossTTSLocalModelRunner(ModelRunner):
                 device=pool.feedback_embeds.device,
                 dtype=pool.feedback_embeds.dtype,
             )
+            stream_rows = stream_rows_ready = None
+            if self._outbox is not None and any(
+                getattr(requests[i].data, "stream_metadata", None) is not None
+                for i in emit_indices
+            ):
+                stream_rows, stream_rows_ready = self._copy_stream_rows(emit_rows)
             result.moss_journal = MossTTSLocalDecodeJournal(
                 rids=[requests[i].request_id for i in emit_indices],
                 pool_rows=emit_pool_rows,
                 rows=emit_rows,
+                stream_rows=stream_rows,
+                stream_rows_ready=stream_rows_ready,
             )
         # Always return rows so both the sync inline path and the async launch
         # publish next_token_ids; an all-chunked batch just attaches no journal.
@@ -658,6 +701,9 @@ class MossTTSLocalModelRunner(ModelRunner):
                 "MOSS-TTS Local journal/batch alignment broken: "
                 f"{journal.rids} != {expected_rids}"
             )
+        stream_rows = journal.stream_rows
+        if journal.stream_rows_ready is not None:
+            journal.stream_rows_ready.synchronize()
         for i, sched_req in enumerate(expected_reqs):
             # Overrun: a request finished or retracted in a PRIOR step is still
             # in this lagged resolve batch; its wasted frame must not reach
@@ -686,16 +732,15 @@ class MossTTSLocalModelRunner(ModelRunner):
             stream_metadata = getattr(sched_req.data, "stream_metadata", None)
             if stream_metadata is None or self._outbox is None:
                 continue
-            # Keep the step-private journal row on its producing device. The
-            # pipeline runtime selects local-object, direct CUDA IPC, or relay
-            # transport for the actual topology. Forcing every streaming decode
-            # step through CPU here serializes the AR CUDA stream and bypasses
-            # the same-GPU zero-copy transport.
+            # note (Zhang Yiyang): Keep GPU rows as AR history and send the
+            # completed CPU snapshot through the small CPU-packet transport.
             pending = getattr(sched_req.data, "stream_pending_rows", None)
             if pending is None:
                 pending = []
                 sched_req.data.stream_pending_rows = pending
-            pending.append(journal.rows[i])
+            pending.append(
+                stream_rows[i] if stream_rows is not None else journal.rows[i]
+            )
             self._flush_stream_rows(
                 sched_req.request_id,
                 sched_req.data,

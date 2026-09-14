@@ -306,7 +306,12 @@ class MossTTSLocalDecodeJournal:
         rids: list[str],
         pool_rows: list[int],
         rows: torch.Tensor,
+        *,
+        stream_rows: torch.Tensor | None = None,
+        stream_rows_ready: torch.cuda.Event | None = None,
     ) -> None:
         self.rids = rids
         self.pool_rows = pool_rows
         self.rows = rows
+        self.stream_rows = stream_rows
+        self.stream_rows_ready = stream_rows_ready

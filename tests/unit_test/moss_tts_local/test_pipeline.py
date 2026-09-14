@@ -634,6 +634,7 @@ def _install_fake_moss_ar_factory(
     class FakeMossRunner:
         def __init__(self, *args, **kwargs):
             self.stream_outbox = None
+            self.initial_chunk_frames = kwargs["initial_chunk_frames"]
 
         def set_stream_outbox(self, outbox):
             self.stream_outbox = outbox
@@ -1983,8 +1984,8 @@ def test_post_process_outputs_skips_chunked_rows():
     assert len(req_b.data.output_rows) == 1, "normal row must be appended"
 
 
-def test_post_process_outputs_keeps_stream_rows_device_native():
-    """Streaming transport, not the model runner, owns device placement."""
+def test_post_process_outputs_uses_ready_stream_snapshot():
+    """Wait for the CPU copy while preserving the original AR history rows."""
     from sglang_omni.models.moss_tts_local.model_runner import MossTTSLocalModelRunner
     from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
 
@@ -1996,6 +1997,8 @@ def test_post_process_outputs_keeps_stream_rows_device_native():
     runner._outbox = types.SimpleNamespace(put=messages.append)
 
     row = torch.arange(N_VQ + 1, dtype=torch.long).reshape(1, N_VQ + 1)
+    stream_rows = torch.full_like(row, -1)
+    ready = types.SimpleNamespace(synchronize=lambda: stream_rows.copy_(row))
     data = types.SimpleNamespace(
         req=None,
         output_rows=[],
@@ -2010,6 +2013,8 @@ def test_post_process_outputs_keeps_stream_rows_device_native():
             rids=["r0"],
             pool_rows=[0],
             rows=row,
+            stream_rows=stream_rows,
+            stream_rows_ready=ready,
         )
     )
 
@@ -2020,11 +2025,33 @@ def test_post_process_outputs_keeps_stream_rows_device_native():
     )
 
     assert len(messages) == 1
-    assert messages[0].data.device == row.device
-    assert (
-        messages[0].data.untyped_storage().data_ptr()
-        == row.untyped_storage().data_ptr()
+    assert torch.equal(messages[0].data, row[0])
+    assert messages[0].data.data_ptr() == stream_rows.data_ptr()
+    assert data.output_rows[0].data_ptr() == row.data_ptr()
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("batch_size", [3, 16, 64])
+def test_stream_rows_copy_preserves_step_snapshot(batch_size):
+    from sglang_omni.models.moss_tts_local.model_runner import MossTTSLocalModelRunner
+
+    runner = MossTTSLocalModelRunner.__new__(MossTTSLocalModelRunner)
+    expected = torch.arange(batch_size * (N_VQ + 1), dtype=torch.long).reshape(
+        batch_size, N_VQ + 1
     )
+    producer = torch.cuda.Stream()
+    with torch.cuda.stream(producer):
+        rows = expected.to("cuda")
+        first, first_ready = runner._copy_stream_rows(rows)
+        producer.wait_event(first_ready)
+        rows.add_(1)
+        second, second_ready = runner._copy_stream_rows(rows)
+    second_ready.synchronize()
+
+    assert first.is_pinned() and second.is_pinned()
+    assert torch.equal(first, expected)
+    assert torch.equal(second, expected + 1)
 
 
 def test_post_process_outputs_does_not_buffer_without_stream_outbox():
@@ -2063,7 +2090,13 @@ def test_post_process_outputs_does_not_buffer_without_stream_outbox():
     assert data.stream_pending_rows == []
 
 
-def test_post_process_outputs_batches_stream_transport_rows():
+@pytest.mark.parametrize(
+    "initial_frames, packet_sizes",
+    [(0, [1, 5, 5, 5, 2]), (4, [1, 3, 5, 3, 5, 1]), (5, [1, 4, 5, 5, 3])],
+)
+def test_post_process_outputs_batches_stream_transport_rows(
+    initial_frames, packet_sizes
+):
     from sglang_omni.models.moss_tts_local.model_runner import MossTTSLocalModelRunner
     from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
 
@@ -2079,10 +2112,11 @@ def test_post_process_outputs_batches_stream_transport_rows():
         stream_metadata={"stream": True, "modality": "audio_codes", "n_vq": N_VQ},
         stream_first_batch_sent=False,
     )
+    runner._initial_chunk_frames = initial_frames
     sched_output = types.SimpleNamespace(
         requests=[types.SimpleNamespace(request_id="r0", data=data)]
     )
-    rows = torch.arange(7 * (N_VQ + 1), dtype=torch.long).reshape(7, N_VQ + 1)
+    rows = torch.arange(18 * (N_VQ + 1), dtype=torch.long).reshape(18, N_VQ + 1)
 
     for row in rows:
         result = types.SimpleNamespace(
@@ -2109,11 +2143,9 @@ def test_post_process_outputs_batches_stream_transport_rows():
         {"r0": types.SimpleNamespace(data=151670)},
     )
 
-    assert [tuple(message.data.shape) for message in messages] == [
-        (N_VQ + 1,),
-        (5, N_VQ + 1),
-        (N_VQ + 1,),
-    ]
+    assert [
+        1 if message.data.ndim == 1 else message.data.shape[0] for message in messages
+    ] == packet_sizes
     reconstructed = torch.cat(
         [
             message.data.unsqueeze(0) if message.data.ndim == 1 else message.data
@@ -2575,3 +2607,29 @@ def test_async_decode_dotted_flags_accept_moss_local():
     assert args["async_decode_min_batch_size"] == 4
     assert args["total_gpu_memory_fraction"] == pytest.approx(0.67)
     assert args["codec_mem_reserve"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "initial, steady, expected", [(None, None, 4), (5, 25, 5), (0, 25, 0), (8, 6, 6)]
+)
+def test_initial_chunk_config_shared_with_ar(monkeypatch, initial, steady, expected):
+    from sglang_omni.config import FactoryArgs
+    from sglang_omni.models.moss_tts_local.config import MossTTSLocalSplitPipelineConfig
+
+    for config_cls in (MossTTSLocalPipelineConfig, MossTTSLocalSplitPipelineConfig):
+        config = config_cls(model_path="OpenMOSS-Team/moss-local-test")
+        values = {}
+        if initial is not None:
+            values["initial_chunk_frames"] = initial
+        if steady is not None:
+            values["stream_chunk_frames"] = steady
+        config.stage_named("vocoder").factory = FactoryArgs(**values)
+        engine_kwargs = config.stage_factory_kwargs("tts_engine")
+        assert engine_kwargs["initial_chunk_frames"] == expected
+        stages, _, _ = _install_fake_moss_ar_factory(
+            monkeypatch, process_memory_bytes=None
+        )
+        scheduler = stages.create_sglang_tts_engine_executor(
+            "dummy", server_args_overrides={"disable_cuda_graph": True}, **engine_kwargs
+        )
+        assert scheduler.kwargs["model_runner"].initial_chunk_frames == expected

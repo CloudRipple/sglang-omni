@@ -28,7 +28,6 @@ from sglang_omni.models.moss_tts.request_builders import (
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.prepared_request_queue import PreparedRequestQueue
-from sglang_omni.scheduling.streaming_vocoder import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.scheduling.types import ARRequestData
 
 _MOSS_TTS_LOCAL_PREPARED_MARKER = "_moss_tts_local_prepared_request"
@@ -343,10 +342,6 @@ def build_moss_tts_local_stream_metadata(
         "modality": "audio_codes",
         "n_vq": int(n_vq),
     }
-    if params.get(INITIAL_CODEC_CHUNK_FRAMES_PARAM) is not None:
-        metadata[INITIAL_CODEC_CHUNK_FRAMES_PARAM] = params[
-            INITIAL_CODEC_CHUNK_FRAMES_PARAM
-        ]
     return metadata
 
 

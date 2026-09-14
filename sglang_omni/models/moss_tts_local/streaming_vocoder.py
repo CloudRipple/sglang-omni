@@ -21,13 +21,11 @@ from sglang_omni.models.moss_tts.audio_tokenizer import (
     MossAudioTokenizerVocoderDecoder,
 )
 from sglang_omni.models.moss_tts.vocoder import decode_codes_batch
+from sglang_omni.models.moss_tts_local.config import DEFAULT_INITIAL_CHUNK_FRAMES
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.pipeline_state import build_usage
-from sglang_omni.scheduling.streaming_vocoder import (
-    StreamingVocoderBase,
-    resolve_initial_codec_chunk_frames,
-)
+from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 
 logger = logging.getLogger(__name__)
@@ -213,13 +211,12 @@ class _CodecStreamSession:
             size for size in self._graph_batch_sizes() if size >= len(slots)
         )
         padding = batch_size - len(slots)
-        rows = [
-            codes.to(device=self._device, dtype=torch.long)
-            for codes in slot_codes.values()
-        ]
+        # note (Zhang Yiyang): Stack CPU streaming codes before uploading
+        # to avoid a separate H2D transfer for each request.
+        rows = list(slot_codes.values())
         if padding:
             rows.extend([rows[0].new_zeros(n_vq, step_t)] * padding)
-        codes_step = torch.stack(rows, dim=1)
+        codes_step = torch.stack(rows, dim=1).to(device=self._device, dtype=torch.long)
         codes_lengths = torch.tensor(
             [step_t] * len(slots) + [0] * padding,
             dtype=torch.long,
@@ -294,7 +291,6 @@ class _LocalStreamState:
     slot: int | None = None
     pending: list[torch.Tensor] = field(default_factory=list)
     n_vq: int | None = None
-    initial_chunk_frames: int = 0
     threshold: int = 0
 
 
@@ -321,7 +317,7 @@ class MossTTSLocalStreamingVocoderScheduler(
         stream_slots: int = 16,
         stream_chunk_frames: int = 25,
         attention_backend: str = AUTO_ATTENTION_BACKEND,
-        initial_chunk_frames: int = 5,
+        initial_chunk_frames: int = DEFAULT_INITIAL_CHUNK_FRAMES,
         coalesce_floor_frames: int = 5,
         max_step_frames: int = 100,
         max_batch_size: int = 8,
@@ -375,7 +371,7 @@ class MossTTSLocalStreamingVocoderScheduler(
         # Coalesce up to one full set of streaming lanes per pump, not the offline batch width.
         self._stream_chunk_batch_max = self._stream_slots
         self._stream_chunk_frames = int(stream_chunk_frames)
-        self._default_initial_chunk_frames = max(
+        self._initial_chunk_frames = max(
             0, min(int(initial_chunk_frames), int(stream_chunk_frames))
         )
         self._coalesce_floor_frames = max(
@@ -427,12 +423,7 @@ class MossTTSLocalStreamingVocoderScheduler(
         origin: str,
     ) -> None:
         if origin == "payload":
-            params = (
-                source.request.params
-                if isinstance(source.request.params, dict)
-                else None
-            )
-            self._latch_thresholds(request_id, state, params)
+            self._latch_thresholds(request_id, state)
             return
         metadata: Mapping[str, Any] = source
         n_vq = metadata.get("n_vq")
@@ -445,7 +436,7 @@ class MossTTSLocalStreamingVocoderScheduler(
                 )
             state.n_vq = n_vq
         if state.threshold == 0:
-            self._latch_thresholds(request_id, state, metadata)
+            self._latch_thresholds(request_id, state)
 
     def validate_chunk(
         self, request_id: str, state: _LocalStreamState, codes: torch.Tensor
@@ -601,7 +592,15 @@ class MossTTSLocalStreamingVocoderScheduler(
         out: dict[str, torch.Tensor] = {}
         for request_id, state in participants:
             del state.pending[: plan.step_t]
-            state.threshold = self._stream_chunk_frames
+            # note (Zhang Yiyang): Refill before waiting for a full steady chunk.
+            state.threshold = (
+                min(
+                    self._stream_chunk_frames,
+                    max(plan.step_t, self._initial_chunk_frames * 2),
+                )
+                if not self._stream_has_emitted(request_id)
+                else self._stream_chunk_frames
+            )
             out[request_id] = decoded[state.slot]
         return out
 
@@ -690,15 +689,9 @@ class MossTTSLocalStreamingVocoderScheduler(
         self,
         request_id: str,
         state: _LocalStreamState,
-        params: Mapping[str, Any] | None,
     ) -> None:
-        state.initial_chunk_frames = resolve_initial_codec_chunk_frames(
-            params,
-            steady_chunk_frames=self._stream_chunk_frames,
-            default_frames=self._default_initial_chunk_frames,
-        )
-        if state.initial_chunk_frames > 0 and not self._stream_has_emitted(request_id):
-            state.threshold = state.initial_chunk_frames
+        if self._initial_chunk_frames > 0 and not self._stream_has_emitted(request_id):
+            state.threshold = self._initial_chunk_frames
         else:
             state.threshold = self._stream_chunk_frames
 

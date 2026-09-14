@@ -13,6 +13,7 @@ from sglang_omni.models.moss_tts.hf_loading import (
 )
 from sglang_omni.models.moss_tts_local import request_builders
 from sglang_omni.models.moss_tts_local import stages as moss_local_stages
+from sglang_omni.models.moss_tts_local.config import DEFAULT_INITIAL_CHUNK_FRAMES
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
 
@@ -36,6 +37,7 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
     def __init__(
         self,
         *,
+        initial_chunk_frames: int = DEFAULT_INITIAL_CHUNK_FRAMES,
         enable_async_decode: bool,
         async_decode_min_batch_size: int,
         prefill_coalesce_requests: int = 0,
@@ -44,6 +46,7 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
         codec_mem_reserve: float,
         process_total_gpu_memory_fraction: float | None = None,
     ) -> None:
+        self.initial_chunk_frames = initial_chunk_frames
         self.enable_async_decode = enable_async_decode
         self.async_decode_min_batch_size = async_decode_min_batch_size
         self.prefill_coalesce_requests = prefill_coalesce_requests
@@ -157,7 +160,9 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder):
             "sglang_omni.models.moss_tts_local.model_runner"
         )
 
-        return model_runner_mod.MossTTSLocalModelRunner(model_worker, output_proc)
+        return model_runner_mod.MossTTSLocalModelRunner(
+            model_worker, output_proc, initial_chunk_frames=self.initial_chunk_frames
+        )
 
     def make_adapters(self, model: Any) -> tuple[Any, Any]:
         return request_builders.make_moss_tts_local_scheduler_adapters(model=model)

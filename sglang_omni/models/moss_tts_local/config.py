@@ -17,6 +17,8 @@ from sglang_omni.config import (
 )
 from sglang_omni.utils.cpu import bounded_intraop_threads
 
+DEFAULT_INITIAL_CHUNK_FRAMES = 4
+
 _PKG = "sglang_omni.models.moss_tts_local"
 # Keep reference encoding with AR so process-scoped SGLang accounting includes
 # its codec allocation. The vocoder is isolated: its Python-heavy packed decode
@@ -177,12 +179,24 @@ class MossTTSLocalPipelineConfig(PipelineConfig):
                 "ref_audio_cache_max_bytes": self.ref_audio_cache_max_bytes,
             }
         if stage_name == "tts_engine":
+            vocoder_factory = self.stage_named("vocoder").factory.model_dump(
+                exclude_none=True
+            )
+            initial_frames = int(
+                vocoder_factory.get(
+                    "initial_chunk_frames", DEFAULT_INITIAL_CHUNK_FRAMES
+                )
+            )
+            steady_frames = int(vocoder_factory.get("stream_chunk_frames", 25))
+            kwargs = {
+                "initial_chunk_frames": max(0, min(initial_frames, steady_frames))
+            }
             engine_stage = self.stage_named("tts_engine")
             if engine_stage.gpu_memory_fraction is not None:
                 # Colocated layouts budget the codec reserve through the
                 # per-stage fractions instead of the engine-side reserve.
-                return {"codec_mem_reserve": 0.0}
-            return {}
+                kwargs["codec_mem_reserve"] = 0.0
+            return kwargs
         if stage_name == "vocoder":
             return {
                 "vocoder_cuda_graph": resolve_vocoder_cuda_graph(
