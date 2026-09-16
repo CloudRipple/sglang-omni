@@ -3,7 +3,7 @@
 
 The 2.0 runtime layout trains ``audio_lm_heads`` separately from the audio
 embedding tables, while v1.5 ships them tied (or converted checkpoints omit
-them). These CPU-only tests pin the load/forward contract:
+them). These tests pin the load/forward contract and CUDA graph replay:
 
 - ``load_weights`` routes ``audio_lm_heads.{i}.weight`` into the dedicated
   tables, ties missing heads onto the embedding rows, and rejects a partial
@@ -80,6 +80,8 @@ def _model_stub() -> SimpleNamespace:
             vocab_size_list=[_TEXT_VOCAB] + [_AUDIO_VOCAB + 1] * _N_VQ,
         ),
         n_vq=_N_VQ,
+        hidden_size=_HIDDEN,
+        _audio_heads_initialized=False,
         dtype=torch.float32,
         embedding_list=embedding_list,
         audio_lm_heads=[_linear(_AUDIO_VOCAB, seed=300 + c) for c in range(_N_VQ)],
@@ -104,6 +106,7 @@ def _model_stub() -> SimpleNamespace:
         stub,
         "_audio_embedding_weight",
         "_audio_head_weight",
+        "_load_audio_weights",
         "_resolve_audio_head_ties",
         "_zero_audio_pad_rows",
         "decode_frame",
@@ -113,9 +116,13 @@ def _model_stub() -> SimpleNamespace:
 
 
 def _ckpt_weights(
-    *, include_audio_heads: bool, n_heads: int = _N_VQ
+    *,
+    include_audio_heads: bool,
+    n_heads: int = _N_VQ,
+    tied_audio_heads: bool = False,
+    seed: int = 0,
 ) -> list[tuple[str, torch.Tensor]]:
-    gen = torch.Generator().manual_seed(0)
+    gen = torch.Generator().manual_seed(seed)
     weights: list[tuple[str, torch.Tensor]] = [
         (
             "transformer.embed_tokens.weight",
@@ -131,11 +138,16 @@ def _ckpt_weights(
             )
         )
     if include_audio_heads:
+        embeddings = dict(weights)
         for channel in range(n_heads):
             weights.append(
                 (
                     f"audio_lm_heads.{channel}.weight",
-                    torch.randn(_AUDIO_VOCAB, _HIDDEN, generator=gen),
+                    (
+                        embeddings[f"audio_embeddings.{channel}.weight"].clone()
+                        if tied_audio_heads
+                        else torch.randn(_AUDIO_VOCAB, _HIDDEN, generator=gen)
+                    ),
                 )
             )
     weights.append(
@@ -191,14 +203,7 @@ def test_serialized_tie_aliases_back_onto_embeddings() -> None:
     """A checkpoint storing audio_lm_heads == audio_embeddings loads, then
     aliases the heads onto the embedding rows instead of keeping duplicates."""
     stub = _model_stub()
-    weights = _ckpt_weights(include_audio_heads=False)
-    expected = {name: w for name, w in weights}
-    # Re-add the head tensors as exact copies of the embedding rows: the
-    # serialized-tie layout (the v1.5 release shape).
-    weights += [
-        (f"audio_lm_heads.{c}.weight", expected[f"audio_embeddings.{c}.weight"])
-        for c in range(_N_VQ)
-    ]
+    weights = _ckpt_weights(include_audio_heads=True, tied_audio_heads=True)
     stub.load_weights(iter(weights))
 
     for channel in range(_N_VQ):
@@ -226,10 +231,98 @@ def test_text_lm_head_stays_tied_via_embedding() -> None:
     )
 
 
+@pytest.mark.parametrize("initial_tied", [False, True])
+def test_incremental_audio_weight_updates(initial_tied: bool) -> None:
+    stub = _model_stub()
+    stub.load_weights(
+        _ckpt_weights(include_audio_heads=True, tied_audio_heads=initial_tied)
+    )
+    heads = [head.weight.detach().clone() for head in stub.audio_lm_heads]
+    embeddings = [
+        stub._audio_embedding_weight(c).detach().clone() for c in range(_N_VQ)
+    ]
+
+    text_head = stub.local_text_lm_head.weight.detach().clone() + 1
+    stub.load_weights([("local_text_lm_head.weight", text_head)])
+    torch.testing.assert_close(stub.local_text_lm_head.weight, text_head)
+    for channel in range(_N_VQ):
+        torch.testing.assert_close(stub._audio_head_weight(channel), heads[channel])
+
+    new_head = heads[0] + 1
+    stub.load_weights([("audio_lm_heads.0.weight", new_head)])
+    torch.testing.assert_close(stub._audio_head_weight(0), new_head)
+    torch.testing.assert_close(stub._audio_head_weight(1), heads[1])
+    for channel in range(_N_VQ):
+        torch.testing.assert_close(
+            stub._audio_embedding_weight(channel), embeddings[channel]
+        )
+
+    new_embedding = embeddings[1] + 1
+    stub.load_weights([("audio_embeddings.1.weight", new_embedding)])
+    torch.testing.assert_close(stub._audio_embedding_weight(1), new_embedding)
+    torch.testing.assert_close(
+        stub._audio_head_weight(1), new_embedding if initial_tied else heads[1]
+    )
+    torch.testing.assert_close(stub._audio_head_weight(0), new_head)
+
+
+@pytest.mark.parametrize(
+    "initial_tied,next_tied,heads_first",
+    [
+        (False, False, False),
+        (False, True, False),
+        (True, True, False),
+        (True, False, False),
+        (True, False, True),
+    ],
+)
+def test_audio_weight_reload(
+    initial_tied: bool, next_tied: bool, heads_first: bool
+) -> None:
+    stub = _model_stub()
+    stub.load_weights(
+        _ckpt_weights(include_audio_heads=True, tied_audio_heads=initial_tied)
+    )
+    head_ptrs = [head.weight.data_ptr() for head in stub.audio_lm_heads]
+    embedding_ptrs = [stub._audio_embedding_weight(c).data_ptr() for c in range(_N_VQ)]
+    weights = _ckpt_weights(
+        include_audio_heads=True, tied_audio_heads=next_tied, seed=1
+    )
+    expected = dict(weights)
+    stub.load_weights(reversed(weights) if heads_first else iter(weights))
+
+    for channel in range(_N_VQ):
+        head = stub._audio_head_weight(channel)
+        embedding = stub._audio_embedding_weight(channel)
+        torch.testing.assert_close(head, expected[f"audio_lm_heads.{channel}.weight"])
+        torch.testing.assert_close(
+            embedding, expected[f"audio_embeddings.{channel}.weight"]
+        )
+        assert embedding.data_ptr() == embedding_ptrs[channel]
+        if initial_tied and not next_tied:
+            assert head.data_ptr() != head_ptrs[channel]
+        else:
+            assert head.data_ptr() == head_ptrs[channel]
+
+
 def _frame_stub() -> SimpleNamespace:
     stub = _model_stub()
     stub._sample_seeded_branchless = lambda logits, **kwargs: logits.argmax(-1)
     return stub
+
+
+def _frame_inputs(batch: int, *, device="cpu", dtype=torch.float32) -> dict:
+    return dict(
+        hidden_states=torch.ones(batch, _HIDDEN, device=device, dtype=dtype),
+        text_temperature=torch.ones(batch, device=device),
+        text_top_p=torch.ones(batch, device=device),
+        text_top_k=torch.full((batch,), 50, device=device, dtype=torch.long),
+        audio_temperature=torch.ones(batch, device=device),
+        audio_top_p=torch.ones(batch, device=device),
+        audio_top_k=torch.full((batch,), 25, device=device, dtype=torch.long),
+        seeds=torch.zeros(batch, device=device, dtype=torch.long),
+        base_positions=torch.zeros(batch, device=device, dtype=torch.long),
+    )
 
 
 def test_decode_frame_uses_heads_for_logits_and_embeddings_for_feedback() -> None:
@@ -268,17 +361,7 @@ def test_decode_frame_uses_heads_for_logits_and_embeddings_for_feedback() -> Non
 def test_graphable_frame_uses_same_head_embedding_split() -> None:
     stub = _frame_stub()
     batch = 2
-    stop_choice, codes, feedback = stub._decode_frame_graphable(
-        torch.ones(batch, _HIDDEN),
-        text_temperature=torch.ones(batch),
-        text_top_p=torch.ones(batch),
-        text_top_k=torch.full((batch,), 50, dtype=torch.long),
-        audio_temperature=torch.ones(batch),
-        audio_top_p=torch.ones(batch),
-        audio_top_k=torch.full((batch,), 25, dtype=torch.long),
-        seeds=torch.zeros(batch, dtype=torch.long),
-        base_positions=torch.zeros(batch, dtype=torch.long),
-    )
+    stop_choice, codes, feedback = stub._decode_frame_graphable(**_frame_inputs(batch))
     assert stop_choice.shape == (batch,)
     assert codes.shape == (batch, _N_VQ)
     # feedback = slot embedding + sum over channels of embedding rows.
@@ -298,3 +381,50 @@ def test_graphable_frame_uses_same_head_embedding_split() -> None:
     )  # step(embed_row, 1)
     expected_code = F.linear(hidden1, stub.audio_lm_heads[1].weight).argmax(-1)
     assert torch.equal(codes[:, 1], expected_code)
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("initial_tied", [False, True, None])
+def test_cuda_graph_replay_after_audio_weight_updates(
+    initial_tied: bool | None,
+) -> None:
+    stub = _frame_stub()
+    stub.device = torch.device("cuda", torch.cuda.current_device())
+    stub.dtype = torch.bfloat16
+    for _, param in stub.named_parameters():
+        param.data = param.data.to(device=stub.device, dtype=stub.dtype)
+    stub._decode_input_embedding = SimpleNamespace(weight=torch.empty(2, _HIDDEN))
+    stub.local_transformer._ensure_kv_cache = lambda *args: None
+    stub.local_transformer.freeze_kv_cache = lambda: None
+    stub._ensure_frame_sampler_compile = lambda: None
+    _bind(stub, "init_frame_decode_graphs", "decode_frame_graphed")
+    # note (Zhang Yiyang): Dummy loading captures before the first load_weights.
+    if initial_tied is not None:
+        stub.load_weights(
+            _ckpt_weights(include_audio_heads=True, tied_audio_heads=initial_tied)
+        )
+    stub.init_frame_decode_graphs([1, 2])
+
+    for seed, next_tied in enumerate((not initial_tied, bool(initial_tied)), start=1):
+        previous_graphs = {bs: entry[0] for bs, entry in stub._frame_graphs.items()}
+        previous_heads = [head.weight.data_ptr() for head in stub.audio_lm_heads]
+        stub.load_weights(
+            _ckpt_weights(
+                include_audio_heads=True, tied_audio_heads=next_tied, seed=seed
+            )
+        )
+        storage_changed = initial_tied is None or (initial_tied and seed == 1)
+        for channel in range(_N_VQ):
+            assert (
+                stub._audio_head_weight(channel).data_ptr() != previous_heads[channel]
+            ) == storage_changed
+        for batch in (1, 2):
+            assert (
+                stub._frame_graphs[batch][0] is not previous_graphs[batch]
+            ) == storage_changed
+            inputs = _frame_inputs(batch, device=stub.device, dtype=stub.dtype)
+            expected = stub._decode_frame_graphable(**inputs)
+            replayed = stub.decode_frame_graphed(**inputs)
+            for actual, reference in zip(replayed, expected):
+                torch.testing.assert_close(actual, reference, rtol=0, atol=0)
