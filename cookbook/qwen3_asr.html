@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=23027dbc"></script>
+    <script src="../_static/documentation_options.js?v=98feffa1"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="ZONOS2" href="zonos2.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 09, 2026"/>
+  <meta name="docsearch:version" content="0.1.5" />
+    <meta name="docbuild:last-update" content="Sep 17, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,7 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="ming_omni.html">Ming-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="auk.html">AuK</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
@@ -539,14 +542,14 @@
 </div>
 <section id="apple-silicon-mlx">
 <h3>Apple Silicon (MLX)<a class="headerlink" href="#apple-silicon-mlx" title="Link to this heading">#</a></h3>
-<p>The Apple Silicon path requires macOS, Python 3.12, Homebrew, and SGLang’s MLX
-runtime. Audio decoding also requires Homebrew’s versioned FFmpeg 7 formula:</p>
+<p>The Apple Silicon path requires macOS 14 or newer, Python 3.12, Homebrew, and
+SGLang’s MLX runtime. Audio decoding also requires Homebrew’s versioned FFmpeg 7 formula:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>brew<span class="w"> </span>install<span class="w"> </span>ffmpeg@7
 <span class="nb">export</span><span class="w"> </span><span class="nv">DYLD_LIBRARY_PATH</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>brew<span class="w"> </span>--prefix<span class="w"> </span>ffmpeg@7<span class="k">)</span><span class="s2">/lib</span><span class="si">${</span><span class="nv">DYLD_LIBRARY_PATH</span><span class="p">:+:</span><span class="nv">$DYLD_LIBRARY_PATH</span><span class="si">}</span><span class="s2">"</span>
 </pre></div>
 </div>
 <p>Do not replace <code class="docutils literal notranslate"><span class="pre">ffmpeg&#64;7</span></code> with the unversioned <code class="docutils literal notranslate"><span class="pre">ffmpeg</span></code> formula. The latter
-currently installs FFmpeg 9, while Apple installs <code class="docutils literal notranslate"><span class="pre">torchcodec==0.11.1</span></code>, which
+currently installs FFmpeg 9, while Apple installs <code class="docutils literal notranslate"><span class="pre">torchcodec==0.15.0</span></code>, which
 supports FFmpeg 4 through 8. Because <code class="docutils literal notranslate"><span class="pre">ffmpeg&#64;7</span></code> is keg-only, its library
 directory must also be present in <code class="docutils literal notranslate"><span class="pre">DYLD_LIBRARY_PATH</span></code> whenever the server starts.</p>
 <p>macOS may remove <code class="docutils literal notranslate"><span class="pre">DYLD_*</span></code> variables when a SIP-protected system executable
@@ -557,7 +560,7 @@ can succeed without loading FFmpeg.</p>
 <p>Create one virtual environment for both repositories, then install the pinned
 SGLang tag from source with its <code class="docutils literal notranslate"><span class="pre">all_mps</span></code> dependencies before installing
 SGLang-Omni:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span>v0.5.18<span class="w"> </span>https://github.com/sgl-project/sglang.git
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span>v0.5.19<span class="w"> </span>https://github.com/sgl-project/sglang.git
 git<span class="w"> </span>clone<span class="w"> </span>https://github.com/sgl-project/sglang-omni.git
 
 uv<span class="w"> </span>venv<span class="w"> </span>-p<span class="w"> </span><span class="m">3</span>.12<span class="w"> </span>sglang-omni/.venv-apple
@@ -649,6 +652,16 @@ same request target or deadline.</p>
 requests, and sets <code class="docutils literal notranslate"><span class="pre">mem_fraction_static</span></code> to <code class="docutils literal notranslate"><span class="pre">0.65</span></code>. Its bounds are specific to
 the validated RTX 4090 layout; use the default configuration or a separately
 qualified profile on other GPU architectures.</p>
+<p>For a single 32 GB RTX 5090, use:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--config<span class="w"> </span>examples/configs/qwen3_asr_rtx5090.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
+</pre></div>
+</div>
+<p>This profile uses BF16, allows up to 16 running requests, and sets
+<code class="docutils literal notranslate"><span class="pre">mem_fraction_static=0.65</span></code>. See the
+<a class="reference external" href="https://github.com/sgl-project/sglang-omni/issues/1212">RTX 5090 benchmark report</a>
+for results measured on an earlier release.</p>
 <p>For example, force synchronous decode when comparing modes:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-ASR-1.7B<span class="w"> </span><span class="se">\</span>
@@ -884,11 +897,32 @@ YAML keys:</p>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--audio_chunking.max_total_audio_s</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">3600</span></code></p></td>
-<td><p>Upper limit on the whole upload; you get HTTP 400 above it. This is a memory guard: we keep the decoded waveform in memory while its chunks run.</p></td>
+<td><p>Upper limit on one upload; you get HTTP 400 above it. It bounds a single decoded waveform, not the total across uploads; that is the next knob’s job.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--audio_chunking.max_concurrent_long_audio_requests</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">max_running_requests</span> <span class="pre">//</span> <span class="pre">(2</span> <span class="pre">×</span> <span class="pre">max_concurrent_chunks)</span></code>, at least 1; <code class="docutils literal notranslate"><span class="pre">4</span></code> with the stock defaults</p></td>
+<td><p>How many long uploads the server admits at once. A long upload past the cap gets HTTP 503 instead of queueing; short uploads are never gated. The slot is taken before the upload is decoded and returned when its chunks are done.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
+<p>The last knob is the aggregate guard. Each admitted upload holds its decoded
+waveform (float32 at 16 kHz, about 230 MB for an hour) and drives up to
+<code class="docutils literal notranslate"><span class="pre">max_concurrent_chunks</span></code> engine requests, so:</p>
+<ul class="simple">
+<li><p>decoded waveforms held at once are at most
+<code class="docutils literal notranslate"><span class="pre">max_concurrent_long_audio_requests</span> <span class="pre">×</span> <span class="pre">max_total_audio_s</span> <span class="pre">×</span> <span class="pre">16000</span> <span class="pre">×</span> <span class="pre">4</span></code> bytes
+(decoding itself has transient peaks above that);</p></li>
+<li><p>engine slots long audio can take together are at most
+<code class="docutils literal notranslate"><span class="pre">max_concurrent_long_audio_requests</span> <span class="pre">×</span> <span class="pre">max_concurrent_chunks</span></code>.</p></li>
+</ul>
+<p>The default keeps that product at half of <code class="docutils literal notranslate"><span class="pre">--asr.engine.max_running_requests</span></code>
+so short requests always have slots left. Setting the knob explicitly to a
+value whose product reaches <code class="docutils literal notranslate"><span class="pre">max_running_requests</span></code> logs a warning at startup:
+it is not an error, since extra chunks only queue in the engine, but short
+requests then wait behind long audio whenever it is saturated. Raising
+<code class="docutils literal notranslate"><span class="pre">max_running_requests</span></code> instead also resizes CUDA graph capture, so treat it
+as the GPU capacity knob and this one as the long-audio share of it.</p>
 <p>The model properties are ClassVars on <code class="docutils literal notranslate"><span class="pre">Qwen3ASRPipelineConfig</span></code>; no
 configuration path reaches them:</p>
 <div class="pst-scrollable-table-container"><table class="table">
@@ -1194,7 +1228,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 09, 2026.
+  Last updated on Sep 17, 2026.
   <br/>
 </p>
   </div>

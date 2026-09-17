@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=23027dbc"></script>
+    <script src="../_static/documentation_options.js?v=98feffa1"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="TTS Model Usage" href="tts.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 09, 2026"/>
+  <meta name="docsearch:version" content="0.1.5" />
+    <meta name="docbuild:last-update" content="Sep 17, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,7 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/auk.html">AuK</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="current nav bd-sidenav">
@@ -645,9 +648,14 @@ overrides the placement of every GPU stage inside that replica. CPU stages are
 unaffected and stay on the host.</p>
 <p>A GPU Process with <code class="docutils literal notranslate"><span class="pre">num_replicas</span> <span class="pre">&gt;</span> <span class="pre">1</span></code> must declare <code class="docutils literal notranslate"><span class="pre">replica_devices</span></code>: <code class="docutils literal notranslate"><span class="pre">N</span></code>
 device ids for a non-TP Process, <code class="docutils literal notranslate"><span class="pre">N</span> <span class="pre">x</span> <span class="pre">T</span></code> for a Process with TP size <code class="docutils literal notranslate"><span class="pre">T</span></code>. Every
-GPU stage in that Process must also come from a factory that declares a
-<code class="docutils literal notranslate"><span class="pre">gpu_id</span></code> parameter, otherwise startup refuses the placement by name; not all
-model stages do yet.
+GPU stage factory declares <code class="docutils literal notranslate"><span class="pre">device:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></code> and
+<code class="docutils literal notranslate"><span class="pre">gpu_id:</span> <span class="pre">int</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></code> and resolves them through
+<code class="docutils literal notranslate"><span class="pre">sglang_omni.utils.device.resolve_concrete_device</span></code>, so any GPU stage can be
+replicated; a factory that lacks <code class="docutils literal notranslate"><span class="pre">gpu_id</span></code> is refused at startup by name, and
+<code class="docutils literal notranslate"><span class="pre">tests/unit_test/test_stage_device_contract.py</span></code> keeps every model on that
+contract. Configs never set <code class="docutils literal notranslate"><span class="pre">factory.gpu_id</span></code>; a <code class="docutils literal notranslate"><span class="pre">factory.device</span></code> names a
+device type only (for example <code class="docutils literal notranslate"><span class="pre">cpu</span></code> to keep a stage on the host) and must not
+carry an index — the card comes from <code class="docutils literal notranslate"><span class="pre">stage.gpu</span></code> or <code class="docutils literal notranslate"><span class="pre">replica_devices</span></code>.
 Different replicas may repeat a device id, which is how same-GPU data
 parallelism is expressed:</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">processes</span><span class="p">:</span>
@@ -925,7 +933,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 09, 2026.
+  Last updated on Sep 17, 2026.
   <br/>
 </p>
   </div>

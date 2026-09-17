@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=23027dbc"></script>
+    <script src="../_static/documentation_options.js?v=98feffa1"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="Fish Audio S2-Pro" href="fishaudio_s2_pro.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 09, 2026"/>
+  <meta name="docsearch:version" content="0.1.5" />
+    <meta name="docbuild:last-update" content="Sep 17, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,7 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="ming_omni.html">Ming-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="auk.html">AuK</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
@@ -495,6 +498,7 @@
                 <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ascend-npu-baseline">Ascend NPU baseline</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#breakable-prefill-cuda-graphs">Breakable prefill CUDA graphs</a></li>
@@ -549,7 +553,7 @@ endpoint.</p>
 <h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
 <p>Install <code class="docutils literal notranslate"><span class="pre">sglang-omni</span></code> by following <a class="reference internal" href="../get_started/installation.html"><span class="std std-doc">Installation</span></a>.</p>
 <p>Qwen3-TTS Base uses the upstream <code class="docutils literal notranslate"><span class="pre">qwen-tts</span></code> package. Install it without
-dependencies so the SGLang-Omni Transformers 5.12 / SGLang 0.5.18 stack remains
+dependencies so the SGLang-Omni Transformers 5.12 / SGLang 0.5.19 stack remains
 in place:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>sox
 uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--no-deps<span class="w"> </span>sox<span class="w"> </span>einops
@@ -574,7 +578,7 @@ factories (<code class="docutils literal notranslate"><span class="pre">create_c
 <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code> and no longer accept <code class="docutils literal notranslate"><span class="pre">cache_position</span></code>. SGLang-Omni patches these
 differences in
 <code class="docutils literal notranslate"><span class="pre">sglang_omni/models/qwen3_tts/compat.py</span></code>, which every Qwen3-TTS entry point
-applies before importing <code class="docutils literal notranslate"><span class="pre">qwen_tts</span></code>. The pinned Transformers 5.12 / SGLang 0.5.18
+applies before importing <code class="docutils literal notranslate"><span class="pre">qwen_tts</span></code>. The pinned Transformers 5.12 / SGLang 0.5.19
 stack is therefore the supported configuration, not a workaround.</p>
 <p>If you hit a <code class="docutils literal notranslate"><span class="pre">TypeError</span></code> raised from inside <code class="docutils literal notranslate"><span class="pre">qwen_tts</span></code>, do not resolve it by
 installing the package’s own Transformers pin — that breaks the rest of the
@@ -604,6 +608,28 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\<
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
+<section id="ascend-npu-baseline">
+<h3>Ascend NPU baseline<a class="headerlink" href="#ascend-npu-baseline" title="Link to this heading">#</a></h3>
+<p>The NPU configurations use SGLang’s <code class="docutils literal notranslate"><span class="pre">ascend</span></code> attention backend for the Talker
+and PyTorch SDPA for both Speech Tokenizer instances. Talker graph capture
+(<code class="docutils literal notranslate"><span class="pre">cuda_graph</span></code>), private Talker compile, and asynchronous vocoder decode stay
+disabled. The 0.6B Base
+configuration has been validated with 16 concurrent requests; the other
+configurations retain a conservative single-request baseline.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># 0.6B Base</span>
+sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-0.6B-Base<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--config<span class="w"> </span>examples/configs/qwen3_tts_0_6b_npu.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
+</pre></div>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">qwen3_tts_1_7b_npu.yaml</span></code>, <code class="docutils literal notranslate"><span class="pre">qwen3_tts_0_6b_customvoice_npu.yaml</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">qwen3_tts_1_7b_voicedesign_npu.yaml</span></code> for the other supported checkpoints.
+The 0.6B and 1.7B files intentionally have separate <code class="docutils literal notranslate"><span class="pre">mem_fraction_static</span></code>
+starting values. Calibrate configurations that retain the single-request
+baseline on the target NPU before increasing <code class="docutils literal notranslate"><span class="pre">max_running_requests</span></code> or any
+vocoder batch limit.</p>
+</section>
 <section id="deterministic-inference">
 <h3>Deterministic Inference<a class="headerlink" href="#deterministic-inference" title="Link to this heading">#</a></h3>
 <p>Dynamic batching can change Qwen3-TTS codec and waveform outputs even when the
@@ -615,7 +641,8 @@ checkpoints provide an opt-in deterministic mode:</p>
 <p>When enabled, the same prompt, reference audio, and seed produce byte-identical
 PCM across runtime batch sizes. This mode reduces throughput because it
 serializes reference preprocessing and vocoder decoding and disables both the
-initial and follow-up vocoder CUDA Graphs, so it is disabled by default.</p>
+initial and follow-up vocoder graph-capture paths (<code class="docutils literal notranslate"><span class="pre">initial_cuda_graph</span></code> and
+<code class="docutils literal notranslate"><span class="pre">followup_cuda_graph</span></code>), so it is disabled by default.</p>
 </section>
 <section id="overload-admission-policy">
 <h3>Overload / admission policy<a class="headerlink" href="#overload-admission-policy" title="Link to this heading">#</a></h3>
@@ -1299,6 +1326,7 @@ checkpoint is less prone.</p></li>
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#server-configuration">Server Configuration</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ascend-npu-baseline">Ascend NPU baseline</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#breakable-prefill-cuda-graphs">Breakable prefill CUDA graphs</a></li>
@@ -1362,7 +1390,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 09, 2026.
+  Last updated on Sep 17, 2026.
   <br/>
 </p>
   </div>

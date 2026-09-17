@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=23027dbc"></script>
+    <script src="../_static/documentation_options.js?v=98feffa1"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -58,8 +58,8 @@
     <link rel="search" title="Search" href="../search.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.4" />
-    <meta name="docbuild:last-update" content="Sep 09, 2026"/>
+  <meta name="docsearch:version" content="0.1.5" />
+    <meta name="docbuild:last-update" content="Sep 17, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,7 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/auk.html">AuK</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
@@ -610,6 +613,12 @@ shared helpers do the heavy lifting:</p>
 from <code class="docutils literal notranslate"><span class="pre">sglang_omni.scheduling.bootstrap</span></code>, which returns the
 <code class="docutils literal notranslate"><span class="pre">(model_worker,</span> <span class="pre">tree_cache,</span> <span class="pre">req_to_token_pool,</span> <span class="pre">token_to_kv_pool_allocator,</span> <span class="pre">model_config)</span></code> tuple that <code class="docutils literal notranslate"><span class="pre">OmniScheduler</span></code> expects</p></li>
 </ul>
+<p>Every GPU stage factory you write — the engine as well as encoders and
+vocoders — declares <code class="docutils literal notranslate"><span class="pre">device:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None,</span> <span class="pre">gpu_id:</span> <span class="pre">int</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></code>
+and resolves them with <code class="docutils literal notranslate"><span class="pre">sglang_omni.utils.device.resolve_concrete_device</span></code>;
+never hard-code <code class="docutils literal notranslate"><span class="pre">&quot;cuda&quot;</span></code> or read <code class="docutils literal notranslate"><span class="pre">gpu_id</span></code> on its own. The contract and the
+sweep test that enforces it are described under “Device and GPU placement
+contract” in <a class="reference internal" href="config.html"><span class="std std-doc">config.md</span></a>.</p>
 <p>Two pieces of glue still have to be added by hand:</p>
 <ul class="simple">
 <li><p>Insert your SGLang model class into <code class="docutils literal notranslate"><span class="pre">ModelRegistry.models[...]</span></code> inside
@@ -802,7 +811,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 09, 2026.
+  Last updated on Sep 17, 2026.
   <br/>
 </p>
   </div>
