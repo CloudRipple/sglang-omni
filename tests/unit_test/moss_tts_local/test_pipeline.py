@@ -2383,6 +2383,7 @@ def test_async_launch_resolve_matches_sync_collect():
             (1, hidden_size), 3, dtype=torch.bfloat16
         )
         runner = MossTTSLocalModelRunner.__new__(MossTTSLocalModelRunner)
+        runner._async_enabled = True
         runner.model = model
         runner._outbox = None
         return runner
@@ -2412,6 +2413,7 @@ def test_async_launch_resolve_matches_sync_collect():
 
     # Synchronous collect.
     rs = _make_runner()
+    rs._async_enabled = False
     req_s, res_s, sb_s = _sched_req(), _result(), types.SimpleNamespace()
     rs._collect_frame(res_s, None, sb_s, [req_s])
 
@@ -2483,6 +2485,7 @@ def test_async_resolve_preserves_stop_id_through_output_ids_clobber():
         (1, hidden_size), 3, dtype=torch.bfloat16
     )
     runner = MossTTSLocalModelRunner.__new__(MossTTSLocalModelRunner)
+    runner._async_enabled = True
     runner.model = model
 
     data = types.SimpleNamespace(
@@ -2550,6 +2553,7 @@ def test_chunked_rows_do_not_advance_sampling_steps():
             (1, hidden_size), 3, dtype=torch.bfloat16
         )
         runner = MossTTSLocalModelRunner.__new__(MossTTSLocalModelRunner)
+        runner._async_enabled = True
         runner.model = model
         runner._outbox = None
         return runner

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the MOSS-TTS Local decode-state pool (PR-A c3).
 
-CPU-only: the pool derives its sizing/placement from a fake model exposing a
-``_decode_input_embedding.weight`` tensor, so no CUDA is required.
+The pool derives its sizing/placement from a fake model exposing a
+``_decode_input_embedding.weight`` tensor. Only host-staging coverage needs CUDA.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from sglang_omni.models.moss_tts_local.state_pool import (
     MossTTSLocalDecodeStatePool,
 )
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 _HIDDEN = 8
 
@@ -421,6 +422,7 @@ def test_double_collect_overwrites_feedback():
     model._prepare_multi_modal_inputs = prepare_multi_modal_inputs
 
     runner = object.__new__(MossTTSLocalModelRunner)
+    runner._async_enabled = False
     runner.model = model
     data = SimpleNamespace(
         text_temperature=1.0,
@@ -482,6 +484,7 @@ def test_collect_frame_reads_generation_steps_from_pool():
     model.decode_frame_graphed = decode_frame_graphed
 
     runner = object.__new__(MossTTSLocalModelRunner)
+    runner._async_enabled = False
     runner.model = model
     data = SimpleNamespace(
         req=SimpleNamespace(inflight_middle_chunks=0),
@@ -542,6 +545,7 @@ def test_pool_sampling_position_leads_unresolved_lookahead_launches():
 
     runner = object.__new__(MossTTSLocalModelRunner)
     runner.model = model
+    runner._async_enabled = True
     data = SimpleNamespace(
         req=SimpleNamespace(inflight_middle_chunks=0),
         text_temperature=1.0,
@@ -560,8 +564,8 @@ def test_pool_sampling_position_leads_unresolved_lookahead_launches():
         logits_output=SimpleNamespace(hidden_states=torch.zeros(1, hidden_size))
     )
 
-    runner._collect_frame(result, SimpleNamespace(), SimpleNamespace(), [request])
-    runner._collect_frame(result, SimpleNamespace(), SimpleNamespace(), [request])
+    runner.post_decode_launch(result, SimpleNamespace(), [request])
+    runner.post_decode_launch(result, SimpleNamespace(), [request])
 
     row = pool.row_for("rid")
     assert row is not None
@@ -569,6 +573,61 @@ def test_pool_sampling_position_leads_unresolved_lookahead_launches():
     assert torch.equal(captured[1], torch.tensor([13]))
     assert int(pool.generation_steps[row]) == 0
     assert int(pool.sampling_steps[row]) == 2
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_collect_frame_stages_host_token_ids():
+    model = _model(max_running_requests=2)
+    model._decode_input_embedding.weight = model._decode_input_embedding.weight.cuda()
+    model.device = model._decode_input_embedding.weight.device
+    model.config.audio_assistant_slot_token_id = 151646
+    model.config.audio_end_token_id = 151670
+    model.frame_graph_max_bs = 2
+    model._state_pool = MossTTSLocalDecodeStatePool(model)
+
+    def decode_frame_graphed(hidden_states, **kwargs):
+        del kwargs
+        return (
+            torch.arange(2, device=model.device),
+            torch.full((2, 12), 7, dtype=torch.long, device=model.device),
+            torch.ones_like(hidden_states),
+        )
+
+    model.decode_frame_graphed = decode_frame_graphed
+    output_processor = SGLangOutputProcessor()
+    runner = MossTTSLocalModelRunner(
+        SimpleNamespace(gpu_id=0, model_runner=SimpleNamespace(model=model)),
+        output_processor,
+    )
+    requests = []
+    for index in range(2):
+        data = _params(seed=index)
+        data.req = SimpleNamespace(inflight_middle_chunks=0)
+        data.generation_steps = 0
+        data.output_rows = []
+        requests.append(SimpleNamespace(request_id=str(index), data=data))
+    result = SimpleNamespace(
+        logits_output=SimpleNamespace(
+            hidden_states=torch.zeros(
+                (2, _HIDDEN), dtype=torch.bfloat16, device=model.device
+            )
+        )
+    )
+
+    runner._collect_frame(result, SimpleNamespace(), SimpleNamespace(), requests)
+
+    assert result.next_token_ids.is_cuda
+    assert result._host_token_ids_event is not None
+    host_ids = runner._resolve_host_token_ids(result)
+    assert host_ids.device.type == "cpu"
+    assert host_ids.is_pinned()
+    assert torch.equal(host_ids, result.next_token_ids.cpu())
+    outputs = output_processor.process(
+        result, SimpleNamespace(requests=requests), host_token_ids=host_ids
+    )
+    assert outputs["0"].data == int(host_ids[0])
+    assert outputs["1"].data == model.config.audio_end_token_id
 
 
 def test_collect_frame_uses_eager_path_when_audio_repetition_penalty_active(
@@ -630,6 +689,7 @@ def test_collect_frame_uses_eager_path_when_audio_repetition_penalty_active(
     )
 
     runner = object.__new__(MossTTSLocalModelRunner)
+    runner._async_enabled = False
     runner.model = model
     data = SimpleNamespace(
         req=SimpleNamespace(inflight_middle_chunks=0),
@@ -683,13 +743,9 @@ def test_cached_pool_rows_drive_collect_and_batched_step_commit():
     pool = MossTTSLocalDecodeStatePool(model)
     model._state_pool = pool
     runner = object.__new__(MossTTSLocalModelRunner)
+    runner._async_enabled = False
     runner.model = model
-    runner.output_processor = SimpleNamespace(
-        process=lambda batch_result, scheduler_output: {
-            req.request_id: SimpleNamespace(data=1000, extra=None)
-            for req in scheduler_output.requests
-        }
-    )
+    runner.output_processor = SGLangOutputProcessor()
 
     def data(step, seed):
         return SimpleNamespace(
@@ -909,6 +965,7 @@ def test_collect_frame_skips_chunked_feedback_and_journal():
     model._prepare_multi_modal_inputs = prepare_multi_modal_inputs
 
     runner = object.__new__(MossTTSLocalModelRunner)
+    runner._async_enabled = False
     runner.model = model
 
     def data(inflight_middle_chunks):
