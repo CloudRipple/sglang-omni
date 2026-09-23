@@ -362,6 +362,35 @@ def test_default_session_streaming_lane_capacity(monkeypatch) -> None:
     assert session.graph_batch_sizes() == [1, 2, 4, 8, 12, 16]
 
 
+@pytest.mark.parametrize(
+    "stream_slots, active_batch_size, expected_batch_size",
+    [
+        (1, 1, 1),
+        (3, 3, 3),
+        (16, 15, 16),
+        (32, 17, 20),
+        (64, 17, 20),
+        (64, 33, 36),
+        (25, 25, 25),
+    ],
+)
+def test_streaming_session_pads_to_nearest_batch_bucket(
+    stream_slots: int, active_batch_size: int, expected_batch_size: int
+) -> None:
+    codec = FakeCodec()
+    session = CodecStreamSession(codec, stream_slots=stream_slots, n_vq=N_VQ)
+    slots = [session.acquire() for _ in range(active_batch_size)]
+    codes = _rows(2, seed=101)[:, 1:].transpose(0, 1).contiguous()
+
+    audio = session.step({slot: codes for slot in slots})
+
+    assert codec.batch_shapes == [(N_VQ, expected_batch_size, 2)]
+    assert set(audio) == set(slots)
+    for waveform in audio.values():
+        assert waveform.shape[-1] == 2 * SAMPLES_PER_FRAME
+    session.close()
+
+
 def test_streaming_session_initializes_and_closes_codec_state() -> None:
     codec = FakeCodec()
     session = CodecStreamSession(codec, stream_slots=2, n_vq=N_VQ)

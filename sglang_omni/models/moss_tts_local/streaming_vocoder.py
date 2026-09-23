@@ -110,7 +110,7 @@ class CodecStreamSession:
 
     def graph_batch_sizes(self) -> list[int]:
         """Return batch buckets shared by eager and CUDA graph execution."""
-        buckets = [1, 2, 4, 8, 12, 16, self._stream_slots]
+        buckets = [1, 2, 4, *range(8, self._stream_slots, 4), self._stream_slots]
         return sorted(
             {bucket for bucket in buckets if 0 < int(bucket) <= self._stream_slots}
         )
