@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=8f8a7fc7"></script>
+    <script src="../_static/documentation_options.js?v=3476fdda"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="🚀 Installation" href="installation.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.6" />
-    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
+  <meta name="docsearch:version" content="0.1.7" />
+    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,9 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o Reference Audio</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/personaplex.html">PersonaPlex</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/auk.html">AuK</a></li>
@@ -251,6 +252,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../benchmarks/relay.html">Benchmark Relay</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmarks/qwen3_tts_leading_silence.html">Qwen3-TTS Base: Leading Silence in X-Vector Voice Cloning</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Developer Reference</span></p>
 <ul class="nav bd-sidenav">
@@ -546,25 +548,27 @@ Model support on NPU and optional dependencies must be checked separately.</p>
 <h3>A3 image installation<a class="headerlink" href="#a3-image-installation" title="Link to this heading">#</a></h3>
 <p>Use an ARM64 Linux host with Docker and Ascend A3 devices.</p>
 <p><strong>1. Pull the image</strong></p>
-<p>Pull the image matching your hardware from
-<a class="reference external" href="https://hub.docker.com/r/lmsysorg/sglang-omni/tags">Docker Hub</a>:</p>
+<p>Pull the image matching your hardware from Huawei Cloud SWR:</p>
 <ul class="simple">
 <li><p><strong>Release:</strong> use <code class="docutils literal notranslate"><span class="pre">v&lt;version&gt;-cann9.0.0-a3</span></code> for deployments, replacing
-<code class="docutils literal notranslate"><span class="pre">v&lt;version&gt;</span></code> with a published version tag from Docker Hub.</p></li>
+<code class="docutils literal notranslate"><span class="pre">v&lt;version&gt;</span></code> with a published version tag.</p></li>
 <li><p><strong>Development:</strong> use <code class="docutils literal notranslate"><span class="pre">main-cann9.0.0-a3</span></code> for the latest published development
 build. Scheduled or manual publications update this rolling tag.</p></li>
 </ul>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Release (replace v&lt;version&gt; with a published version):</span>
-<span class="c1"># IMAGE=lmsysorg/sglang-omni:v&lt;version&gt;-cann9.0.0-a3</span>
+<span class="c1"># IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:v&lt;version&gt;-cann9.0.0-a3</span>
 
 <span class="c1"># Development (A3):</span>
-<span class="nv">IMAGE</span><span class="o">=</span>lmsysorg/sglang-omni:main-cann9.0.0-a3
+<span class="nv">IMAGE</span><span class="o">=</span>swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.0.0-a3
 
 docker<span class="w"> </span>pull<span class="w"> </span><span class="s2">"</span><span class="nv">$IMAGE</span><span class="s2">"</span>
 </pre></div>
 </div>
 <p>For reproducible deployments, set <code class="docutils literal notranslate"><span class="pre">IMAGE</span></code> to
-<code class="docutils literal notranslate"><span class="pre">lmsysorg/sglang-omni&#64;sha256:&lt;digest&gt;</span></code>.</p>
+<code class="docutils literal notranslate"><span class="pre">swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni&#64;sha256:&lt;digest&gt;</span></code>.</p>
+<p>If authentication is required, run
+<code class="docutils literal notranslate"><span class="pre">docker</span> <span class="pre">login</span> <span class="pre">swr.cn-southwest-2.myhuaweicloud.com</span></code> with credentials supplied
+by the registry administrator before pulling.</p>
 <p><strong>2. Start the container</strong></p>
 <p>Download your model weights into a host directory and mount it into the
 container. The example exposes device 0; adjust device IDs and driver paths
@@ -599,16 +603,16 @@ relative to the visible devices (<code class="docutils literal notranslate"><spa
 <p>Use <code class="docutils literal notranslate"><span class="pre">v&lt;version&gt;-cann9.0.0-910b</span></code> for a release, or
 <code class="docutils literal notranslate"><span class="pre">main-cann9.0.0-910b</span></code> for the latest published development build.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Release (replace v&lt;version&gt; with a published version):</span>
-<span class="c1"># IMAGE=lmsysorg/sglang-omni:v&lt;version&gt;-cann9.0.0-910b</span>
+<span class="c1"># IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:v&lt;version&gt;-cann9.0.0-910b</span>
 
 <span class="c1"># Development (A2 / 910B):</span>
-<span class="nv">IMAGE</span><span class="o">=</span>lmsysorg/sglang-omni:main-cann9.0.0-910b
+<span class="nv">IMAGE</span><span class="o">=</span>swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.0.0-910b
 
 docker<span class="w"> </span>pull<span class="w"> </span><span class="s2">"</span><span class="nv">$IMAGE</span><span class="s2">"</span>
 </pre></div>
 </div>
 <p>For reproducible deployments, set <code class="docutils literal notranslate"><span class="pre">IMAGE</span></code> to
-<code class="docutils literal notranslate"><span class="pre">lmsysorg/sglang-omni&#64;sha256:&lt;digest&gt;</span></code>.</p>
+<code class="docutils literal notranslate"><span class="pre">swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni&#64;sha256:&lt;digest&gt;</span></code>.</p>
 <p><strong>2. Start the container</strong></p>
 <p>Set <code class="docutils literal notranslate"><span class="pre">MODEL_DIR</span></code> to your model directory. The example exposes device 0;
 adjust device IDs and driver paths for your host. Use <code class="docutils literal notranslate"><span class="pre">--privileged</span></code> only
@@ -850,7 +854,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 24, 2026.
+  Last updated on Oct 04, 2026.
   <br/>
 </p>
   </div>

@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=8f8a7fc7"></script>
+    <script src="../_static/documentation_options.js?v=3476fdda"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -58,8 +58,8 @@
     <link rel="search" title="Search" href="../search.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.6" />
-    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
+  <meta name="docsearch:version" content="0.1.7" />
+    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,9 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o Reference Audio</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/personaplex.html">PersonaPlex</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/auk.html">AuK</a></li>
@@ -251,6 +252,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../benchmarks/relay.html">Benchmark Relay</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmarks/qwen3_tts_leading_silence.html">Qwen3-TTS Base: Leading Silence in X-Vector Voice Cloning</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Developer Reference</span></p>
 <ul class="nav bd-sidenav">
@@ -937,6 +939,10 @@ serving the request.</p>
 <li><p><code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code> and <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/batch</span></code> require <code class="docutils literal notranslate"><span class="pre">speech</span></code>;
 <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code> also requires <code class="docutils literal notranslate"><span class="pre">streaming</span></code> when <code class="docutils literal notranslate"><span class="pre">stream:</span> <span class="pre">true</span></code> (batch speech
 does not support streaming)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/v1/audio/speech/{request_id}</span></code> requires <code class="docutils literal notranslate"><span class="pre">speech</span></code> and is pinned to the
+worker named by <code class="docutils literal notranslate"><span class="pre">X-SGLang-Omni-Route-Worker</span></code>, because a stream’s terminal
+state lives only on the worker that produced it; a missing header answers
+<code class="docutils literal notranslate"><span class="pre">400</span></code> and an unknown worker <code class="docutils literal notranslate"><span class="pre">404</span></code></p></li>
 <li><p>speech requests using <code class="docutils literal notranslate"><span class="pre">ref_audio</span></code> or audio-bearing <code class="docutils literal notranslate"><span class="pre">references</span></code> also require
 <code class="docutils literal notranslate"><span class="pre">audio_input</span></code></p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/stream</span></code> WebSocket sessions require <code class="docutils literal notranslate"><span class="pre">speech</span></code> and <code class="docutils literal notranslate"><span class="pre">streaming</span></code>,
@@ -996,7 +1002,13 @@ when the router cannot infer a single safe worker set:</p>
 <li><p><code class="docutils literal notranslate"><span class="pre">X-SGLang-Omni-Route-Capabilities</span></code>: comma-separated capabilities such as
 <code class="docutils literal notranslate"><span class="pre">image_input</span></code>, <code class="docutils literal notranslate"><span class="pre">audio_input</span></code>, <code class="docutils literal notranslate"><span class="pre">video_input</span></code>, <code class="docutils literal notranslate"><span class="pre">audio_output</span></code>, or <code class="docutils literal notranslate"><span class="pre">streaming</span></code></p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">X-SGLang-Omni-Route-Stream</span></code>: <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> for large streaming requests</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">X-SGLang-Omni-Route-Worker</span></code>: the <code class="docutils literal notranslate"><span class="pre">X-SGLang-Omni-Worker</span></code> value from a streaming
+speech response, echoed verbatim; required on <code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/v1/audio/speech/{request_id}</span></code></p></li>
 </ul>
+<p>Use the raw PCM response’s <code class="docutils literal notranslate"><span class="pre">X-SGLang-Omni-Speech-Id</span></code> as the GET path’s
+<code class="docutils literal notranslate"><span class="pre">request_id</span></code>, independently of the <code class="docutils literal notranslate"><span class="pre">X-Request-Id</span></code> correlation header. Look up
+the outcome after the stream ends. Outcomes are retained in a bounded
+worker-local cache; a missing outcome does not establish how generation ended.</p>
 <p>Speech and speech-batch JSON bodies larger than 1 MiB are conservatively pinned
 to the voice owner because the router cannot fully inspect them to rule out an
 uploaded voice reference. Without an eligible owner, the router conservatively
@@ -1150,7 +1162,8 @@ them.</p>
 <li><p>A <strong>supervisor</strong> binds the public port once and passes the listening socket
 to <code class="docutils literal notranslate"><span class="pre">N</span></code> <strong>data-plane (DP)</strong> processes, which accept from the shared queue and
 relay the model routes (<code class="docutils literal notranslate"><span class="pre">/generate</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/chat/completions</span></code>,
-<code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/translations</span></code>).</p></li>
+<code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/{request_id}</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>,
+<code class="docutils literal notranslate"><span class="pre">/v1/audio/translations</span></code>).</p></li>
 <li><p>One <strong>control plane (CP)</strong> owns the worker registry, health checks, and the
 admin surface. DPs learn the routable-worker set from a snapshot file the CP
 republishes on every state change and on a fixed keepalive cadence. Admin
@@ -1463,7 +1476,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 24, 2026.
+  Last updated on Oct 04, 2026.
   <br/>
 </p>
   </div>

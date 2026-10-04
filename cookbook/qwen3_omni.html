@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=8f8a7fc7"></script>
+    <script src="../_static/documentation_options.js?v=3476fdda"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -56,12 +56,12 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="MiniCPM-o Reference Audio" href="minicpm_o.html" />
+    <link rel="next" title="MiniCPM-o" href="minicpm_o.html" />
     <link rel="prev" title="Whisper ASR" href="whisper_asr.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.6" />
-    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
+  <meta name="docsearch:version" content="0.1.7" />
+    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,9 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Qwen3-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="minicpm_o.html">MiniCPM-o Reference Audio</a></li>
+<li class="toctree-l1"><a class="reference internal" href="minicpm_o.html">MiniCPM-o</a></li>
 <li class="toctree-l1"><a class="reference internal" href="ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
+<li class="toctree-l1"><a class="reference internal" href="personaplex.html">PersonaPlex</a></li>
 <li class="toctree-l1"><a class="reference internal" href="llada2_uni.html">LLaDA2.0-Uni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="auk.html">AuK</a></li>
@@ -251,6 +252,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../benchmarks/relay.html">Benchmark Relay</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmarks/qwen3_tts_leading_silence.html">Qwen3-TTS Base: Leading Silence in X-Vector Voice Cloning</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Developer Reference</span></p>
 <ul class="nav bd-sidenav">
@@ -533,7 +535,7 @@ docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </s
 pip<span class="w"> </span>install<span class="w"> </span>uv
 
 uv<span class="w"> </span>venv<span class="w"> </span>.venv<span class="w"> </span>-p<span class="w"> </span><span class="m">3</span>.12<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
-uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--prerelease<span class="o">=</span>allow<span class="w"> </span><span class="s2">"sglang-omni==0.1.6"</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--prerelease<span class="o">=</span>allow<span class="w"> </span><span class="s2">"sglang-omni==0.1.7"</span>
 </pre></div>
 </div>
 <p>See <a class="reference internal" href="../get_started/installation.html"><span class="std std-doc">Installation</span></a> for Docker digests and source installs.</p>
@@ -872,13 +874,25 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
 <td><p>Total pixel budget across all video frames</p></td>
 </tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">use_audio_in_video</span></code></p></td>
+<td><p>bool</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
+<td><p>Set to <code class="docutils literal notranslate"><span class="pre">true</span></code> to process embedded audio. Requests where all videos lack audio use video-only processing; mixing videos with and without audio is rejected. Audio decoding errors are reported.</p></td>
+</tr>
 </tbody>
 </table>
 </div>
+<p>Non-streaming chat requests return HTTP 400 for invalid media and HTTP 500 for
+server failures. With <code class="docutils literal notranslate"><span class="pre">stream=true</span></code>, errors detected after the event stream
+starts are sent as <code class="docutils literal notranslate"><span class="pre">data:</span> <span class="pre">{&quot;error&quot;:</span> <span class="pre">{&quot;message&quot;:</span> <span class="pre">&quot;...&quot;,</span> <span class="pre">&quot;type&quot;:</span> <span class="pre">&quot;invalid_request_error&quot;,</span> <span class="pre">&quot;code&quot;:</span> <span class="pre">400}}</span></code>,
+followed by <code class="docutils literal notranslate"><span class="pre">data:</span> <span class="pre">[DONE]</span></code>. Server failures use <code class="docutils literal notranslate"><span class="pre">type:</span> <span class="pre">&quot;server_error&quot;</span></code> and
+<code class="docutils literal notranslate"><span class="pre">code:</span> <span class="pre">500</span></code>. The HTTP status remains 200 once streaming has started; clients
+must check for an <code class="docutils literal notranslate"><span class="pre">error</span></code> event, including after partial output.</p>
 </section>
 <section id="known-limitations">
 <h3>Known Limitations<a class="headerlink" href="#known-limitations" title="Link to this heading">#</a></h3>
 <ul class="simple">
+<li><p><strong>Multiple videos must have the same sampled frame rate.</strong> The processor accepts one frame rate for video token timestamps. Requests with different sampled frame rates follow the invalid-input error contract above.</p></li>
 <li><p><strong><code class="docutils literal notranslate"><span class="pre">modalities:</span> <span class="pre">[&quot;text&quot;,</span> <span class="pre">&quot;audio&quot;]</span></code> has no effect on a text-only server.</strong> No error is raised — the response simply contains no audio. Use a speech-mode server (without <code class="docutils literal notranslate"><span class="pre">--text-only</span></code>) to get audio output.</p></li>
 <li><p><strong><code class="docutils literal notranslate"><span class="pre">content</span></code> must be <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> when the query is entirely in <code class="docutils literal notranslate"><span class="pre">audios</span></code>, <code class="docutils literal notranslate"><span class="pre">videos</span></code>, or <code class="docutils literal notranslate"><span class="pre">images</span></code>.</strong> Leaving a text query in <code class="docutils literal notranslate"><span class="pre">content</span></code> alongside audio causes the model to process both, which is usually not what you want.</p></li>
 <li><p><strong>Colocated topology does not support <code class="docutils literal notranslate"><span class="pre">--thinker.tp_size</span> <span class="pre">2</span></code>.</strong> The server raises a <code class="docutils literal notranslate"><span class="pre">ValueError</span></code> at startup (“Qwen Phase 1 colocation does not support thinker TP”). Use disaggregated topology for TP=2.</p></li>
@@ -913,7 +927,7 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">MiniCPM-o Reference Audio</p>
+        <p class="prev-next-title">MiniCPM-o</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -976,7 +990,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 24, 2026.
+  Last updated on Oct 04, 2026.
   <br/>
 </p>
   </div>

@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=8f8a7fc7"></script>
+    <script src="../_static/documentation_options.js?v=3476fdda"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="Fish Audio S2-Pro" href="fishaudio_s2_pro.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.6" />
-    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
+  <meta name="docsearch:version" content="0.1.7" />
+    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,9 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="minicpm_o.html">MiniCPM-o Reference Audio</a></li>
+<li class="toctree-l1"><a class="reference internal" href="minicpm_o.html">MiniCPM-o</a></li>
 <li class="toctree-l1"><a class="reference internal" href="ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
+<li class="toctree-l1"><a class="reference internal" href="personaplex.html">PersonaPlex</a></li>
 <li class="toctree-l1"><a class="reference internal" href="llada2_uni.html">LLaDA2.0-Uni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="auk.html">AuK</a></li>
@@ -251,6 +252,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../benchmarks/relay.html">Benchmark Relay</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmarks/qwen3_tts_leading_silence.html">Qwen3-TTS Base: Leading Silence in X-Vector Voice Cloning</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Developer Reference</span></p>
 <ul class="nav bd-sidenav">
@@ -503,7 +505,7 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ascend-npu-baseline">Ascend NPU baseline</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#breakable-prefill-cuda-graphs">Breakable prefill CUDA graphs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-cuda-graphs">Prefill CUDA graphs</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-admission-coalescing">Prefill Admission Coalescing</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#process-topology">Process topology</a></li>
 </ul>
@@ -512,6 +514,7 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#text-only-requests">Text-only Requests</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a><ul class="nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#python">Python</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#leading-silence-in-x-vector-mode">Leading silence in x-vector mode</a></li>
 </ul>
 </li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#language-hint">Language Hint</a></li>
@@ -555,7 +558,7 @@ endpoint.</p>
 <h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
 <p>Install <code class="docutils literal notranslate"><span class="pre">sglang-omni</span></code> by following <a class="reference internal" href="../get_started/installation.html"><span class="std std-doc">Installation</span></a>.</p>
 <p>Qwen3-TTS Base uses the upstream <code class="docutils literal notranslate"><span class="pre">qwen-tts</span></code> package. Install it without
-dependencies so the SGLang-Omni Transformers 5.12 / SGLang 0.5.20 stack remains
+dependencies so the SGLang-Omni Transformers 5.12 / SGLang 0.5.21 stack remains
 in place:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>sox
 uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--no-deps<span class="w"> </span>sox<span class="w"> </span>einops
@@ -580,7 +583,7 @@ factories (<code class="docutils literal notranslate"><span class="pre">create_c
 <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code> and no longer accept <code class="docutils literal notranslate"><span class="pre">cache_position</span></code>. SGLang-Omni patches these
 differences in
 <code class="docutils literal notranslate"><span class="pre">sglang_omni/models/qwen3_tts/compat.py</span></code>, which every Qwen3-TTS entry point
-applies before importing <code class="docutils literal notranslate"><span class="pre">qwen_tts</span></code>. The pinned Transformers 5.12 / SGLang 0.5.20
+applies before importing <code class="docutils literal notranslate"><span class="pre">qwen_tts</span></code>. The pinned Transformers 5.12 / SGLang 0.5.21
 stack is therefore the supported configuration, not a workaround.</p>
 <p>If you hit a <code class="docutils literal notranslate"><span class="pre">TypeError</span></code> raised from inside <code class="docutils literal notranslate"><span class="pre">qwen_tts</span></code>, do not resolve it by
 installing the package’s own Transformers pin — that breaks the rest of the
@@ -674,10 +677,11 @@ HTTP <strong>503</strong> (<code class="docutils literal notranslate"><span clas
 if the AR waiting queue or request-build backlog is full. Qwen3-TTS
 defaults to 4 request-build workers with pending depth 16.</p>
 </section>
-<section id="breakable-prefill-cuda-graphs">
-<h3>Breakable prefill CUDA graphs<a class="headerlink" href="#breakable-prefill-cuda-graphs" title="Link to this heading">#</a></h3>
-<p>Every Qwen3-TTS checkpoint (Base, CustomVoice, VoiceDesign) defaults to the
-breakable prefill CUDA-graph backend with a token ladder up to 512:</p>
+<section id="prefill-cuda-graphs">
+<h3>Prefill CUDA graphs<a class="headerlink" href="#prefill-cuda-graphs" title="Link to this heading">#</a></h3>
+<p>Every Qwen3-TTS checkpoint (Base, CustomVoice, VoiceDesign) defaults to a
+prefill CUDA graph with a token ladder up to 512: the full backend on
+CustomVoice, the breakable backend elsewhere.</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
 <tr class="row-odd"><th class="head"><p>Knob</p></th>
@@ -687,8 +691,8 @@ breakable prefill CUDA-graph backend with a token ladder up to 512:</p>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_backend_prefill</span></code></p></td>
-<td><p>Prefill graph backend (<code class="docutils literal notranslate"><span class="pre">breakable</span></code> or <code class="docutils literal notranslate"><span class="pre">disabled</span></code>)</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">breakable</span></code></p></td>
+<td><p>Prefill graph backend (<code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">breakable</span></code> or <code class="docutils literal notranslate"><span class="pre">disabled</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">full</span></code> on CustomVoice, <code class="docutils literal notranslate"><span class="pre">breakable</span></code> elsewhere</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_bs_prefill</span></code></p></td>
 <td><p>Prefill token-count ladder to capture</p></td>
@@ -701,6 +705,17 @@ breakable prefill CUDA-graph backend with a token ladder up to 512:</p>
 </tbody>
 </table>
 </div>
+<p><code class="docutils literal notranslate"><span class="pre">full</span></code> captures the prefill transformer body, attention included, as one
+graph per token bucket; the codec head and sampling still run outside it.
+<code class="docutils literal notranslate"><span class="pre">breakable</span></code> captures per-layer segments and runs attention eagerly between
+them. Each backend is accepted only on models that declare it, so a stage that
+has not adopted <code class="docutils literal notranslate"><span class="pre">full</span></code> still rejects it. <code class="docutils literal notranslate"><span class="pre">full</span></code> also needs a prefill attention
+backend that captures an ordinary prefill batch, <code class="docutils literal notranslate"><span class="pre">fa3</span></code> or <code class="docutils literal notranslate"><span class="pre">flashinfer</span></code> in
+SGLang 0.5.21: with any other backend the CustomVoice default stays
+<code class="docutils literal notranslate"><span class="pre">breakable</span></code>, and an explicit <code class="docutils literal notranslate"><span class="pre">full</span></code> fails at startup. SGLang logs the full
+prefill backend as experimental and its own compatibility rules never
+auto-disable it, so the generation batch policy’s checks are what guard it
+here.</p>
 <p>The default is the shared ladder with one bucket added. A replay falls
 back to eager when its bucket exceeds twice the real token count, and the
 shared ladder starts at 4, so a 1-token prefill lands in bucket 4 and
@@ -708,10 +723,16 @@ misses. Measured over 3203 prefills at 10 and 20 RPS, 1301 of them (40.6%)
 are exactly one token, and they are the only shapes that fall back: 2 and
 3 already replay inside bucket 4. Adding the single <code class="docutils literal notranslate"><span class="pre">1</span></code> bucket takes the
 fallback rate to zero.</p>
-<p>Opt out with <code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_backend_prefill</span> <span class="pre">disabled</span></code>. The
-default costs extra graph capture during startup. Raising
-<code class="docutils literal notranslate"><span class="pre">cuda_graph_max_bs_prefill</span></code> on its own regrows the default ladder to the
-new cap; declaring <code class="docutils literal notranslate"><span class="pre">cuda_graph_bs_prefill</span></code> yourself keeps your list as is.</p>
+<p>CustomVoice prompts are a few dozen tokens, where the breakable graph’s
+per-layer segments are launch-bound, so CustomVoice captures the prefill
+transformer body as one graph. The full backend is selected by the
+checkpoint’s <code class="docutils literal notranslate"><span class="pre">tts_model_type</span></code>; Base prefills also carry reference audio and
+keep the breakable backend until the full one is measured on them.</p>
+<p>Opt out with <code class="docutils literal notranslate"><span class="pre">--tts_engine.engine.cuda_graph_backend_prefill</span> <span class="pre">disabled</span></code>, or
+fall back to <code class="docutils literal notranslate"><span class="pre">breakable</span></code>. The default costs extra graph capture during
+startup. Raising <code class="docutils literal notranslate"><span class="pre">cuda_graph_max_bs_prefill</span></code> on its own regrows the default
+ladder to the new cap; declaring <code class="docutils literal notranslate"><span class="pre">cuda_graph_bs_prefill</span></code> yourself keeps your
+list as is.</p>
 <p>To change the ceiling, set <code class="docutils literal notranslate"><span class="pre">max_running_requests</span></code> and <code class="docutils literal notranslate"><span class="pre">max_queued_requests</span></code>
 together:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
@@ -870,7 +891,72 @@ mode.</p>
 <p>Non-streaming responses include <code class="docutils literal notranslate"><span class="pre">X-Finish-Reason:</span> <span class="pre">stop</span></code> after codec EOS or
 <code class="docutils literal notranslate"><span class="pre">X-Finish-Reason:</span> <span class="pre">length</span></code> when generation reaches <code class="docutils literal notranslate"><span class="pre">max_new_tokens</span></code>. A <code class="docutils literal notranslate"><span class="pre">length</span></code>
 response still contains decodable audio, but the utterance may be incomplete.
+Models that do not report how generation ended send <code class="docutils literal notranslate"><span class="pre">X-Finish-Reason:</span> <span class="pre">unknown</span></code>.
 Batch responses expose the same value as each item’s <code class="docutils literal notranslate"><span class="pre">finish_reason</span></code>.</p>
+</section>
+<section id="leading-silence-in-x-vector-mode">
+<h4>Leading silence in x-vector mode<a class="headerlink" href="#leading-silence-in-x-vector-mode" title="Link to this heading">#</a></h4>
+<p>Without a reference transcript the talker starts cold, and on most requests it
+opens with several frames of room-tone silence before speaking, which the
+listener hears as extra time to first audio. The engine therefore excludes
+silence codec ids from the first two frames of x-vector-only requests. The
+silence ids are derived at startup from the checkpoint’s own codec (it encodes
+stationary noise up to -50 dBFS) and logged once. ICL, CustomVoice, and
+VoiceDesign requests are not affected.</p>
+<p>On SeedTTS EN (1088 clips, no reference text, seed 0):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Checkpoint</p></th>
+<th class="head"><p>Frames masked</p></th>
+<th class="head"><p>Median onset</p></th>
+<th class="head"><p>Onsets &gt; 160 ms</p></th>
+<th class="head"><p>WER</p></th>
+<th class="head"><p>Speaker similarity</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1.7B Base</p></td>
+<td><p>0</p></td>
+<td><p>495 ms</p></td>
+<td><p>95%</p></td>
+<td><p>0.854%</p></td>
+<td><p>61.00</p></td>
+</tr>
+<tr class="row-odd"><td><p>1.7B Base</p></td>
+<td><p>2 (default)</p></td>
+<td><p>155 ms</p></td>
+<td><p>47%</p></td>
+<td><p>0.904%</p></td>
+<td><p>60.87</p></td>
+</tr>
+<tr class="row-even"><td><p>0.6B Base</p></td>
+<td><p>0</p></td>
+<td><p>480 ms</p></td>
+<td><p>86%</p></td>
+<td><p>1.532%</p></td>
+<td><p>58.41</p></td>
+</tr>
+<tr class="row-odd"><td><p>0.6B Base</p></td>
+<td><p>2 (default)</p></td>
+<td><p>75 ms</p></td>
+<td><p>23%</p></td>
+<td><p>1.072%</p></td>
+<td><p>58.10</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The mask changes which codec ids the first frames can sample, so outputs differ
+from the unmasked model. To turn it off:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--config<span class="w"> </span>examples/configs/qwen3_tts_1_7b.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tts_engine.factory.leading_silence_mask_frames<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
+</pre></div>
+</div>
+<p>Details and the full sweep are in
+<a class="reference internal" href="../benchmarks/qwen3_tts_leading_silence.html"><span class="std std-doc">the leading-silence benchmark</span></a>.</p>
 </section>
 </section>
 <section id="language-hint">
@@ -1327,7 +1413,7 @@ checkpoint is less prone.</p></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ascend-npu-baseline">Ascend NPU baseline</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic-inference">Deterministic Inference</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#overload-admission-policy">Overload / admission policy</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#breakable-prefill-cuda-graphs">Breakable prefill CUDA graphs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-cuda-graphs">Prefill CUDA graphs</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-admission-coalescing">Prefill Admission Coalescing</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#process-topology">Process topology</a></li>
 </ul>
@@ -1336,6 +1422,7 @@ checkpoint is less prone.</p></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#text-only-requests">Text-only Requests</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a><ul class="nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#python">Python</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#leading-silence-in-x-vector-mode">Leading silence in x-vector mode</a></li>
 </ul>
 </li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#language-hint">Language Hint</a></li>
@@ -1388,7 +1475,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 24, 2026.
+  Last updated on Oct 04, 2026.
   <br/>
 </p>
   </div>

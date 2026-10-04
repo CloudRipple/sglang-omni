@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=8f8a7fc7"></script>
+    <script src="../_static/documentation_options.js?v=3476fdda"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -60,8 +60,8 @@
     <link rel="prev" title="🚀 Installation — Intel CPU" href="installation_cpu.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.6" />
-    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
+  <meta name="docsearch:version" content="0.1.7" />
+    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -230,9 +230,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o Reference Audio</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/personaplex.html">PersonaPlex</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/auk.html">AuK</a></li>
@@ -251,6 +252,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../benchmarks/relay.html">Benchmark Relay</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmarks/qwen3_tts_leading_silence.html">Qwen3-TTS Base: Leading Silence in X-Vector Voice Cloning</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Developer Reference</span></p>
 <ul class="nav bd-sidenav">
@@ -525,21 +527,21 @@ base SGLang environment, follow the SGLang Moore Threads GPU installation guide.
 </section>
 <section id="option-a-docker">
 <h2>🐳 Option A: Docker<a class="headerlink" href="#option-a-docker" title="Link to this heading">#</a></h2>
-<p>Clone SGLang-Omni first. The installation below is pinned to SGLang <code class="docutils literal notranslate"><span class="pre">v0.5.20</span></code>.</p>
+<p>Clone SGLang-Omni first. The installation below is pinned to SGLang <code class="docutils literal notranslate"><span class="pre">v0.5.21</span></code>.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/sgl-project/sglang-omni.git<span class="w"> </span>sglang-omni
 <span class="nv">omni_root</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span><span class="nb">cd</span><span class="w"> </span>sglang-omni<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">pwd</span><span class="k">)</span><span class="s2">"</span>
-git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span>v0.5.20<span class="w"> </span>--single-branch<span class="w"> </span><span class="se">\</span>
+git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span>v0.5.21<span class="w"> </span>--single-branch<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>https://github.com/sgl-project/sglang.git<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">omni_root</span><span class="si">}</span><span class="s2">/../sglang"</span>
 <span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">omni_root</span><span class="si">}</span><span class="s2">/../sglang"</span>
 docker<span class="w"> </span>build<span class="w"> </span>-f<span class="w"> </span>docker/musa.Dockerfile<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-t<span class="w"> </span>sglang:v0.5.20-musa520-s5000<span class="w"> </span>.
+<span class="w">  </span>-t<span class="w"> </span>sglang:v0.5.21-musa520-s5000<span class="w"> </span>.
 <span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">omni_root</span><span class="si">}</span><span class="s2">"</span>
 docker<span class="w"> </span>build<span class="w"> </span>-f<span class="w"> </span>docker/musa.Dockerfile<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--build-arg<span class="w"> </span><span class="nv">SGLANG_MUSA_IMAGE</span><span class="o">=</span>sglang:v0.5.20-musa520-s5000<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-arg<span class="w"> </span><span class="nv">SGLANG_MUSA_IMAGE</span><span class="o">=</span>sglang:v0.5.21-musa520-s5000<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-t<span class="w"> </span>sglang-omni:main-musa520-s5000<span class="w"> </span>.
 </pre></div>
 </div>
-<p>The base image is built from the immutable <code class="docutils literal notranslate"><span class="pre">v0.5.20</span></code> release tag, which
+<p>The base image is built from the immutable <code class="docutils literal notranslate"><span class="pre">v0.5.21</span></code> release tag, which
 includes <code class="docutils literal notranslate"><span class="pre">docker/musa.Dockerfile</span></code>.</p>
 <p>Run the image with MUSA devices exposed by the host runtime. If <code class="docutils literal notranslate"><span class="pre">mthreads</span></code> is
 already configured as the Docker default runtime on your host, omit
@@ -558,10 +560,10 @@ already configured as the Docker default runtime on your host, omit
 </section>
 <section id="option-b-install-from-source">
 <h2>🛠️ Option B: Install from Source<a class="headerlink" href="#option-b-install-from-source" title="Link to this heading">#</a></h2>
-<p>Start from an environment where SGLang <code class="docutils literal notranslate"><span class="pre">v0.5.20</span></code> has been installed with MUSA
+<p>Start from an environment where SGLang <code class="docutils literal notranslate"><span class="pre">v0.5.21</span></code> has been installed with MUSA
 support. If you build SGLang from source, clone the pinned tag rather than
 <code class="docutils literal notranslate"><span class="pre">main</span></code>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>--depth<span class="w"> </span><span class="m">1</span><span class="w"> </span>--branch<span class="w"> </span>v0.5.20<span class="w"> </span><span class="se">\</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>--depth<span class="w"> </span><span class="m">1</span><span class="w"> </span>--branch<span class="w"> </span>v0.5.21<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>https://github.com/sgl-project/sglang.git<span class="w"> </span>sglang
 </pre></div>
 </div>
@@ -731,7 +733,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 24, 2026.
+  Last updated on Oct 04, 2026.
   <br/>
 </p>
   </div>
