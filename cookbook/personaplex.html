@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.7" />
-    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 12, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -227,6 +227,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
 <li class="toctree-l1"><a class="reference internal" href="arkasr.html">ARK-ASR-3B</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
@@ -265,6 +266,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/qwen3_asr_concurrency_profile.html">Qwen3-ASR High-Concurrency Benchmark and Bottleneck Profile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/full_duplex_bench.html">Full-Duplex-Bench v1.5 runbook</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/rl_admin_control.html">RL Admin Control</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/bump_version.html">Bumping the SGLang Pin</a></li>
 </ul>
@@ -508,7 +510,10 @@
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#known-limitations">Known limitations</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#reference-parity">Reference parity</a></li>
+</ul>
+</li>
 </ul>
             </nav>
         </div>
@@ -620,8 +625,9 @@ The fixed caller-frame budget still determines the number of generated frames.</
 <section id="known-limitations">
 <h2>Known limitations<a class="headerlink" href="#known-limitations" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p>Offline, one request at a time (<code class="docutils literal notranslate"><span class="pre">max_running_requests=1</span></code>).</p></li>
-<li><p>CUDA graphs are off; a 7B decode step plus 8 depformer steps runs close to the 80 ms frame budget rather than well inside it.</p></li>
+<li><p>Offline, one request at a time by default (<code class="docutils literal notranslate"><span class="pre">max_running_requests=1</span></code>). If you raise <code class="docutils literal notranslate"><span class="pre">--lm.engine.max_running_requests</span></code>, the requests in a batch share one depformer pass per frame, and each seeded request still draws from its own generator. A seeded reply repeats exactly only with one request in flight, because batched kernels can round differently.</p></li>
+<li><p>On CUDA the backbone’s decode step replays a CUDA graph (<code class="docutils literal notranslate"><span class="pre">--lm.engine.disable_cuda_graph</span> <span class="pre">true</span></code> turns it off); the 8 depformer steps still run eagerly, so a frame runs close to the 80 ms budget rather than well inside it.</p></li>
+<li><p>On CUDA, streaming Mimi decode replays CUDA graphs for chunks of 1 to <code class="docutils literal notranslate"><span class="pre">max_graph_frames</span></code> frames (default 1, the LM’s chunk width) on <code class="docutils literal notranslate"><span class="pre">num_decode_slots</span></code> resident decode states (default 8); other platforms decode eagerly. A stream that arrives while every slot is taken decodes eagerly, so keep <code class="docutils literal notranslate"><span class="pre">--code2wav.factory.num_decode_slots</span></code> at or above <code class="docutils literal notranslate"><span class="pre">--lm.engine.max_running_requests</span></code>; <code class="docutils literal notranslate"><span class="pre">--code2wav.factory.max_graph_frames</span> <span class="pre">0</span></code> turns the graphs off.</p></li>
 <li><p>The temporal attention window follows the streaming ring, including the masked oldest slot once its 3000-position cache fills. Boundary tests check this rule; they do not measure long-input audio quality.</p></li>
 </ul>
 </section>
@@ -631,12 +637,27 @@ The fixed caller-frame budget still determines the number of generated frames.</
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pytest<span class="w"> </span>tests/unit_test/personaplex/<span class="w"> </span>-q
 </pre></div>
 </div>
-<p>Reference comparisons and reproducibility checks are evaluation scripts under
-<code class="docutils literal notranslate"><span class="pre">benchmarks/eval/</span></code>, separate from the unit suite. See the
-<span class="xref myst">PersonaPlex evaluation guide</span> for checkpoint,
-reference-environment and output setup. The greedy comparison checks a matching
-prefix, not full-output equality; the component comparison includes a diagnostic
-for the reference depformer ring behavior.</p>
+<section id="reference-parity">
+<h3>Reference parity<a class="headerlink" href="#reference-parity" title="Link to this heading">#</a></h3>
+<p>Two opt-in tests compare against an <a class="reference external" href="https://github.com/NVIDIA/personaplex">NVIDIA/personaplex</a> checkout. Its <code class="docutils literal notranslate"><span class="pre">moshi</span></code> package pins <code class="docutils literal notranslate"><span class="pre">torch</span> <span class="pre">&lt;</span> <span class="pre">2.5</span></code>, so it needs its own environment, separate from the serving one:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/NVIDIA/personaplex.git<span class="w"> </span>/path/to/personaplex
+uv<span class="w"> </span>venv<span class="w"> </span>/path/to/personaplex/.venv<span class="w"> </span>-p<span class="w"> </span><span class="m">3</span>.12
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span>/path/to/personaplex/.venv/bin/python<span class="w"> </span>/path/to/personaplex/moshi/
+</pre></div>
+</div>
+<p>Then run the tests from the serving environment. They need CUDA, skip unless both variables are set, and run one file per command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">PERSONAPLEX_REFERENCE_SOURCE</span><span class="o">=</span>/path/to/personaplex
+<span class="nb">export</span><span class="w"> </span><span class="nv">PERSONAPLEX_REFERENCE_PYTHON</span><span class="o">=</span>/path/to/personaplex/.venv/bin/python
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_model/test_personaplex_parity.py<span class="w"> </span>-v<span class="w"> </span>-s
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_model/test_personaplex_components.py<span class="w"> </span>-v<span class="w"> </span>-s
+</pre></div>
+</div>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">test_personaplex_parity.py</span></code>: greedy replies to the reference’s two test recordings must have the input’s length, match it for at least the first 100 frames, and agree in text over that prefix; greedy and seeded replies must also repeat. <strong>This is not full-output parity.</strong></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">test_personaplex_components.py</span></code>: Mimi, the input embeddings and the depformer logits on the public <code class="docutils literal notranslate"><span class="pre">kyutai/moshiko-pytorch-bf16</span></code> base. The last depformer step matches only with the reference’s ring behavior emulated, which diagnoses a known difference rather than proving a match.</p></li>
+</ul>
+<p><code class="docutils literal notranslate"><span class="pre">PERSONAPLEX_PARITY_CHECKPOINT</span></code> and <code class="docutils literal notranslate"><span class="pre">PERSONAPLEX_MOSHI_CHECKPOINT</span></code> override the checkpoints, <code class="docutils literal notranslate"><span class="pre">PERSONAPLEX_STAGE_ARGS</span></code> forwards pipeline flags such as <code class="docutils literal notranslate"><span class="pre">'--lm.engine.mem_fraction_static</span> <span class="pre">0.5'</span></code>, and <code class="docutils literal notranslate"><span class="pre">PERSONAPLEX_REFERENCE_REPO</span></code> sets the reference CLI’s config lookup. Reference outputs are regenerated on every run under pytest’s temporary directory.</p>
+</section>
 </section>
 </section>
 
@@ -695,7 +716,10 @@ for the reference depformer ring behavior.</p>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#known-limitations">Known limitations</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#reference-parity">Reference parity</a></li>
+</ul>
+</li>
 </ul>
   </nav></div>
 
@@ -729,7 +753,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 04, 2026.
+  Last updated on Oct 12, 2026.
   <br/>
 </p>
   </div>

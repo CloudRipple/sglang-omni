@@ -56,12 +56,12 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="MOSS-Transcribe-Diarize" href="moss_transcribe_diarize.html" />
+    <link rel="next" title="Nemotron 3.5 ASR" href="nemotron3_5_asr.html" />
     <link rel="prev" title="Fun-ASR-Nano" href="fun_asr.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.7" />
-    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 12, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -227,6 +227,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">ARK-ASR-3B</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
@@ -265,6 +266,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/qwen3_asr_concurrency_profile.html">Qwen3-ASR High-Concurrency Benchmark and Bottleneck Profile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/full_duplex_bench.html">Full-Duplex-Bench v1.5 runbook</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/rl_admin_control.html">RL Admin Control</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/bump_version.html">Bumping the SGLang Pin</a></li>
 </ul>
@@ -513,6 +515,7 @@
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#audio-handling">Audio Handling</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#dtype">dtype</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#apple-silicon">Apple Silicon</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#marker-token-suppression">Marker-Token Suppression</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pre-lm-audio-encoder">Pre-LM Audio Encoder</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#how-this-relates-to-encoder-max-batch-size">How this relates to <code class="docutils literal notranslate"><span class="pre">encoder_max_batch_size</span></code></a></li>
@@ -752,6 +755,25 @@ activations under fp16 (matching the reference <code class="docutils literal not
 activations stay finite; this clamp is a no-op under <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code>.</p></li>
 </ul>
 </section>
+<section id="apple-silicon">
+<h2>Apple Silicon<a class="headerlink" href="#apple-silicon" title="Link to this heading">#</a></h2>
+<p>On macOS arm64, ARK-ASR-3B runs through the existing Torch/MPS compatibility
+path without a converted checkpoint or model-specific code changes. Leave
+<code class="docutils literal notranslate"><span class="pre">SGLANG_USE_MLX</span></code> unset:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">unset</span><span class="w"> </span>SGLANG_USE_MLX
+<span class="nb">export</span><span class="w"> </span><span class="nv">DYLD_LIBRARY_PATH</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>brew<span class="w"> </span>--prefix<span class="w"> </span>ffmpeg@7<span class="k">)</span><span class="s2">/lib</span><span class="si">${</span><span class="nv">DYLD_LIBRARY_PATH</span><span class="p">:+:</span><span class="nv">$DYLD_LIBRARY_PATH</span><span class="si">}</span><span class="s2">"</span>
+sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>AutoArk-AI/ARK-ASR-3B<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-name<span class="w"> </span>AutoArk-AI/ARK-ASR-3B<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--asr.engine.max_running_requests<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
+</pre></div>
+</div>
+<p>This path was validated on a MacBook Air with an M4 and 16 GB of unified
+memory using the official checkpoint and <code class="docutils literal notranslate"><span class="pre">tests/data/query_to_cars.wav</span></code>. The
+server returned the expected transcript through <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>.
+Set <code class="docutils literal notranslate"><span class="pre">SGLANG_USE_MLX=1</span></code> to select the native MLX path.</p>
+</section>
 <section id="marker-token-suppression">
 <h2>Marker-Token Suppression<a class="headerlink" href="#marker-token-suppression" title="Link to this heading">#</a></h2>
 <p>The stock checkpoint ships no <code class="docutils literal notranslate"><span class="pre">bad_words_ids</span></code>, so plain <code class="docutils literal notranslate"><span class="pre">skip_special_tokens=True</span></code>
@@ -920,11 +942,11 @@ ARK-ASR currently ignores it (the transcription instruction is fixed).</p></li>
       </div>
     </a>
     <a class="right-next"
-       href="moss_transcribe_diarize.html"
+       href="nemotron3_5_asr.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">MOSS-Transcribe-Diarize</p>
+        <p class="prev-next-title">Nemotron 3.5 ASR</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -959,6 +981,7 @@ ARK-ASR currently ignores it (the transcription instruction is fixed).</p></li>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#audio-handling">Audio Handling</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#dtype">dtype</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#apple-silicon">Apple Silicon</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#marker-token-suppression">Marker-Token Suppression</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pre-lm-audio-encoder">Pre-LM Audio Encoder</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#how-this-relates-to-encoder-max-batch-size">How this relates to <code class="docutils literal notranslate"><span class="pre">encoder_max_batch_size</span></code></a></li>
@@ -1000,7 +1023,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 04, 2026.
+  Last updated on Oct 12, 2026.
   <br/>
 </p>
   </div>

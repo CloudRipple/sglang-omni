@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.7" />
-    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 12, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -227,6 +227,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
 <li class="toctree-l1"><a class="reference internal" href="arkasr.html">ARK-ASR-3B</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
@@ -265,6 +266,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/qwen3_asr_concurrency_profile.html">Qwen3-ASR High-Concurrency Benchmark and Bottleneck Profile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/full_duplex_bench.html">Full-Duplex-Bench v1.5 runbook</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/rl_admin_control.html">RL Admin Control</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/bump_version.html">Bumping the SGLang Pin</a></li>
 </ul>
@@ -502,7 +504,8 @@
                 <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#running-the-offline-example">Running the offline example</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#request-parameters">Request parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#realtime-conversation">Realtime conversation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#offline-request-parameters">Offline request parameters</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#known-limitations">Known limitations</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a></li>
 </ul>
@@ -519,7 +522,7 @@
   <section class="tex2jax_ignore mathjax_ignore" id="nemotronlabs-voicechat">
 <h1>NemotronLabs VoiceChat<a class="headerlink" href="#nemotronlabs-voicechat" title="Link to this heading">#</a></h1>
 <p><a class="reference external" href="https://huggingface.co/nvidia/NVIDIA-NemotronLabs-VoiceChat-11B">NVIDIA-NemotronLabs-VoiceChat-11B</a> is an 11B end-to-end full-duplex speech-to-speech model. It is frame-locked at 12.5 Hz: every 80 ms of caller audio advances a Fast Conformer perception encoder, a Nemotron-H thinker that emits one text token and one function token per frame, an EAR-TTS talker that turns each text token into 31 RVQ codes, and an RVQ-VAE codec that renders the codes to 22.05 kHz audio. The model decides when to speak; there is no external VAD.</p>
-<p>SGLang-Omni currently serves it as an <strong>offline</strong> pipeline: one recording in, the agent’s reply text and audio out. Live duplex sessions over <code class="docutils literal notranslate"><span class="pre">/v1/realtime</span></code> are tracked in <a class="reference external" href="https://github.com/sgl-project/sglang-omni/issues/1909">#1909</a> and are not part of this page.</p>
+<p>SGLang-Omni supports offline recordings and live duplex conversations over <code class="docutils literal notranslate"><span class="pre">/v1/realtime</span></code>.</p>
 <section id="prerequisites">
 <h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
 <p>The checkpoint is a single 44 GB fp32 <code class="docutils literal notranslate"><span class="pre">model.safetensors</span></code> with a NeMo-style <code class="docutils literal notranslate"><span class="pre">config.json</span></code>. Download it with:</p>
@@ -549,8 +552,21 @@
 </ul>
 <p>The reply text is the thinker’s spoken tokens only; frames where the model is listening carry a marker token and are dropped from the text.</p>
 </section>
-<section id="request-parameters">
-<h2>Request parameters<a class="headerlink" href="#request-parameters" title="Link to this heading">#</a></h2>
+<section id="realtime-conversation">
+<h2>Realtime conversation<a class="headerlink" href="#realtime-conversation" title="Link to this heading">#</a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>examples/run_nemotron_voicechat_duplex.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>/path/to/NVIDIA-NemotronLabs-VoiceChat-11B<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--serve<span class="w"> </span>--port<span class="w"> </span><span class="m">8097</span>
+</pre></div>
+</div>
+<p>Open http://localhost:8097, click <strong>Start</strong>, and allow microphone access.
+If the server runs on a remote GPU host, forward port 8097 to your local machine first.
+Headphones help avoid acoustic feedback. The example uses the shared realtime
+playground and supports one session on one GPU, with a four-minute browser limit.
+It uses the checkpoint’s default prompt and voice.</p>
+</section>
+<section id="offline-request-parameters">
+<h2>Offline request parameters<a class="headerlink" href="#offline-request-parameters" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
 <tr class="row-odd"><th class="head"><p>Parameter</p></th>
@@ -572,7 +588,7 @@
 <section id="known-limitations">
 <h2>Known limitations<a class="headerlink" href="#known-limitations" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p>Offline, single request at a time (<code class="docutils literal notranslate"><span class="pre">max_running_requests=1</span></code> for both engines). No barge-in or interrupt API.</p></li>
+<li><p>The offline pipeline handles one request at a time (<code class="docutils literal notranslate"><span class="pre">max_running_requests=1</span></code> for both engines), without a barge-in or interrupt API.</p></li>
 <li><p>Single speaker (<code class="docutils literal notranslate"><span class="pre">Aria</span></code>, the checkpoint’s baked-in prompt latents).</p></li>
 <li><p>The <code class="docutils literal notranslate"><span class="pre">function_head</span></code> tool-call channel is decoded and carried through but nothing acts on it.</p></li>
 <li><p>Classifier-free guidance is off (<code class="docutils literal notranslate"><span class="pre">guidance_scale=0</span></code>) although the checkpoint config enables it at 0.2.</p></li>
@@ -635,7 +651,8 @@
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#running-the-offline-example">Running the offline example</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#request-parameters">Request parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#realtime-conversation">Realtime conversation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#offline-request-parameters">Offline request parameters</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#known-limitations">Known limitations</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a></li>
 </ul>
@@ -671,7 +688,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 04, 2026.
+  Last updated on Oct 12, 2026.
   <br/>
 </p>
   </div>

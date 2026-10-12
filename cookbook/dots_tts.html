@@ -61,7 +61,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.7" />
-    <meta name="docbuild:last-update" content="Oct 04, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 12, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -227,6 +227,7 @@
 <li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
 <li class="toctree-l1"><a class="reference internal" href="arkasr.html">ARK-ASR-3B</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
@@ -265,6 +266,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/qwen3_asr_concurrency_profile.html">Qwen3-ASR High-Concurrency Benchmark and Bottleneck Profile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/full_duplex_bench.html">Full-Duplex-Bench v1.5 runbook</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/rl_admin_control.html">RL Admin Control</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/bump_version.html">Bumping the SGLang Pin</a></li>
 </ul>
@@ -574,6 +576,7 @@
 </tbody>
 </table>
 </div>
+<p>For Intel GPUs, follow the <a class="reference internal" href="../get_started/installation_xpu.html#dots-tts-text-to-speech-single-xpu"><span class="std std-ref">dots.tts XPU recipe</span></a>.</p>
 </section>
 <section id="prerequisites">
 <h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
@@ -612,7 +615,7 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\<
 dit_cache_tokens = patch_capacity × (hidden_patch_size + latent_patch_size)   # MF: ×5
 </pre></div>
 </div>
-<p>Pool bytes scale roughly as <code class="docutils literal notranslate"><span class="pre">max_running_requests</span> <span class="pre">×</span> <span class="pre">patch_capacity</span></code> and include DiT KV (per NFE), semantic-encoder KV, scratch K/V, masks, window, and AdaLN mods. Startup logs the estimated breakdown and free CUDA memory, then refuses to allocate when free VRAM is below the estimate plus a 15% headroom for graphs and workspace.</p>
+<p>Pool bytes scale roughly as <code class="docutils literal notranslate"><span class="pre">max_running_requests</span> <span class="pre">×</span> <span class="pre">patch_capacity</span></code> and include DiT KV (per NFE), semantic-encoder KV, scratch K/V, masks, window, and AdaLN mods. On CUDA and XPU, startup logs the estimated breakdown and free memory, then refuses to allocate when free VRAM is below the estimate plus a 15% headroom for graphs and workspace.</p>
 <p><code class="docutils literal notranslate"><span class="pre">mem_fraction_static</span></code> (default <code class="docutils literal notranslate"><span class="pre">0.20</span></code> in <code class="docutils literal notranslate"><span class="pre">examples/configs/dots_tts.yaml</span></code>) only budgets the <strong>SGLang backbone</strong> KV cache. Acoustic-tail pools are separate and are <strong>not</strong> covered by that fraction.</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
@@ -1016,7 +1019,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 04, 2026.
+  Last updated on Oct 12, 2026.
   <br/>
 </p>
   </div>

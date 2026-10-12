@@ -12,9 +12,10 @@ XPU wheel index.
 family and CUDA-only wheels would replace the `+xpu` stack.
 [`pyproject_xpu.toml`](../../pyproject_xpu.toml) encodes the XPU replacements.
 
-Core deps cover the supported models (Qwen3-ASR / TTS / Omni / MiniMax Music 3, Fun-ASR-Nano,
-MOSS-Transcribe-Diarize, MiniCPM-o, Ming-Omni-TTS and PersonaPlex) plus the API server;
-`[eval]` adds SeedTTS/WER tooling and `[all]` aliases it. ZONOS2 also serves here,
+Core deps cover the supported models (Qwen3-ASR / TTS / Omni / MiniMax Music 3, Whisper ASR, Fun-ASR-Nano, Nemotron 3.5 ASR, MOSS-Transcribe-Diarize, MiniCPM-o, Ming-Omni-TTS, PersonaPlex, AuK/AuK-Flash and dots.tts) plus the API server;
+`[eval]` adds SeedTTS/WER tooling and `[all]` aliases it. `[fun-cosyvoice3]` adds
+that model's CosyVoice dependencies — see
+[Fun-CosyVoice3](#fun-cosyvoice3-text-to-speech-single-xpu). ZONOS2 also serves here,
 but its DAC codec is not a core dep on any platform — see
 [ZONOS2](#zonos2-moe-tts-single-xpu) for the XPU-safe way to add it. Other model
 families (S2-Pro, Ming-Omni, Voxtral-TTS) are CUDA-only and are not offered here.
@@ -133,6 +134,17 @@ curl -s -X POST http://localhost:8000/v1/audio/transcriptions \
   -F "file=@sample.wav" -F "model=/path/to/Qwen3-ASR-1.7B"
 ```
 
+### Whisper ASR (speech-to-text, single XPU)
+
+```bash
+sgl-omni serve --model-path openai/whisper-large-v3 --host 0.0.0.0 --port 8000
+# transcribe:
+curl -s -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@sample.wav" -F "model=openai/whisper-large-v3"
+```
+
+See the [Whisper cookbook](../cookbook/whisper_asr.md) for request parameters.
+
 ### Fun-ASR-Nano (speech-to-text, single XPU)
 
 Same endpoint as Qwen3-ASR, one uploaded clip of 30 s or less per request. See
@@ -149,6 +161,28 @@ The audio encoder captures a graph per (batch, length) bucket the first time it
 sees one, on XPU as on CUDA. Buckets that fail to capture log a warning and run
 eager, so a transcript is never at stake.
 
+### Nemotron 3.5 ASR (speech-to-text, single XPU)
+
+Run from the repository root after the XPU installation above, selecting the device with `ZE_AFFINITY_MASK`:
+
+```bash
+ZE_AFFINITY_MASK=0 sgl-omni serve \
+  --model-path nvidia/nemotron-3.5-asr-streaming-0.6b \
+  --host 0.0.0.0 --port 8000
+```
+
+In another terminal, upload the cookbook's reference recording:
+
+```bash
+curl -s -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@tests/data/query_to_cars.wav" \
+  -F "model=nvidia/nemotron-3.5-asr-streaming-0.6b" \
+  -F "language=auto" \
+  -F "response_format=verbose_json"
+```
+
+See the [Nemotron cookbook](../cookbook/nemotron3_5_asr.md) for request parameters.
+
 ### Qwen3-TTS (text-to-speech, single XPU)
 
 Qwen3-TTS needs the upstream `qwen-tts` package. Option A already includes it; for
@@ -164,6 +198,8 @@ pip install --no-deps sox
 pip install --no-deps qwen-tts==0.1.1
 ```
 
+#### Base
+
 ```bash
 sgl-omni serve --model-path /path/to/Qwen3-TTS-12Hz-1.7B-Base --host 0.0.0.0 --port 8000
 # Base checkpoint clones a reference voice — pass ref_audio (+ ref_text):
@@ -173,6 +209,187 @@ curl -s -X POST http://localhost:8000/v1/audio/speech \
        "voice":"default","ref_audio":"/path/to/ref.wav","ref_text":"reference transcript",
        "response_format":"wav"}' -o out.wav
 ```
+
+#### CustomVoice
+
+`CustomVoice` checkpoints synthesize speech with built-in speakers and need no reference audio. Use the matching config and select a speaker in the request:
+
+```bash
+sgl-omni serve \
+  --model-path Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+  --config examples/configs/qwen3_tts_1_7b_customvoice.yaml \
+  --host 0.0.0.0 --port 8000
+curl -s -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice","input":"Hello from Intel XPU.",
+       "voice":"Ryan","task_type":"CustomVoice","language":"English",
+       "instructions":"Speak clearly and calmly.","response_format":"wav"}' -o out.wav
+```
+
+#### VoiceDesign
+
+The `VoiceDesign` checkpoint synthesizes speech from text and a voice description, so it needs no reference audio. Serve it with its config:
+
+```bash
+sgl-omni serve \
+  --model-path Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
+  --config examples/configs/qwen3_tts_1_7b_voicedesign.yaml \
+  --host 0.0.0.0 --port 8000
+# VoiceDesign requires task_type and non-empty instructions:
+curl -s -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign","input":"Hello, how are you?",
+       "voice":"default","task_type":"VoiceDesign",
+       "instructions":"A warm, natural young adult voice.","response_format":"wav"}' -o out.wav
+```
+
+#### Codec decoding on XPU
+
+The stateful incremental codec decoder runs, but the pipeline starts it with
+`async_decode: false`, and the vocoder captures its decode graphs during the
+asynchronous decode warmup, so none are captured. Capturing the shape set the CUDA
+defaults imply has not been shown to pay here yet: on one Arc Pro B60 it ran past
+the 600 s stage startup budget, and the engine then ran out of memory on a 24 GB
+card once the graphs were resident.
+
+The speaker encoder graphs do capture, on the default bucket ladder, for about 2 s of
+extra startup. The reference encoder stays eager whatever the ladder says: its
+transformers Mimi encoder reads a mask tensor on the host mid-forward, which a capture
+cannot record, so the platform declines that one capability and the batcher logs
+`qwen3_tts_reference_encoder_graph resolved=eager`.
+
+To try the fast path, turn the asynchronous path back on; `incremental_codec_compile`
+is worth dropping with it, since compiling the codec kernels is what dominated that
+startup:
+
+```yaml
+stages:
+  vocoder:
+    factory:
+      async_decode: true
+      incremental_codec_compile: false
+```
+
+An explicit stage value wins over the pipeline default. See the platform-neutral
+defaults in [docs/cookbook/qwen3_tts.md](../cookbook/qwen3_tts.md).
+
+### AuK (speech generation and editing, single XPU)
+
+Run one checkpoint at a time:
+
+```bash
+ZE_AFFINITY_MASK=0 sgl-omni serve \
+  --model-path tencent/AuK \
+  --host 0.0.0.0 --port 8000
+```
+
+```bash
+ZE_AFFINITY_MASK=0 sgl-omni serve \
+  --model-path tencent/AuK-Flash \
+  --host 0.0.0.0 --port 8000
+```
+
+With either server, generate a 24 kHz WAV from text and voice instructions. Without reference audio, `stage_params.auk_engine.gen_seconds` is required:
+
+```bash
+curl -s -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input":"Welcome home.","instructions":"A warm, relaxed voice.",
+       "stage_params":{"auk_engine":{"gen_seconds":3}},
+       "seed":1234,"response_format":"wav"}' -o out.wav
+```
+
+AuK uses 32 sampling steps by default; AuK-Flash uses its fixed four-step recipe. See the [AuK cookbook](../cookbook/auk.md) for voice cloning and speech editing through `/generate`.
+
+### Fun-CosyVoice3 (text-to-speech, single XPU)
+
+Fun-CosyVoice3 needs the `[fun-cosyvoice3]` extra and the CosyVoice sources. Install the
+extra through the helper above, not with `pip install -e ".[fun-cosyvoice3]"`, which would
+resolve the CUDA project file. Then clone CosyVoice with its Matcha-TTS submodule as in
+[docs/cookbook/fun_cosyvoice3.md](../cookbook/fun_cosyvoice3.md#prerequisites) and add both to
+`PYTHONPATH`; `sox` is not needed.
+
+```bash
+scripts/xpu/install_xpu.sh --extras fun-cosyvoice3
+export PYTHONPATH="${COSYVOICE_PATH}:${COSYVOICE_PATH}/third_party/Matcha-TTS:$PYTHONPATH"
+```
+
+```bash
+sgl-omni serve --model-path FunAudioLLM/Fun-CosyVoice3-0.5B-2512 --host 0.0.0.0 --port 8000
+# clones a reference voice — pass ref_audio (+ ref_text):
+curl -s -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"FunAudioLLM/Fun-CosyVoice3-0.5B-2512","input":"Hello from Intel XPU.",
+       "ref_audio":"/path/to/ref.wav","ref_text":"reference transcript"}' -o out.wav
+```
+
+### dots.tts (text-to-speech, single XPU)
+
+The XPU installation includes `dots.tts==0.2.1`.
+All three checkpoints were validated on one 24 GB Intel Arc Pro B60 with bf16,
+`mem_fraction_static=0.20`, and `max_generate_length=500`:
+
+| Checkpoint | Config | `num_steps` | `max_running_requests` tested |
+|---|---|---|---|
+| `dots-studio/dots.tts-mf` | `examples/configs/dots_tts.yaml` | 4 | 4 |
+| `dots-studio/dots.tts-soar` | `examples/configs/dots_tts_soar.yaml` | 10 | 1 |
+| `dots-studio/dots.tts-base` | `examples/configs/dots_tts_soar.yaml` | 10 | 1 |
+
+For MF on B60, lower the config's default 16 request slots to the 4 slots used in validation. Keep the checkpoint revision pinned by the config:
+
+```bash
+ZE_AFFINITY_MASK=0 sgl-omni serve \
+  --config examples/configs/dots_tts.yaml \
+  --latent_engine.engine.max_running_requests 4 \
+  --latent_engine.engine.cuda_graph_max_bs 4 \
+  --allowed-local-media-path docs/_static/audio \
+  --host 0.0.0.0 --port 8000
+```
+
+For SOAR, use its single-request config:
+
+```bash
+ZE_AFFINITY_MASK=0 sgl-omni serve \
+  --model-path dots-studio/dots.tts-soar \
+  --config examples/configs/dots_tts_soar.yaml \
+  --allowed-local-media-path docs/_static/audio \
+  --host 0.0.0.0 --port 8000
+```
+
+For base, use the same command with
+`--model-path dots-studio/dots.tts-base`. Base and SOAR require
+`max_running_requests=1`; continuous batching is MF-only.
+
+The `disable_cuda_graph` and `cuda_graph_max_bs` config names also control
+SGLang backbone decode graphs on XPU. The configs enable them; use
+`--latent_engine.engine.disable_cuda_graph true` for eager backbone decode.
+The batched acoustic tail runs eager on XPU. Its memory admission precheck
+queries free XPU memory and rejects oversized pools before allocation.
+Lower `max_running_requests` and/or
+`max_generate_length` explicitly; `mem_fraction_static` only budgets
+the backbone KV cache.
+
+Each request needs one reference clip and its matching transcript:
+
+```bash
+curl -sS -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "dots-studio/dots.tts-mf",
+    "input": "Have a nice day and enjoy south california sunshine.",
+    "references": [{
+      "audio_path": "docs/_static/audio/male-voice.wav",
+      "text": "Hey, Adam here. Let'\''s create something that feels real, sounds human, and connects every time."
+    }],
+    "seed": 42
+  }' \
+  --output output.wav
+```
+
+Set `model` to the checkpoint being served. The validation runs produced
+48 kHz mono audio and passed ASR checks against the requested text.
+See the [dots.tts cookbook](../cookbook/dots_tts.md) for streaming and
+solver parameters.
 
 ### ZONOS2 (MoE TTS, single XPU)
 
@@ -288,8 +505,8 @@ Health check for any of the above: `curl http://localhost:8000/v1/models`.
 > **Expected on XPU:** `Failed to import mooncake` / `Failed to import nixl` warnings are harmless
 > — those CUDA-only transfer backends are omitted; tensors move through the `shm` relay instead.
 
-> ✅ Support status: **Qwen3-ASR, Fun-ASR-Nano, MOSS-Transcribe-Diarize, Qwen3-TTS, ZONOS2,
-> Qwen3-Omni, MiniMax Music 3, MiniCPM-o, Ming-Omni-TTS and PersonaPlex all serve end-to-end on Intel XPU**
-> (Qwen3-ASR, Fun-ASR-Nano, MOSS-Transcribe-Diarize, Qwen3-TTS, MiniCPM-o and PersonaPlex single-card;
+> ✅ Support status: **Qwen3-ASR, Whisper ASR, Fun-ASR-Nano, Nemotron 3.5 ASR, MOSS-Transcribe-Diarize, Qwen3-TTS, Fun-CosyVoice3, ZONOS2,
+> Qwen3-Omni, MiniMax Music 3, MiniCPM-o, Ming-Omni-TTS, PersonaPlex, AuK/AuK-Flash and dots.tts all serve end-to-end on Intel XPU**
+> (Qwen3-ASR, Whisper ASR, Fun-ASR-Nano, Nemotron 3.5 ASR, MOSS-Transcribe-Diarize, Qwen3-TTS, Fun-CosyVoice3, MiniCPM-o, PersonaPlex, AuK/AuK-Flash and dots.tts single-card;
 > ZONOS2 single-card with decode graphs; MiniMax Music 3 and Ming-Omni-TTS need two cards;
 > Qwen3-Omni thinker across 8 cards with tensor parallelism).
