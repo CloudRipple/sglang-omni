@@ -13,6 +13,7 @@ codes — the property the v2 codec provides by construction.
 from __future__ import annotations
 
 import queue
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -246,6 +247,8 @@ def offline_payload(rows: torch.Tensor, request_id: str) -> StagePayload:
 
 
 def drain(scheduler) -> list:
+    while scheduler.has_ready_work():
+        scheduler.run_ready_step()
     messages = []
     while True:
         try:
@@ -569,6 +572,11 @@ def pump_queued_stream_chunks(scheduler) -> None:
     while True:
         msg = scheduler.next_message()
         if msg is None:
+            if scheduler.has_ready_work():
+                scheduler.run_ready_step()
+                continue
+            else:
+                pass
             break
         scheduler.handle_message(msg, None)
 
@@ -686,6 +694,184 @@ def test_batched_coalescing_handles_two_streaming_lanes(monkeypatch) -> None:
         concat_stream_audio(messages, "b"),
         reference_waveform(rows_b[:, 1:]).numpy(),
     )
+
+
+def test_finished_backlogs_share_the_first_decode_batch(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = make_scheduler(monkeypatch, processor, stream_slots=16)
+    rows_by_id = {str(i): make_rows(6 + i % 3, seed=i) for i in range(16)}
+    for request_id, rows in rows_by_id.items():
+        for index, chunk in enumerate((rows[:1], rows[1:6], rows[6:])):
+            if len(chunk) > 0:
+                scheduler.inbox.put(
+                    IncomingMessage(
+                        request_id,
+                        "stream_chunk",
+                        stream_item(chunk, make_metadata(), index),
+                    )
+                )
+            else:
+                pass
+        scheduler.inbox.put(IncomingMessage(request_id, "stream_done", None))
+        scheduler.inbox.put(
+            IncomingMessage(
+                request_id,
+                "new_request",
+                terminal_payload(rows, request_id=request_id),
+            )
+        )
+
+    pump_queued_stream_chunks(scheduler)
+    messages = drain(scheduler)
+    assert processor.audio_tokenizer.batch_shapes[0] == (N_VQ, 16, 5)
+    assert sum(msg.type == "result" for msg in messages) == 16
+    for request_id, rows in rows_by_id.items():
+        np.testing.assert_array_equal(
+            concat_stream_audio(messages, request_id),
+            reference_waveform(rows[:, 1:]).numpy(),
+        )
+    assert not scheduler.stream_states
+
+
+def test_new_first_chunk_is_ingested_between_backlog_steps(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = make_scheduler(monkeypatch, processor, stream_slots=2)
+    old_rows = make_rows(55, seed=60)
+    new_rows = make_rows(5, seed=61)
+    codec = processor.audio_tokenizer
+    decode = codec.decode_streaming_tensors
+
+    def inject_after_first_step(
+        codes: torch.Tensor,
+        codes_lengths: torch.Tensor,
+        slot_ids: torch.Tensor,
+        valid_rows: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        result = decode(codes, codes_lengths, slot_ids, valid_rows)
+        if codec.frame_calls == 1:
+            scheduler.inbox.put(
+                IncomingMessage(
+                    "new", "stream_chunk", stream_item(new_rows, make_metadata())
+                )
+            )
+            scheduler.inbox.put(IncomingMessage("new", "stream_done", None))
+            scheduler.inbox.put(
+                IncomingMessage(
+                    "new", "new_request", terminal_payload(new_rows, request_id="new")
+                )
+            )
+        else:
+            pass
+        return result
+
+    monkeypatch.setattr(codec, "decode_streaming_tensors", inject_after_first_step)
+    scheduler.inbox.put(
+        IncomingMessage("old", "stream_chunk", stream_item(old_rows, make_metadata()))
+    )
+    scheduler.inbox.put(IncomingMessage("old", "stream_done", None))
+    scheduler.inbox.put(
+        IncomingMessage(
+            "old", "new_request", terminal_payload(old_rows, request_id="old")
+        )
+    )
+    pump_queued_stream_chunks(scheduler)
+    messages = drain(scheduler)
+    first_new = next(
+        i
+        for i, m in enumerate(messages)
+        if m.request_id == "new" and m.type == "stream"
+    )
+    old_done = next(
+        i
+        for i, m in enumerate(messages)
+        if m.request_id == "old" and m.type == "result"
+    )
+    assert first_new < old_done
+    for request_id, rows in (("old", old_rows), ("new", new_rows)):
+        np.testing.assert_array_equal(
+            concat_stream_audio(messages, request_id),
+            reference_waveform(rows[:, 1:]).numpy(),
+        )
+
+
+def test_short_final_tail_does_not_fragment_ongoing_chunk(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = make_scheduler(monkeypatch, processor, stream_slots=2)
+    ongoing = make_rows(30, seed=62)
+    tail = make_rows(1, seed=63)
+    scheduler.handle_stream_chunk("ongoing", stream_item(ongoing[:5], make_metadata()))
+    messages = drain(scheduler)
+    scheduler.handle_stream_chunk("ongoing", stream_item(ongoing[5:], make_metadata()))
+    scheduler.handle_stream_chunk("tail", stream_item(tail, make_metadata()))
+    scheduler.handle_stream_done("tail")
+    scheduler.handle_streaming_new_request(
+        "tail", terminal_payload(tail, request_id="tail")
+    )
+    messages += drain(scheduler)
+    sizes = [
+        decode_audio(msg.data).shape[1] // SAMPLES_PER_FRAME
+        for msg in messages
+        if msg.type == "stream" and msg.request_id == "ongoing"
+    ]
+    assert sizes == [5, 25]
+    np.testing.assert_array_equal(
+        concat_stream_audio(messages, "tail"),
+        reference_waveform(tail[:, 1:]).numpy(),
+    )
+
+
+def test_cancel_during_terminal_state_creation_keeps_scheduler_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = make_scheduler(monkeypatch, FakeProcessor())
+    cancelled_request_id = "cancelled"
+    scheduler.handle_stream_done(cancelled_request_id)
+    before_state_creation = threading.Event()
+    abort_recorded = threading.Event()
+    on_new_request = scheduler.on_streaming_new_request
+    record_abort = scheduler.record_aborted_request_id
+
+    def pause_state_creation(request_id: str, payload: StagePayload) -> None:
+        if request_id == cancelled_request_id:
+            before_state_creation.set()
+            assert abort_recorded.wait(3)
+        else:
+            pass
+        on_new_request(request_id, payload)
+
+    def signal_abort(request_id: str) -> None:
+        record_abort(request_id)
+        abort_recorded.set()
+
+    def cancel_request() -> None:
+        assert before_state_creation.wait(3)
+        scheduler.abort(cancelled_request_id)
+
+    monkeypatch.setattr(scheduler, "on_streaming_new_request", pause_state_creation)
+    monkeypatch.setattr(scheduler, "record_aborted_request_id", signal_abort)
+    cancellation = threading.Thread(target=cancel_request)
+    cancellation.start()
+    try:
+        with scheduler.state_lock:
+            scheduler.handle_streaming_new_request(
+                cancelled_request_id,
+                terminal_payload(
+                    make_rows(1, seed=90), request_id=cancelled_request_id
+                ),
+            )
+            scheduler.run_ready_step()
+    finally:
+        cancellation.join(timeout=3)
+    assert not cancellation.is_alive()
+    assert not drain(scheduler)
+
+    rows = make_rows(7, seed=91)
+    messages = run_stream(scheduler, rows, request_id="healthy")
+    np.testing.assert_array_equal(
+        concat_stream_audio(messages, "healthy"),
+        reference_waveform(rows[:, 1:]).numpy(),
+    )
+    assert any(message.type == "result" for message in messages)
 
 
 def test_batched_ingest_failure_aborts_and_cleans_up_off_lock(monkeypatch) -> None:
@@ -866,6 +1052,7 @@ def test_near_due_streams_coalesce_into_one_step(monkeypatch) -> None:
             "a", stream_item(rows_a[index], metadata, chunk_id)
         )
         chunk_id += 1
+    scheduler.run_ready_step()
     assert codec.frame_calls - calls_before == 1
     coalesced = drain(scheduler)
     sizes = {
