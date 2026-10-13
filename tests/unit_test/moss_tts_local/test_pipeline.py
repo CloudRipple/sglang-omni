@@ -16,6 +16,7 @@ from sglang_omni.client.audio import encode_audio, encode_wav
 from sglang_omni.comm.stage_io import extract_tensors, restore_tensors
 from sglang_omni.config import StageConfig
 from sglang_omni.config.placement import build_stage_placement_plan
+from sglang_omni.model_runner.prefill_inputs import get_omni_prefill_inputs
 from sglang_omni.models.moss_tts.audio_tokenizer import MossAudioEncoder
 from sglang_omni.models.moss_tts_local.config import (
     MossTTSLocalColocatedPipelineConfig,
@@ -27,6 +28,7 @@ from sglang_omni.models.moss_tts_local.local_transformer import (
     MossTTSLocalTransformer,
     rotate_half_interleaved,
 )
+from sglang_omni.models.moss_tts_local.model_runner import MossTTSLocalModelRunner
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
@@ -1564,6 +1566,23 @@ def test_encode_audio_stereo_wav_and_mono_fallback():
         np.ones(64, dtype=np.float32) * 0.1, response_format="wav", sample_rate=48000
     )
     assert struct.unpack("<H", mono_blob[22:24])[0] == 1
+
+
+def test_prefill_embeddings_preserve_graph_admission() -> None:
+    embeds = torch.randn(3, 4, dtype=torch.bfloat16)
+    runner = MossTTSLocalModelRunner.__new__(MossTTSLocalModelRunner)
+    runner.build_prefill_input_embeds = lambda batch, requests: embeds
+    batch = types.SimpleNamespace(
+        input_ids=torch.zeros(3, dtype=torch.long),
+        input_embeds=None,
+        replace_embeds=None,
+    )
+
+    runner.custom_prefill_forward(batch, None, [])
+
+    assert batch.input_embeds is None
+    assert batch.replace_embeds is None
+    assert get_omni_prefill_inputs(batch).input_embeds is embeds
 
 
 def test_post_process_outputs_skips_chunked_rows():

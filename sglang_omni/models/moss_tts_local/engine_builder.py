@@ -14,7 +14,7 @@ from sglang_omni.models.moss_tts.hf_loading import (
     MOSS_TTS_DEFAULT_CONTEXT_LENGTH,
     resolve_moss_tts_context_length,
 )
-from sglang_omni.models.moss_tts_local import request_builders
+from sglang_omni.models.moss_tts_local import CAPABILITIES, request_builders
 from sglang_omni.models.moss_tts_local import stages as moss_local_stages
 from sglang_omni.models.moss_tts_local.request_builders import (
     MossTTSLocalSGLangRequestData,
@@ -45,6 +45,7 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder[MossTTSLocalSGLangRequestData])
     context_length = MOSS_TTS_DEFAULT_CONTEXT_LENGTH
     model_arch_override = "MossTTSLocalSGLangModel"
     supports_context_length_override = True
+    supports_full_prefill_cuda_graph = CAPABILITIES.supports_full_prefill_cuda_graph
 
     def resolve_context_length(
         self,

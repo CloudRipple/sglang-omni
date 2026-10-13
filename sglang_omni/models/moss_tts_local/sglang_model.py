@@ -281,8 +281,9 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         input_embeds: Optional[torch.Tensor] = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         input_embeds_are_projected: bool = False,
+        omni_prefill_rids: list[str] | None = None,
     ) -> LogitsProcessorOutput:
-        del input_embeds_are_projected
+        del input_embeds_are_projected, omni_prefill_rids
         if input_embeds is None:
             forward_mode = getattr(forward_batch, "forward_mode", None)
             is_decode = (
