@@ -26,6 +26,7 @@ from sglang_omni.scheduling.engine_factory import (
     SchedulerExtras,
     TtsEngineBuilder,
 )
+from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
 
 if TYPE_CHECKING:
     from sglang.srt.hardware_backend.mlx.tp_worker import MlxTpModelWorker
@@ -92,6 +93,9 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder[MossTTSLocalSGLangRequestData])
             "max_running_requests": 16,
             "dtype": dtype,
             "disable_cuda_graph": False,
+            "cuda_graph_backend_prefill": CudaGraphBackend.FULL,
+            # note (Zhang Yiyang): Keep the measured buckets to bound prefill capture time and memory.
+            "cuda_graph_bs_prefill": [64, 128, 256, 512],
             "disable_overlap_schedule": True,
             # note (Zhang Yiyang): Tests showed costly startup with no consistent throughput gain from compile.
             "enable_torch_compile": False,

@@ -45,6 +45,9 @@ from sglang_omni.models.moss_tts_local.request_builders import (
 )
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.generation_batch_policy import (
+    build_generation_batch_overrides,
+)
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 from tests.unit_test.pipeline.helpers import build_compiled_process_topology
 
@@ -820,7 +823,8 @@ def test_moss_local_engine_uses_text_backbone_context(
     )
 
 
-def test_moss_tts_local_generation_defaults_disable_torch_compile() -> None:
+@pytest.mark.parametrize("disable_prefill", [False, True])
+def test_moss_tts_local_generation_defaults(disable_prefill: bool) -> None:
     builder = MossTtsLocalEngineBuilder(
         enable_async_decode=True,
         async_decode_min_batch_size=1,
@@ -828,9 +832,16 @@ def test_moss_tts_local_generation_defaults_disable_torch_compile() -> None:
         codec_mem_reserve=0.0,
     )
 
-    assert (
-        builder.generation_defaults(dtype="bfloat16")["enable_torch_compile"] is False
+    overrides = build_generation_batch_overrides(
+        **builder.generation_defaults(dtype="bfloat16"),
+        server_args_overrides={"disable_prefill_cuda_graph": disable_prefill},
     )
+    assert overrides["enable_torch_compile"] is False
+    if disable_prefill:
+        assert overrides["cuda_graph_backend_prefill"] == "disabled"
+    else:
+        assert overrides["cuda_graph_backend_prefill"] == "full"
+        assert overrides["cuda_graph_bs_prefill"] == [64, 128, 256, 512]
 
 
 def test_moss_local_context_probe_uses_runtime_model_config_inputs(

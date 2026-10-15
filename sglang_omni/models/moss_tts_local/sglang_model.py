@@ -283,7 +283,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         input_embeds_are_projected: bool = False,
         omni_prefill_rids: list[str] | None = None,
     ) -> LogitsProcessorOutput:
-        del input_embeds_are_projected, omni_prefill_rids
+        # note (Zhang Yiyang): MOSS-TTS Local ignores the shared prefill projection flag and request IDs.
         if input_embeds is None:
             forward_mode = getattr(forward_batch, "forward_mode", None)
             is_decode = (
