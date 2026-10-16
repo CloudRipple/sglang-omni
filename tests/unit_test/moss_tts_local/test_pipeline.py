@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import multiprocessing
+import os
 import pickle
 import struct
 import sys
@@ -63,6 +64,7 @@ from sglang_omni.scheduling.sglang_backend.server_args_builder import (
 )
 from sglang_omni.scheduling.stage_kv_budget import stage_kv_cache_budget
 from sglang_omni.utils.audio_payload import audio_waveform_payload
+from sglang_omni.utils.port_claim import claim_tcp_port
 from tests.unit_test.pipeline.helpers import build_compiled_process_topology
 
 N_VQ = 12
@@ -1613,6 +1615,8 @@ def test_prefill_embeddings_preserve_graph_admission() -> None:
 
 
 def check_local_prefill_graph_replay(model_path: str) -> None:
+    # note (Zhang Yiyang): The parent's distributed store may still own its port.
+    os.environ["MASTER_PORT"] = str(claim_tcp_port())
     server_args = build_sglang_server_args(
         model_path,
         context_length=256,
@@ -1708,7 +1712,9 @@ def check_local_prefill_graph_replay(model_path: str) -> None:
 
 
 @pytest.mark.accelerator
-def test_local_full_prefill_graph_replay_matches_eager() -> None:
+def test_local_full_prefill_graph_replay_matches_eager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("Full prefill with FA3 requires a Hopper or newer CUDA GPU")
     else:
@@ -1719,6 +1725,9 @@ def test_local_full_prefill_graph_replay_matches_eager() -> None:
         )
     except LocalEntryNotFoundError:
         pytest.skip("MOSS-TTS Local v1.5 checkpoint is not cached")
+    # note (Zhang Yiyang): Earlier tests may leave a live store in the parent process.
+    parent_store = torch.distributed.TCPStore("127.0.0.1", 0, 1, True)
+    monkeypatch.setenv("MASTER_PORT", str(parent_store.port))
     # note (Zhang Yiyang): SGLang runtime state belongs to a single engine process.
     process = multiprocessing.get_context("spawn").Process(
         target=check_local_prefill_graph_replay, args=(model_path,)
