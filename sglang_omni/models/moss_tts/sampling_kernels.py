@@ -12,6 +12,10 @@ from sglang.srt.layers.sampler import (
 )
 from triton.language.extra import libdevice
 
+from sglang_omni.models.moss_tts.ascend_triton_kernels import (
+    mask_sorted_top_k_npu_kernel,
+    sample_nucleus_npu_kernel,
+)
 from sglang_omni.sampling.ascend_kernels import hash32_values
 
 _UINT32_MAX_F64 = tl.constexpr(float(torch.iinfo(torch.uint32).max))
@@ -394,6 +398,90 @@ def sample_seeded_fused(
         num_warps=8 if block >= 1024 else 4,
     )
     return out
+
+
+def sample_seeded_npu(
+    logits: torch.Tensor,
+    *,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+) -> torch.Tensor:
+    """Fuse NPU sampling around native stable sort and cumulative probabilities."""
+    rows, vocab_size = logits.shape
+    if vocab_size > MAX_FUSED_SAMPLE_VOCAB:
+        return sample_seeded_branchless(
+            logits,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seeds=seeds,
+            positions=positions,
+        )
+    else:
+        pass
+    with torch.get_device_module(logits.device).device(logits.device):
+        safe_temperature = torch.where(
+            temperature > 0, temperature, torch.ones_like(temperature)
+        )
+        scores = logits / safe_temperature.unsqueeze(1)
+        sorted_scores, sorted_indices = torch.sort(
+            scores, descending=True, dim=-1, stable=True
+        )
+        masked_scores = torch.empty_like(sorted_scores)
+        block_size = triton.next_power_of_2(vocab_size)
+        top_k_words = (
+            top_k.to(torch.int64)
+            .contiguous()
+            .unsqueeze(-1)
+            .view(torch.int32)
+            .reshape(-1)
+        )
+        mask_sorted_top_k_npu_kernel[(rows,)](
+            sorted_scores,
+            top_k_words,
+            masked_scores,
+            vocab_size,
+            block_size,
+            enable_fp_fusion=False,
+        )
+        cumulative_probabilities = torch.cumsum(
+            torch.softmax(masked_scores, dim=-1), dim=-1
+        )
+        output = torch.empty(rows, device=logits.device, dtype=torch.int64)
+        seed_words = (
+            seeds.to(torch.int64)
+            .contiguous()
+            .unsqueeze(-1)
+            .view(torch.int32)
+            .reshape(-1)
+        )
+        position_words = (
+            positions.to(torch.int64)
+            .contiguous()
+            .unsqueeze(-1)
+            .view(torch.int32)
+            .reshape(-1)
+        )
+        sample_nucleus_npu_kernel[(rows,)](
+            masked_scores,
+            sorted_indices.view(torch.int32),
+            cumulative_probabilities,
+            logits,
+            top_p.contiguous(),
+            temperature.contiguous(),
+            seed_words,
+            position_words,
+            output.view(torch.int32),
+            vocab_size,
+            logits.stride(0),
+            logits.stride(1),
+            block_size,
+            enable_fp_fusion=False,
+        )
+        return output
 
 
 def sample_seeded_branchless(

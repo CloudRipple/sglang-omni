@@ -7,6 +7,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang_omni.models.moss_tts.ascend_triton_kernels import (
+    local_rotary_cache_npu_kernel,
+)
+
 try:
     import triton
     import triton.language as tl
@@ -224,6 +228,7 @@ class MossTTSLocalTransformer(nn.Module):
             normed = block.ln_1(x)
             qkv = block.attn.c_attn(normed)
             key_cache, value_cache = self.kv_cache[layer_idx]
+            # note (Zhang Yiyang): NPU aliases is_cuda, but this kernel changes BF16 key rounding on Ascend.
             if (
                 triton is not None
                 and qkv.device.type == "cuda"
@@ -252,6 +257,32 @@ class MossTTSLocalTransformer(nn.Module):
                     ROTARY_CACHE_BLOCK_SIZE,
                     enable_fp_fusion=False,
                 )
+            elif (
+                triton is not None
+                and qkv.device.type == "npu"
+                and qkv.dtype == torch.bfloat16
+            ):
+                query = torch.empty(
+                    (batch_size, self.num_heads, self.head_dim),
+                    device=qkv.device,
+                    dtype=qkv.dtype,
+                )
+                # note (Zhang Yiyang): Round coefficients before NPU fusion to preserve native BF16 RoPE arithmetic.
+                with torch.get_device_module(qkv.device).device(qkv.device):
+                    local_rotary_cache_npu_kernel[(batch_size * self.num_heads,)](
+                        qkv,
+                        cos.to(dtype=qkv.dtype),
+                        sin.to(dtype=qkv.dtype),
+                        query,
+                        key_cache,
+                        value_cache,
+                        position,
+                        self.num_heads,
+                        self.head_dim,
+                        self.max_positions,
+                        triton.next_power_of_2(self.head_dim),
+                        enable_fp_fusion=False,
+                    )
             else:
                 cos = cos.to(dtype=hidden_states.dtype)
                 sin = sin.to(dtype=hidden_states.dtype)

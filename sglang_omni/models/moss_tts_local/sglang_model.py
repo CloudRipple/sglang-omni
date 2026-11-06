@@ -34,6 +34,7 @@ from sglang_omni.models.moss_tts.sampling_kernels import (
     MAX_FUSED_SAMPLE_VOCAB,
     sample_seeded_branchless,
     sample_seeded_fused,
+    sample_seeded_npu,
 )
 from sglang_omni.models.moss_tts_local.local_transformer import MossTTSLocalTransformer
 from sglang_omni.models.moss_tts_local.payload_types import (
@@ -375,7 +376,11 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
     def ensure_frame_sampler_compile(self) -> None:
         if self.compiled_frame_sampler is None:
             if self.device.type == "npu":
-                self.compiled_frame_sampler = sample_seeded_branchless
+                self.compiled_frame_sampler = (
+                    sample_seeded_npu
+                    if os.environ.get("MOSS_LOCAL_FUSED_FRAME_SAMPLER", "1") != "0"
+                    else sample_seeded_branchless
+                )
                 self.sample_seeded_branchless = self.compiled_frame_sampler
                 return
             else:
