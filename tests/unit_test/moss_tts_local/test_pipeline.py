@@ -50,6 +50,7 @@ from sglang_omni.models.moss_tts_local.request_builders import (
     set_moss_tts_local_preprocessing_context,
 )
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
 from sglang_omni.scheduling.generation_batch_policy import (
@@ -249,13 +250,26 @@ def test_local_transformer_rejects_out_of_range_position():
 
 
 @pytest.mark.accelerator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("batch_size,head_dim", [(1, 8), (3, 80), (16, 80)])
 @torch.no_grad()
 def test_local_transformer_fused_rotary_matches_eager(
-    monkeypatch, dtype, batch_size, head_dim
+    monkeypatch, dtype, batch_size, head_dim, device_type
 ):
+    """NPU must preserve the eager KV rounding despite CUDA compatibility aliases."""
+    if device_type != current_platform.device_type:
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    if not torch.get_device_module(device_type).is_available():
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    if device_type == "npu":
+        pytest.importorskip("torch_npu.contrib.transfer_to_npu")
+    else:
+        pass
     pytest.importorskip("triton")
     torch.manual_seed(42)
     hidden_size = 4 * head_dim
@@ -266,15 +280,19 @@ def test_local_transformer_fused_rotary_matches_eager(
         num_layers=2,
         max_positions=N_VQ + 1,
         rope_base=1_000_000.0,
-    ).to(device="cuda", dtype=dtype)
+    )
+    cosine, sine = module.rope_cos, module.rope_sin
+    module.to(device=device_type, dtype=dtype)
+    module.rope_cos = cosine.to(device=device_type)
+    module.rope_sin = sine.to(device=device_type)
     reference = copy.deepcopy(module)
     for decoder in (module, reference):
-        decoder.ensure_kv_cache(batch_size + 2, torch.device("cuda"), dtype)
+        decoder.ensure_kv_cache(batch_size + 2, torch.device(device_type), dtype)
         for key, value in decoder.kv_cache:
             key.fill_(7)
             value.fill_(7)
     for position in range(N_VQ + 1):
-        inputs = torch.randn(batch_size, hidden_size, device="cuda", dtype=dtype)
+        inputs = torch.randn(batch_size, hidden_size, device=device_type, dtype=dtype)
         actual = module.step(inputs, position)
         with monkeypatch.context() as patch:
             patch.setattr(
@@ -288,9 +306,24 @@ def test_local_transformer_fused_rotary_matches_eager(
 
 
 @pytest.mark.accelerator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
 @torch.no_grad()
-def test_local_transformer_fused_rotary_graph_replay(monkeypatch):
+def test_local_transformer_fused_rotary_graph_replay(monkeypatch, device_type):
+    if device_type != current_platform.device_type:
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    device_module = torch.get_device_module(device_type)
+    if not device_module.is_available():
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    graph_backend = current_platform.get_device_graph_backend(torch.device(device_type))
+    assert graph_backend is not None
+    if device_type == "npu":
+        pytest.importorskip("torch_npu.contrib.transfer_to_npu")
+    else:
+        pass
     pytest.importorskip("triton")
     module = MossTTSLocalTransformer(
         hidden_size=320,
@@ -299,14 +332,13 @@ def test_local_transformer_fused_rotary_graph_replay(monkeypatch):
         num_layers=1,
         max_positions=N_VQ + 1,
         rope_base=1_000_000.0,
-    ).to(device="cuda", dtype=torch.bfloat16)
+    ).to(device=device_type, dtype=torch.bfloat16)
     reference = copy.deepcopy(module)
-    inputs = torch.randn(N_VQ + 1, 3, 320, device="cuda", dtype=torch.bfloat16)
+    inputs = torch.randn(N_VQ + 1, 3, 320, device=device_type, dtype=torch.bfloat16)
     for position in range(N_VQ + 1):
         module.step(inputs[position], position)
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    device_module.synchronize()
+    with graph_backend.capture() as graph:
         outputs = [
             module.step(inputs[position], position) for position in range(N_VQ + 1)
         ]
@@ -834,7 +866,13 @@ def test_moss_local_engine_uses_text_backbone_context(
 
 
 @pytest.mark.parametrize("disable_prefill", [False, True])
-def test_moss_tts_local_generation_defaults(disable_prefill: bool) -> None:
+@pytest.mark.parametrize("npu", [False, True])
+def test_moss_tts_local_generation_defaults(
+    disable_prefill: bool, npu: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sglang_omni.models.moss_tts_local import engine_builder
+
+    monkeypatch.setattr(engine_builder.current_platform, "is_npu", lambda: npu)
     builder = MossTtsLocalEngineBuilder(
         enable_async_decode=True,
         async_decode_min_batch_size=1,
@@ -847,7 +885,8 @@ def test_moss_tts_local_generation_defaults(disable_prefill: bool) -> None:
         server_args_overrides={"disable_prefill_cuda_graph": disable_prefill},
     )
     assert overrides["enable_torch_compile"] is False
-    if disable_prefill:
+    assert overrides["disable_cuda_graph"] is False
+    if disable_prefill or npu:
         assert overrides["cuda_graph_backend_prefill"] == "disabled"
     else:
         assert overrides["cuda_graph_backend_prefill"] == "full"
@@ -1355,13 +1394,24 @@ def test_build_generation_kwargs_precedence():
 
 
 @pytest.mark.accelerator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_decode_frame_graphed_matches_branchless_eager():
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+def test_decode_frame_graphed_matches_branchless_eager(device_type: str):
     """The captured frame graph must reproduce the branchless eager decode."""
     from sglang_omni.models.moss_tts.sampling_kernels import sample_seeded_branchless
+    from sglang_omni.platforms import current_platform
 
+    if device_type != current_platform.device_type:
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    device = torch.device(device_type)
+    device_module = torch.get_device_module(device)
+    if not device_module.is_available():
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    graph_backend = current_platform.get_device_graph_backend(device)
     torch.manual_seed(11)
-    device = torch.device("cuda")
     module = MossTTSLocalTransformer(
         hidden_size=64,
         num_heads=4,
@@ -1400,15 +1450,14 @@ def test_decode_frame_graphed_matches_branchless_eager():
     static_seeds = torch.zeros(batch, device=device, dtype=torch.long)
     static_base = torch.zeros(batch, device=device, dtype=torch.long)
 
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
+    stream = device_module.Stream(device=device)
+    stream.wait_stream(device_module.current_stream(device))
+    with device_module.stream(stream):
         for _ in range(2):
             frame(static_hidden, static_seeds, static_base)
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    device_module.current_stream(device).wait_stream(stream)
+    device_module.synchronize(device)
+    with graph_backend.capture(stream=stream) as graph:
         graphed_codes = frame(static_hidden, static_seeds, static_base)
 
     hidden = torch.randn(batch, 64, device=device, dtype=torch.bfloat16)
@@ -1426,24 +1475,38 @@ def test_decode_frame_graphed_matches_branchless_eager():
 
 
 @pytest.mark.accelerator
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="needs CUDA: post1 multinomial_with_seed is a Triton kernel (no CPU backend)",
-)
-def test_branchless_sampler_matches_eager_sampler():
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+@pytest.mark.parametrize("vocab", [2, 1024])
+@pytest.mark.parametrize("tied", [False, True])
+def test_branchless_sampler_matches_eager_sampler(
+    device_type: str, vocab: int, tied: bool
+):
     """The CUDA-graphable sampler must reproduce the eager path exactly."""
     pytest.importorskip("sglang")
     from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
     from sglang_omni.models.moss_tts.sampling_kernels import sample_seeded_branchless
+    from sglang_omni.platforms import current_platform
 
+    if device_type != current_platform.device_type:
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
+    if not torch.get_device_module(device_type).is_available():
+        pytest.skip(f"requires {device_type}")
+    else:
+        pass
     torch.manual_seed(7)
-    rows, vocab = 6, 64
-    logits = torch.randn(rows, vocab, dtype=torch.float32, device="cuda") * 3
-    temperature = torch.tensor([1.7, 1.0, 0.5, 1.7, 0.0, 1.7], device="cuda")
-    top_p = torch.tensor([0.8, 1.0, 0.9, 0.8, 0.8, 0.8], device="cuda")
-    top_k = torch.tensor([25, 50, 8, 64, 25, 1], dtype=torch.long, device="cuda")
-    seeds = torch.arange(rows, dtype=torch.long, device="cuda") * 1234567
-    positions = torch.arange(rows, dtype=torch.long, device="cuda") * 13
+    rows = 6
+    logits = torch.randn(rows, vocab, dtype=torch.float32, device=device_type) * 3
+    if tied:
+        logits.round_()
+    else:
+        pass
+    temperature = torch.tensor([1.7, 1.0, 0.5, 1.7, 0.0, 1.7], device=device_type)
+    top_p = torch.tensor([0.8, 1.0, 0.9, 0.8, 0.8, 0.8], device=device_type)
+    top_k = torch.tensor([25, 50, 8, 64, 25, 1], dtype=torch.long, device=device_type)
+    seeds = torch.arange(rows, dtype=torch.long, device=device_type) * 1234567
+    positions = torch.arange(rows, dtype=torch.long, device=device_type) * 13
 
     eager = MossTTSModelRunner.sample_tokens(
         logits.clone(),

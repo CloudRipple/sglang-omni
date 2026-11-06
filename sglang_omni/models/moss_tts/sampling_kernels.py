@@ -7,10 +7,58 @@ import torch
 import triton
 import triton.language as tl
 from sglang.kernels.ops.sampling.murmur_hash import fmix32, murmur3_mix, murmur_hash32
-from sglang.srt.layers.sampler import multinomial_with_seed
+from sglang.srt.layers.sampler import (
+    multinomial_with_seed as sglang_multinomial_with_seed,
+)
 from triton.language.extra import libdevice
 
+from sglang_omni.sampling.ascend_kernels import hash32_values
+
 _UINT32_MAX_F64 = tl.constexpr(float(torch.iinfo(torch.uint32).max))
+NPU_HASH_BLOCK_SIZE = 256
+
+
+@triton.jit
+def seeded_uniform_kernel(
+    seeds: tl.tensor,
+    positions: tl.tensor,
+    output: tl.tensor,
+    width: tl.constexpr,
+    block_size: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    column = tl.program_id(1) * block_size + tl.arange(0, block_size)
+    hashes = hash32_values(seeds, positions, row, column)
+    high = ((hashes >> 16) & 0xFFFF).to(tl.int32).to(tl.float32)
+    low = (hashes & 0xFFFF).to(tl.int32).to(tl.float32)
+    uniform = high * (1.0 / 65536.0) + low * (1.0 / 4294967296.0)
+    tl.store(output + row * width + column, uniform, column < width)
+
+
+def multinomial_with_seed(
+    logprobs: torch.Tensor, seed: torch.Tensor, positions: torch.Tensor
+) -> torch.Tensor:
+    """Avoid unsigned casts and 64-bit vector rotations on NPU."""
+    if logprobs.device.type != "npu":
+        return sglang_multinomial_with_seed(logprobs, seed, positions)
+    else:
+        pass
+    rows, width = logprobs.shape
+    uniform = torch.empty((rows, width), device=logprobs.device, dtype=torch.float32)
+    with torch.get_device_module(logprobs.device).device(logprobs.device):
+        seeded_uniform_kernel[(rows, triton.cdiv(width, NPU_HASH_BLOCK_SIZE))](
+            seed.to(torch.int64).contiguous().view(torch.int32),
+            positions.to(torch.int64).contiguous().view(torch.int32),
+            uniform,
+            width,
+            NPU_HASH_BLOCK_SIZE,
+            enable_fp_fusion=False,
+        )
+    # note (Zhang Yiyang): Keep the NPU float32 Gumbel operations and endpoint clamps after exact hashing.
+    uniform.log_().clamp_(min=torch.finfo(uniform.dtype).min, max=-(2.0**-32)).neg_()
+    uniform.log_().neg_()
+    uniform.add_(logprobs)
+    return torch.argmax(uniform, dim=1, keepdim=True)
 
 
 @triton.jit
@@ -385,10 +433,12 @@ def sample_seeded_branchless(
     remove[..., 1:] = remove[..., :-1].clone()
     remove[..., 0] = False
     remove = remove & p_active.unsqueeze(1)
-    remove_scattered = torch.zeros_like(scores, dtype=torch.bool).scatter_(
-        -1, sorted_indices, remove
+    # note (Zhang Yiyang): Boolean scatter falls back to AI CPU on NPU; integer masks preserve the same decisions.
+    mask_dtype = torch.int32 if scores.device.type == "npu" else torch.bool
+    remove_scattered = torch.zeros_like(scores, dtype=mask_dtype).scatter_(
+        -1, sorted_indices, remove.to(mask_dtype)
     )
-    scores = scores.masked_fill(remove_scattered, float("-inf"))
+    scores = scores.masked_fill(remove_scattered.bool(), float("-inf"))
 
     probs = torch.softmax(scores, dim=-1)
     probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -399,8 +449,10 @@ def sample_seeded_branchless(
 
 __all__ = [
     "MAX_FUSED_SAMPLE_VOCAB",
+    "multinomial_with_seed",
     "multinomial_with_seed_and_token_ids",
     "sample_seeded_branchless",
     "sample_seeded_fused",
+    "sample_seeded_npu",
     "seeded_gumbel_argmax",
 ]

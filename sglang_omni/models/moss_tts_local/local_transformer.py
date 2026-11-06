@@ -226,7 +226,7 @@ class MossTTSLocalTransformer(nn.Module):
             key_cache, value_cache = self.kv_cache[layer_idx]
             if (
                 triton is not None
-                and qkv.is_cuda
+                and qkv.device.type == "cuda"
                 and qkv.dtype in (torch.float16, torch.bfloat16, torch.float32)
             ):
                 query = torch.empty(

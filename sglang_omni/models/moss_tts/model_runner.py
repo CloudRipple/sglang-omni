@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import torch
-from sglang.srt.layers.sampler import multinomial_with_seed
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
@@ -23,6 +22,7 @@ from sglang_omni.models.moss_tts.request_builders import (
 )
 from sglang_omni.models.moss_tts.sampler import DelayGraphBatch
 from sglang_omni.models.moss_tts.sampling_kernels import (
+    multinomial_with_seed,
     multinomial_with_seed_and_token_ids,
 )
 from sglang_omni.scheduling.types import (

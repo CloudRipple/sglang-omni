@@ -631,3 +631,35 @@ def test_segment_graph_replay_retains_lengths_and_independent_waveforms() -> Non
         assert torch.equal(actual, expected)
     assert not graphs.covers(torch.zeros(3, 3, dtype=torch.long))
     assert not graphs.covers(torch.zeros(2, 4, dtype=torch.long))
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(
+    not hasattr(torch, "npu") or not torch.npu.is_available(), reason="NPU is required"
+)
+@pytest.mark.parametrize("decoder_dtype", [torch.bfloat16, torch.float32])
+def test_npu_padded_decode_matches_decoder_precision(decoder_dtype) -> None:
+    """Non-streaming NPU decode must not feed FP32 activations to BF16 LayerNorm."""
+
+    class Decoder(nn.LayerNorm):
+        def forward(self, hidden, lengths, *, input_lengths_cpu):
+            return super().forward(hidden), lengths
+
+    decoder = Decoder(4, device="npu", dtype=decoder_dtype).eval()
+    codes = torch.arange(8, device="npu").reshape(1, 2, 4)
+    lengths = torch.tensor([4, 4], device="npu", dtype=torch.int32)
+    hidden = codes[0].float()
+    actual, actual_lengths = vocoder_module.decode_padded_codes(
+        codes,
+        lengths,
+        [4, 4],
+        quantizer_decode=lambda codes: codes[0].float(),
+        decoder=decoder,
+        compute_dtype=decoder_dtype,
+    )
+    with torch.inference_mode():
+        expected, _ = decoder(
+            hidden.to(decoder_dtype), lengths, input_lengths_cpu=[4, 4]
+        )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lengths, lengths)

@@ -19,6 +19,7 @@ from sglang_omni.models.moss_tts_local import stages as moss_local_stages
 from sglang_omni.models.moss_tts_local.request_builders import (
     MossTTSLocalSGLangRequestData,
 )
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.bootstrap import InfrastructureOptions
 from sglang_omni.scheduling.engine_factory import (
@@ -92,7 +93,12 @@ class MossTtsLocalEngineBuilder(TtsEngineBuilder[MossTTSLocalSGLangRequestData])
             "max_running_requests": 16,
             "dtype": dtype,
             "disable_cuda_graph": False,
-            "cuda_graph_backend_prefill": CudaGraphBackend.FULL,
+            # note (Zhang Yiyang): Ascend prefill requires the BCG contract, which Local has not adopted.
+            "cuda_graph_backend_prefill": (
+                CudaGraphBackend.DISABLED
+                if current_platform.is_npu()
+                else CudaGraphBackend.FULL
+            ),
             # note (Zhang Yiyang): Keep the measured buckets to bound prefill capture time and memory.
             "cuda_graph_bs_prefill": [64, 128, 256, 512],
             "disable_overlap_schedule": True,

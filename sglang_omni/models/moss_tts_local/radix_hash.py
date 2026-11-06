@@ -57,6 +57,8 @@ _MOD = 2147483647  # 2**31 - 1, Mersenne prime M31
 _BASE = 1000000007  # 1e9 + 7, prime, < _MOD
 
 _TRITON_BLOCK_SIZE = 128
+# note (Zhang Yiyang): Smaller vectors reduced Ascend hash latency across batches 1 through 32.
+NPU_RADIX_HASH_BLOCK_SIZE = 32
 
 
 if triton is not None:
@@ -210,7 +212,7 @@ def gpu_radix_row_hash(
     """
     if (
         radix_row_hash_kernel is not None
-        and rows.device.type == "cuda"
+        and rows.device.type in ("cuda", "npu")
         and rows.ndim == 2
         and rows.dtype in (torch.int32, torch.int64)
         and next_text.device == rows.device
@@ -224,8 +226,13 @@ def gpu_radix_row_hash(
             return output
         else:
             pass
-        with torch.cuda.device(rows.device):
-            radix_row_hash_kernel[(triton.cdiv(rows.shape[0], _TRITON_BLOCK_SIZE),)](
+        block_size = (
+            NPU_RADIX_HASH_BLOCK_SIZE
+            if rows.device.type == "npu"
+            else _TRITON_BLOCK_SIZE
+        )
+        with torch.get_device_module(rows.device).device(rows.device):
+            radix_row_hash_kernel[(triton.cdiv(rows.shape[0], block_size),)](
                 rows,
                 next_text,
                 output,
@@ -238,7 +245,7 @@ def gpu_radix_row_hash(
                 hash_space,
                 MOD=_MOD,
                 BASE=_BASE,
-                BLOCK_SIZE=_TRITON_BLOCK_SIZE,
+                BLOCK_SIZE=block_size,
                 num_warps=4,
             )
         return output
@@ -268,7 +275,7 @@ def build_rows_and_radix_token_ids(
     """
     if (
         build_rows_and_hash_kernel is not None
-        and stop_choice.device.type == "cuda"
+        and stop_choice.device.type in ("cuda", "npu")
         and codes.device == stop_choice.device
         and stop_choice.ndim == 1
         and codes.ndim == 2
@@ -288,8 +295,13 @@ def build_rows_and_radix_token_ids(
             return rows, ids
         else:
             pass
-        with torch.cuda.device(codes.device):
-            build_rows_and_hash_kernel[(triton.cdiv(batch_size, _TRITON_BLOCK_SIZE),)](
+        block_size = (
+            NPU_RADIX_HASH_BLOCK_SIZE
+            if codes.device.type == "npu"
+            else _TRITON_BLOCK_SIZE
+        )
+        with torch.get_device_module(codes.device).device(codes.device):
+            build_rows_and_hash_kernel[(triton.cdiv(batch_size, block_size),)](
                 stop_choice,
                 codes,
                 rows,
@@ -304,7 +316,7 @@ def build_rows_and_radix_token_ids(
                 hash_space,
                 MOD=_MOD,
                 BASE=_BASE,
-                BLOCK_SIZE=_TRITON_BLOCK_SIZE,
+                BLOCK_SIZE=block_size,
                 num_warps=4,
             )
         return rows, ids

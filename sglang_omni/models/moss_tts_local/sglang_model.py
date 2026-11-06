@@ -40,6 +40,8 @@ from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
 from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeStatePool
+from sglang_omni.platforms import current_platform
+from sglang_omni.platforms.device_graph import ReplayableGraph
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +374,12 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
 
     def ensure_frame_sampler_compile(self) -> None:
         if self.compiled_frame_sampler is None:
+            if self.device.type == "npu":
+                self.compiled_frame_sampler = sample_seeded_branchless
+                self.sample_seeded_branchless = self.compiled_frame_sampler
+                return
+            else:
+                pass
             if os.environ.get("MOSS_LOCAL_FUSED_FRAME_SAMPLER", "1") != "0":
                 self.compiled_frame_sampler = self.fused_or_branchless_sampler
                 self.sample_seeded_branchless = self.fused_or_branchless_sampler
@@ -467,7 +475,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
     @torch.no_grad()
     def init_frame_decode_graphs(self, batch_sizes: list[int]) -> None:
         """Capture the per-frame local decode (1 + n_vq micro-steps plus all
-        13 seeded sampling passes) into one CUDA graph per batch-size bucket.
+        13 seeded sampling passes) into one device graph per batch-size bucket.
 
         Eager execution launches ~500 kernels per frame (~22 ms regardless of
         batch size); replay collapses that to a few milliseconds. Must run
@@ -479,6 +487,9 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         else:
             pass
         device = self.device
+        device_module = torch.get_device_module(device)
+        graph_backend = current_platform.get_device_graph_backend(device)
+        assert graph_backend is not None
         max_eager_bs = int(self.decode_input_embedding.weight.shape[0])
         self.local_transformer.ensure_kv_cache(
             max(max(buckets), max_eager_bs), device, self.dtype
@@ -489,7 +500,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         self.frame_graphs: dict[
             int,
             tuple[
-                torch.cuda.CUDAGraph,
+                ReplayableGraph,
                 dict[str, torch.Tensor],
                 torch.Tensor,
                 torch.Tensor,
@@ -518,15 +529,14 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
                 "seeds": torch.zeros(bucket, device=device, dtype=torch.long),
                 "base_positions": torch.zeros(bucket, device=device, dtype=torch.long),
             }
-            warmup_stream = torch.cuda.Stream()
-            warmup_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(warmup_stream):
+            warmup_stream = device_module.Stream(device=device)
+            warmup_stream.wait_stream(device_module.current_stream(device))
+            with device_module.stream(warmup_stream):
                 for _ in range(2):
                     frame_decode(**static_inputs)
-            torch.cuda.current_stream().wait_stream(warmup_stream)
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+            device_module.current_stream(device).wait_stream(warmup_stream)
+            device_module.synchronize(device)
+            with graph_backend.capture(stream=warmup_stream) as graph:
                 stop_choice, codes, feedback = frame_decode(**static_inputs)
             self.frame_graphs[bucket] = (
                 graph,
@@ -536,7 +546,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
                 feedback,
             )
         logger.info(
-            f"MOSS-TTS Local frame-decode CUDA graphs captured for bs={buckets}"
+            f"MOSS-TTS Local frame-decode {device.type.upper()} graphs captured for bs={buckets}"
         )
 
     @property

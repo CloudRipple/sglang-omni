@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generated-row radix hash properties, CUDA equivalence, and graph replay."""
+"""Generated-row radix hash properties, device equivalence, and graph replay."""
 
 from __future__ import annotations
 
@@ -14,13 +14,18 @@ from sglang_omni.models.moss_tts_local.radix_hash import (
     gpu_radix_row_hash,
     poly_row_hash,
 )
+from sglang_omni.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
+DEVICE_MODULE = torch.get_device_module(DEVICE_TYPE)
 
 N_CHANNELS = 13  # text channel + 12 RVQ codes (n_vq = 12)
 END_ID = 151670  # audio_end_token_id: in the special band (>= RADIX_HASH_SPACE)
 SLOT_ID = 151646  # audio_assistant_slot_token_id: text channel of a continuing frame
 
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is required"
+requires_device = pytest.mark.skipif(
+    DEVICE_TYPE not in ("cuda", "npu") or not DEVICE_MODULE.is_available(),
+    reason="CUDA or NPU is required",
 )
 
 
@@ -116,13 +121,13 @@ def test_build_rows_and_ids_cpu_matches_split_reference():
 
 
 @pytest.mark.accelerator
-@requires_cuda
+@requires_device
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize(
     "shape", [(0, 13), (4, 0), (1, 1), (3, 7), (16, 13), (129, 33)]
 )
 @pytest.mark.parametrize("strided", [False, True])
-def test_cuda_matches_python_reference(shape, dtype, strided):
+def test_device_matches_python_reference(shape, dtype, strided):
     batch, channels = shape
     rows = torch.randint(-4096, 4096, shape, dtype=dtype)
     limits = torch.iinfo(dtype)
@@ -140,12 +145,12 @@ def test_cuda_matches_python_reference(shape, dtype, strided):
         dtype=torch.int64,
     )
     if strided:
-        storage = torch.empty((batch, channels * 2), device="cuda", dtype=dtype)
+        storage = torch.empty((batch, channels * 2), device=DEVICE_TYPE, dtype=dtype)
         device_rows = storage[:, ::2]
         device_rows.copy_(rows)
     else:
-        device_rows = rows.cuda()
-    text_storage = torch.empty((batch, 2), device="cuda", dtype=dtype)
+        device_rows = rows.to(DEVICE_TYPE)
+    text_storage = torch.empty((batch, 2), device=DEVICE_TYPE, dtype=dtype)
     device_text = text_storage[:, 1]
     device_text.copy_(text)
     actual = gpu_radix_row_hash(device_rows, device_text, END_ID, hash_space=hash_space)
@@ -155,10 +160,10 @@ def test_cuda_matches_python_reference(shape, dtype, strided):
 
 
 @pytest.mark.accelerator
-@requires_cuda
+@requires_device
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("strided", [False, True])
-def test_cuda_row_builder_tail_matches_python_reference(dtype, strided):
+def test_device_row_builder_tail_matches_python_reference(dtype, strided):
     batch = 129
     channels = N_CHANNELS - 1
     codes = (torch.arange(batch * channels) % 1024).reshape(batch, channels)
@@ -173,15 +178,17 @@ def test_cuda_row_builder_tail_matches_python_reference(dtype, strided):
         dtype=torch.int64,
     )
     if strided:
-        code_storage = torch.empty((batch, channels * 2), device="cuda", dtype=dtype)
+        code_storage = torch.empty(
+            (batch, channels * 2), device=DEVICE_TYPE, dtype=dtype
+        )
         device_codes = code_storage[:, ::2]
         device_codes.copy_(codes)
-        stop_storage = torch.empty(batch * 2, device="cuda", dtype=dtype)
+        stop_storage = torch.empty(batch * 2, device=DEVICE_TYPE, dtype=dtype)
         device_stop = stop_storage[::2]
         device_stop.copy_(stop)
     else:
-        device_codes = codes.to(device="cuda", dtype=dtype)
-        device_stop = stop.to(device="cuda", dtype=dtype)
+        device_codes = codes.to(device=DEVICE_TYPE, dtype=dtype)
+        device_stop = stop.to(device=DEVICE_TYPE, dtype=dtype)
 
     rows, ids = build_rows_and_radix_token_ids(
         device_stop, device_codes, SLOT_ID, END_ID
@@ -194,17 +201,18 @@ def test_cuda_row_builder_tail_matches_python_reference(dtype, strided):
 
 
 @pytest.mark.accelerator
-@requires_cuda
-def test_cuda_graph_replays_new_rows_and_eos():
-    rows = torch.zeros((16, N_CHANNELS), device="cuda", dtype=torch.int64)
+@requires_device
+def test_device_graph_replays_new_rows_and_eos():
+    rows = torch.zeros((16, N_CHANNELS), device=DEVICE_TYPE, dtype=torch.int64)
     text = rows[:, 0]
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
+    stream = DEVICE_MODULE.Stream()
+    stream.wait_stream(DEVICE_MODULE.current_stream())
+    with DEVICE_MODULE.stream(stream):
         gpu_radix_row_hash(rows, text, END_ID)
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    DEVICE_MODULE.current_stream().wait_stream(stream)
+    backend = current_platform.get_device_graph_backend(torch.device(DEVICE_TYPE))
+    assert backend is not None
+    with backend.capture(stream=stream) as graph:
         actual = gpu_radix_row_hash(rows, text, END_ID)
     for step in range(3):
         host_rows = torch.randint(0, 4096, rows.shape, dtype=torch.int64)
@@ -217,17 +225,18 @@ def test_cuda_graph_replays_new_rows_and_eos():
 
 
 @pytest.mark.accelerator
-@requires_cuda
-def test_cuda_graph_replays_row_builder():
-    stop = torch.zeros(16, device="cuda", dtype=torch.int64)
-    codes = torch.zeros((16, N_CHANNELS - 1), device="cuda", dtype=torch.int64)
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
+@requires_device
+def test_device_graph_replays_row_builder():
+    stop = torch.zeros(16, device=DEVICE_TYPE, dtype=torch.int64)
+    codes = torch.zeros((16, N_CHANNELS - 1), device=DEVICE_TYPE, dtype=torch.int64)
+    stream = DEVICE_MODULE.Stream()
+    stream.wait_stream(DEVICE_MODULE.current_stream())
+    with DEVICE_MODULE.stream(stream):
         build_rows_and_radix_token_ids(stop, codes, SLOT_ID, END_ID)
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    DEVICE_MODULE.current_stream().wait_stream(stream)
+    backend = current_platform.get_device_graph_backend(torch.device(DEVICE_TYPE))
+    assert backend is not None
+    with backend.capture(stream=stream) as graph:
         actual_rows, actual_ids = build_rows_and_radix_token_ids(
             stop, codes, SLOT_ID, END_ID
         )

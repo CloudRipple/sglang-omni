@@ -164,6 +164,13 @@ def decode_padded_codes(
         # the attention backend.
         with torch.autocast(device_type=device.type, enabled=False):
             decoder_hidden_states = quantizer_decode(audio_codes).float()
+        # note (Zhang Yiyang): NPU LayerNorm requires matching input and parameter dtypes outside autocast.
+        if device.type == "npu":
+            decoder_hidden_states = decoder_hidden_states.to(
+                dtype=module_dtype(decoder)
+            )
+        else:
+            pass
         with autocast_if_supported(device, compute_dtype):
             return decoder(
                 decoder_hidden_states,
