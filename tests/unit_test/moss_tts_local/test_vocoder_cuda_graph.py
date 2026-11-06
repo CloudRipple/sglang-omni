@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
+import os
 
 import pytest
 import torch
+
+from sglang_omni.platforms import current_platform
 
 pytestmark = pytest.mark.accelerator
 
@@ -22,7 +22,11 @@ PCM_CASES = [
     for chunk_t in CHUNK_TS
     for n_active in [1, 3, 8]
 ] + [(5, 1, 75), (25, 1, 75)]
-HAS_CUDA = torch.cuda.is_available()
+DEVICE_TYPE = current_platform.device_type
+HAS_DEVICE = (
+    DEVICE_TYPE in ("cuda", "npu")
+    and torch.get_device_module(DEVICE_TYPE).is_available()
+)
 
 
 def codebook_size(codec) -> int:
@@ -46,14 +50,16 @@ def session_bundle():
     from sglang_omni.models.moss_tts.codec_session import CodecStreamSession
 
     try:
-        model_path = snapshot_download(CODEC_MODEL_ID, local_files_only=True)
+        model_path = os.environ.get(
+            "MOSS_AUDIO_TOKENIZER_MODEL_PATH"
+        ) or snapshot_download(CODEC_MODEL_ID, local_files_only=True)
     except LocalEntryNotFoundError:
         pytest.skip("MOSS-Audio-Tokenizer-v2 codec snapshot not found")
     # Exercise the production loader. The remote AutoModel lacks the native
     # state API and would silently skip every graph correctness test.
     codec = load_moss_audio_vocoder(
         model_path,
-        device="cuda:0",
+        device=f"{DEVICE_TYPE}:0",
         decoder_dtype=torch.float32,
         compute_dtype=torch.bfloat16,
     ).model
@@ -120,7 +126,7 @@ def decode_chunks(session, slot_seqs, chunk_t, *, require_graph=False):
     return {s: torch.cat(parts[s], dim=-1) for s in slots}
 
 
-@pytest.mark.skipif(not HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
 def test_indexed_streaming_matches_sequential_precision_and_cache_order(session_bundle):
     from sglang_omni.models.moss_tts.attention import MossAudioTokenizerStreamingModule
     from sglang_omni.models.moss_tts.audio_tokenizer import (
@@ -138,13 +144,19 @@ def test_indexed_streaming_matches_sequential_precision_and_cache_order(session_
     session.reset_slots(active_slots)
     torch.manual_seed(912)
     with reference.streaming(batch_size), torch.no_grad():
-        mask = torch.arange(batch_size, device="cuda") < len(active_slots)
+        mask = torch.arange(batch_size, device=DEVICE_TYPE) < len(active_slots)
         reference.set_streaming_exec_mask(mask)
         for length in [5, 25, 7]:
-            codes = torch.randint(0, vocab, (n_vq, batch_size, length), device="cuda")
+            codes = torch.randint(
+                0, vocab, (n_vq, batch_size, length), device=DEVICE_TYPE
+            )
             codes[:, len(active_slots) :] = 0
-            hidden = codec.quantizer.decode_codes(codes).float()
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            hidden = codec.quantizer.decode_codes(codes).to(
+                dtype=torch.float32 if DEVICE_TYPE == "cuda" else codec.decoder_dtype
+            )
+            with torch.autocast(
+                DEVICE_TYPE, dtype=torch.bfloat16, enabled=DEVICE_TYPE == "cuda"
+            ):
                 expected, lengths = reference.decoder(hidden, mask.long() * length)
             expected, lengths = codec.restore_channels_from_codec(expected, lengths)
             actual = step(
@@ -158,41 +170,28 @@ def test_indexed_streaming_matches_sequential_precision_and_cache_order(session_
                 )
 
 
-def test_cuda_graph_capture_uses_thread_local_error_mode():
-    from sglang_omni.models.moss_tts.vocoder_cuda_graph import (
-        MossVocoderCudaGraphRunner,
-    )
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
+def test_cuda_graph_capture_uses_thread_local_error_mode(session_bundle, monkeypatch):
+    runner = session_bundle[0].cg_runner
+    capture = runner.graph_backend.capture
+    calls = []
 
-    source = textwrap.dedent(inspect.getsource(MossVocoderCudaGraphRunner.capture))
-    tree = ast.parse(source)
-    graph_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "graph"
-        and isinstance(node.func.value, ast.Attribute)
-        and node.func.value.attr == "cuda"
-        and isinstance(node.func.value.value, ast.Name)
-        and node.func.value.value.id == "torch"
-    ]
-    assert graph_calls, "MOSS-Audio-Tokenizer vocoder CUDA graph capture call not found"
-    assert any(
-        keyword.arg == "capture_error_mode"
-        and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == "thread_local"
-        for call in graph_calls
-        for keyword in call.keywords
-    ), "MOSS-Audio-Tokenizer vocoder CUDA graph capture must use thread-local error mode"
+    def record_capture(**kwargs):
+        calls.append(kwargs)
+        return capture(**kwargs)
+
+    monkeypatch.setattr(runner.graph_backend, "capture", record_capture)
+    runner.capture(1, 5)
+    assert calls[0]["thread_local_errors"] is True
 
 
-@pytest.mark.skipif(not HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
 @pytest.mark.parametrize("chunk_t,n_active,total", PCM_CASES)
 def test_streaming_pcm_bit_identical(session_bundle, chunk_t, n_active, total):
     session, n_vq, vocab, _ = session_bundle
     torch.manual_seed(1000 * chunk_t + n_active)
     slot_seqs = {
-        s: torch.randint(0, vocab, (n_vq, total), device="cuda", dtype=torch.long)
+        s: torch.randint(0, vocab, (n_vq, total), device=DEVICE_TYPE, dtype=torch.long)
         for s in range(n_active)
     }
     runner = session.cg_runner
@@ -209,12 +208,15 @@ def test_streaming_pcm_bit_identical(session_bundle, chunk_t, n_active, total):
         )
 
 
-@pytest.mark.skipif(not HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
 def test_graph_tracks_eager_with_changing_batches_and_slot_reuse(session_bundle):
     session, n_vq, vocab, _ = session_bundle
     torch.manual_seed(123)
     trace = [
-        {name: torch.randint(0, vocab, (n_vq, length), device="cuda") for name in names}
+        {
+            name: torch.randint(0, vocab, (n_vq, length), device=DEVICE_TYPE)
+            for name in names
+        }
         for names, length in [
             (("a",), 5),
             (("c", "a", "b"), 25),
@@ -258,7 +260,7 @@ def test_graph_tracks_eager_with_changing_batches_and_slot_reuse(session_bundle)
             torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
 def test_replay_failure_disables_runner_and_serves_eager_bit_identical(session_bundle):
     """A replay exception disables the runner (future steps go eager, bit-identical to a pure-eager
     reference); the failing step itself raises so its participants abort."""
@@ -268,7 +270,9 @@ def test_replay_failure_disables_runner_and_serves_eager_bit_identical(session_b
         pytest.skip("need T=5 or T=25 captured")
     torch.manual_seed(4242)
     seq = {
-        0: torch.randint(0, vocab, (n_vq, chunk_t * 3), device="cuda", dtype=torch.long)
+        0: torch.randint(
+            0, vocab, (n_vq, chunk_t * 3), device=DEVICE_TYPE, dtype=torch.long
+        )
     }
     runner = session.cg_runner
     session.cg_runner = None  # pure-eager reference
@@ -300,7 +304,7 @@ def test_replay_failure_disables_runner_and_serves_eager_bit_identical(session_b
         session.cg_runner = runner
 
 
-@pytest.mark.skipif(not HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
 def test_vram_guard_skips_capture_and_falls_back_to_eager(session_bundle):
     """Below the configured VRAM headroom, warmup skips capture (empty graph set, serving uses eager);
     forced via an absurd min_free_gb."""
@@ -324,7 +328,7 @@ def test_vram_guard_skips_capture_and_falls_back_to_eager(session_bundle):
     ), "VRAM guard must skip all captures under insufficient headroom"
 
 
-@pytest.mark.skipif(not HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.skipif(not HAS_DEVICE, reason="needs CUDA/NPU + real codec")
 def test_capture_failure_falls_back_to_eager(session_bundle):
     """A capture exception drops that shape and leaves eager decode available."""
     from sglang_omni.models.moss_tts.vocoder_cuda_graph import (

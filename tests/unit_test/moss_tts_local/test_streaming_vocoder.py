@@ -1547,7 +1547,7 @@ def install_fake_capture(monkeypatch, calls: list, *, seal: bool = True) -> None
     that records each call (so re-probe is observable) and, when seal=True, attaches a runner.
     """
     monkeypatch.setattr(
-        MossTTSLocalStreamingVocoderScheduler, "codec_on_cuda", lambda self: True
+        MossTTSLocalStreamingVocoderScheduler, "codec_supports_graph", lambda self: True
     )
 
     def fake_warmup(self, frames, *, min_free_gb: float = 3.0) -> list:
@@ -1611,7 +1611,7 @@ def test_default_cuda_graph_frames_cover_stream_chunk_exactly(
 ) -> None:
     captured: list[list[int]] = []
     monkeypatch.setattr(
-        MossTTSLocalStreamingVocoderScheduler, "codec_on_cuda", lambda self: True
+        MossTTSLocalStreamingVocoderScheduler, "codec_supports_graph", lambda self: True
     )
 
     def fake_warmup(self, frames, *, min_free_gb: float = 3.0) -> list[int]:

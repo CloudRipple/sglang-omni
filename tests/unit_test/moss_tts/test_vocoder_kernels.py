@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import copy
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from sglang_omni.models.moss_tts import attention as attention_impl
 from sglang_omni.models.moss_tts import vocoder_kernels as kernels
+from sglang_omni.models.moss_tts.audio_tokenizer import RotaryEmbedding
+from sglang_omni.platforms import current_platform
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.version.hip is not None,
@@ -24,6 +27,98 @@ def assert_bytes_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
         actual.contiguous().view(torch.uint8),
         expected.contiguous().view(torch.uint8),
     )
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not current_platform.is_npu(), reason="Ascend NPU is required")
+@pytest.mark.parametrize("context", [125, 400])
+@torch.no_grad()
+def test_npu_streaming_reset_preserves_unselected_slots(context: int) -> None:
+    capacity = 6
+    positions = (
+        torch.arange(capacity * context, device="npu", dtype=torch.long).reshape(
+            capacity, context
+        )
+        + 2**33
+    )
+    offsets = torch.arange(capacity, device="npu", dtype=torch.long) + 2**33
+    state = attention_impl.AttentionStreamingState(
+        capacity, positions.device, None, None, positions, offsets
+    )
+    slots = torch.tensor([1, 3], device="npu", dtype=torch.long)
+    assert kernels.reset_streaming_state_npu_(
+        positions, offsets, state.exec_mask, slots
+    )
+    device_module = torch.get_device_module("npu")
+    stream = device_module.Stream()
+    stream.wait_stream(device_module.current_stream())
+    backend = current_platform.get_device_graph_backend(positions.device)
+    with backend.capture(stream=stream) as graph:
+        state.reset_slots(slots)
+    for selected in [[0, 5], [1, 4], [2, 3]]:
+        positions.fill_(2**33)
+        offsets.fill_(2**33)
+        state.exec_mask.fill_(False)
+        slots.copy_(torch.tensor(selected, device="npu"))
+        expected_positions = positions.cpu()
+        expected_offsets = offsets.cpu()
+        expected_mask = state.exec_mask.cpu()
+        expected_positions[selected] = -1
+        expected_offsets[selected] = 0
+        expected_mask[selected] = True
+        graph.replay()
+        assert_bytes_equal(positions.cpu(), expected_positions)
+        assert_bytes_equal(offsets.cpu(), expected_offsets)
+        assert_bytes_equal(state.exec_mask.cpu(), expected_mask)
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not current_platform.is_npu(), reason="Ascend NPU is required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("heads,length", [(12, 800), (20, 5)])
+@torch.no_grad()
+def test_npu_rope_replay_preserves_values_and_packed_v(
+    dtype: torch.dtype, position_dtype: torch.dtype, heads: int, length: int
+) -> None:
+    batch_size, head_dim = 2, 64
+    projected = torch.randn(
+        batch_size, length, 3, heads, head_dim, device="npu", dtype=dtype
+    )
+    q = projected[:, :, 0].reshape(-1, heads, head_dim)
+    k = projected[:, :, 1].reshape(-1, heads, head_dim)
+    offsets = torch.tensor([0, 211], device="npu", dtype=torch.long)
+    positions = (
+        (offsets[:, None] + torch.arange(length, device="npu"))
+        .reshape(-1)
+        .to(position_dtype)
+    )
+    cache = attention_impl.MossPackedRopeCache(max_period=10000.0).get_cos_sin_cache(
+        device=projected.device, head_dim=head_dim, max_positions=4096
+    )
+    assert kernels.apply_exact_interleaved_rope_inplace(q, k, cache, positions)
+    device_module = torch.get_device_module("npu")
+    stream = device_module.Stream()
+    stream.wait_stream(device_module.current_stream())
+    backend = current_platform.get_device_graph_backend(projected.device)
+    with backend.capture(stream=stream) as graph:
+        assert kernels.apply_exact_interleaved_rope_inplace(q, k, cache, positions)
+    for step in range(3):
+        projected.copy_(torch.randn_like(projected))
+        saved_v = projected[:, :, 2].clone()
+        offsets.add_(step * 17)
+        positions.copy_(
+            (offsets[:, None] + torch.arange(length, device="npu")).reshape(-1)
+        )
+        expected = RotaryEmbedding(10000.0)(
+            projected[:, :, 0].transpose(1, 2),
+            projected[:, :, 1].transpose(1, 2),
+            offsets,
+        )
+        graph.replay()
+        assert_bytes_equal(projected[:, :, 0].transpose(1, 2), expected[0])
+        assert_bytes_equal(projected[:, :, 1].transpose(1, 2), expected[1])
+        assert_bytes_equal(projected[:, :, 2], saved_v)
 
 
 def make_inputs(batch, heads, context, length, dim, dtype, *, device="cuda"):
@@ -144,6 +239,46 @@ def test_streaming_kv_graph_replays_dynamic_slots_and_valid_rows():
 
 
 @pytest.mark.accelerator
+@pytest.mark.skipif(not current_platform.is_npu(), reason="Ascend NPU is required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("length", [5, 125, 180])
+@torch.no_grad()
+def test_npu_streaming_kv_replay_preserves_chronology_and_int64_offsets(
+    dtype: torch.dtype, length: int
+) -> None:
+    """Native word copies must preserve cache bytes, inactive rows and offset carry across replay."""
+    inputs = list(make_inputs(4, 20, 125, length, 64, dtype, device="npu"))
+    inputs[0] = inputs[0].contiguous()
+    inputs[1] = inputs[1].contiguous()
+    inputs[3].fill_(2**32 - 3)
+    assert kernels.can_fuse_streaming_kv(*inputs[:6])
+    initial = [tensor.clone() for tensor in inputs[:4]]
+    device_module = torch.get_device_module("npu")
+    stream = device_module.Stream()
+    stream.wait_stream(device_module.current_stream())
+    with device_module.stream(stream):
+        fused(inputs)
+    device_module.current_stream().wait_stream(stream)
+    backend = current_platform.get_device_graph_backend(inputs[0].device)
+    with backend.capture(stream=stream) as graph:
+        actual = fused(inputs)
+    for tensor, value in zip(inputs[:4], initial):
+        tensor.copy_(value)
+    for step in range(6):
+        inputs[4].copy_(inputs[4].roll(1))
+        inputs[5].copy_(
+            torch.tensor([step % 2 == 0, False, True, step % 3 == 0], device="npu")
+        )
+        inputs[8].copy_(inputs[3][inputs[4], None] + torch.arange(length, device="npu"))
+        expected, expected_state = make_reference(inputs)
+        graph.replay()
+        for got, want in zip(actual, expected):
+            assert_bytes_equal(got, want)
+        for got, want in zip(inputs[:4], expected_state):
+            assert_bytes_equal(got, want)
+
+
+@pytest.mark.accelerator
 @requires_cuda
 @torch.no_grad()
 def test_streaming_kv_preserves_inactive_nan_and_signed_zero_bytes():
@@ -223,14 +358,8 @@ def test_indexed_attention_fusion_and_fallback_match_torch(
     ).eval()
     reference = copy.deepcopy(model)
     can_fuse = attention_impl.can_fuse_streaming_kv
-    used = []
-    gather = attention_impl.gather_streaming_kv
-
-    def record_gather(*args):
-        used.append(True)
-        return gather(*args)
-
-    monkeypatch.setattr(attention_impl, "gather_streaming_kv", record_gather)
+    gather = Mock(wraps=attention_impl.gather_streaming_kv)
+    monkeypatch.setattr(attention_impl, "gather_streaming_kv", gather)
     with model.streaming(8), reference.streaming(8):
         for step, length in enumerate([1, 17, 21, 2, 5]):
             slots = torch.tensor([6, 1, 3], device="cuda").roll(step)
@@ -269,7 +398,7 @@ def test_indexed_attention_fusion_and_fallback_match_torch(
             model(empty, execution_context=execution),
             reference(empty, execution_context=execution),
         )
-    assert bool(used) == (context is not None and not strided_metadata)
+    assert bool(gather.call_count) == (context is not None and not strided_metadata)
 
 
 @pytest.mark.accelerator

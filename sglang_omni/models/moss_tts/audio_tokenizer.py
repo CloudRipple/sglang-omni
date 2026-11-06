@@ -24,6 +24,7 @@ from sglang_omni.models.moss_tts.attention import (
     PACKED_FLASH_ATTENTION_BACKEND,
     SDPA_ATTENTION_BACKEND,
     AttentionBackendResolution,
+    AttentionStreamingState,
     LocalCausalFlashPlan,
     MossAudioTokenizerAttention,
     MossAudioTokenizerStreamingModule,
@@ -498,6 +499,38 @@ class MossAudioTokenizerTransformer(MossAudioTokenizerStreamingModule):
                 dtype=x.dtype,
             )
             x = x + self.positional_scale * pos_emb
+        else:
+            pass
+        if execution_context is not None and x.device.type == "npu" and self.layers:
+            first_attention = self.layers[0].self_attn
+            if first_attention.context is not None and all(
+                layer.self_attn.context == first_attention.context
+                for layer in self.layers
+            ):
+                attention_state = first_attention.streaming_state
+                assert isinstance(attention_state, AttentionStreamingState)
+                _, _, cached_positions = first_attention.ensure_streaming_cache(
+                    attention_state, attention_state.batch_size, x.device, x.dtype
+                )
+                slots = execution_context.state_slot_ids
+                query_positions = attention_state.offset.index_select(0, slots)[
+                    :, None
+                ] + torch.arange(x.shape[1], device=x.device)
+                key_positions = torch.cat(
+                    (cached_positions.index_select(0, slots), query_positions), dim=1
+                )
+                # note (Zhang Yiyang): Layers in this resolution group advance together; share positions and mask only within this forward call.
+                execution_context = StreamingExecutionContext(
+                    slots,
+                    execution_context.valid_rows,
+                    attention_mask=first_attention.make_streaming_attention_mask(
+                        query_positions, key_positions
+                    ),
+                    query_positions=query_positions,
+                    key_positions=key_positions,
+                )
+            else:
+                pass
         else:
             pass
         for layer in self.layers:
@@ -2171,7 +2204,7 @@ class MossAudioTokenizerVocoder(MossAudioTokenizerStreamingModule):
             return
         else:
             pass
-        if device.type != "cuda":
+        if device.type not in ("cuda", "npu"):
             if bool(torch.any(state_slot_ids < 0)) or bool(
                 torch.any(state_slot_ids >= self.decoder_state_capacity)
             ):
@@ -2252,7 +2285,7 @@ class MossAudioTokenizerVocoder(MossAudioTokenizerStreamingModule):
         # note (Zhang Yiyang): Scheduler and graph inputs are trusted device
         # tensors. CPU value checks also cover direct callers without adding
         # GPU synchronization.
-        if device.type != "cuda":
+        if device.type not in ("cuda", "npu"):
             if bool(torch.any(state_slot_ids < 0)) or bool(
                 torch.any(state_slot_ids >= self.decoder_state_capacity)
             ):

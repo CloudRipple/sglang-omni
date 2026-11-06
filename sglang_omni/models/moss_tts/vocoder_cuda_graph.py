@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA-graph replay for the native MOSS streaming decoder.
+"""Device-graph replay for the native MOSS streaming decoder.
 
 The repository-owned codec keeps decoder state in a persistent slot pool.  A
 graph captures one batch bucket while replay supplies the real state slot ids
@@ -15,13 +15,15 @@ from dataclasses import dataclass
 import torch
 
 from sglang_omni.models.moss_tts.audio_tokenizer import MossAudioTokenizerVocoder
+from sglang_omni.platforms import current_platform
+from sglang_omni.platforms.device_graph import DeviceGraphPool, ReplayableGraph
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class CapturedVocoderGraph:
-    graph: torch.cuda.CUDAGraph
+    graph: ReplayableGraph
     static_codes: torch.Tensor
     static_lengths: torch.Tensor
     static_state_slot_ids: torch.Tensor
@@ -56,6 +58,8 @@ class MossVocoderCudaGraphRunner:
             scratch_capacity
         )  # noqa: leading-underscore  # private backing for a read-only configuration property
         self.device: torch.device = next(codec.parameters()).device
+        self.device_module = torch.get_device_module(self.device)
+        self.graph_backend = current_platform.get_device_graph_backend(self.device)
         self.num_quantizers: int = int(num_quantizers)
         self.warmup_iters: int = max(int(warmup_iters), 1)
         self.min_free_bytes: int = int(float(min_free_gb) * (1024**3))
@@ -70,7 +74,8 @@ class MossVocoderCudaGraphRunner:
             {int(size) for size in frame_sizes if int(size) > 0}
         )  # noqa: leading-underscore  # private backing for a read-only configuration property
         self.graphs: dict[tuple[int, int], CapturedVocoderGraph] = {}
-        self.pool: tuple[int, int] | None = None
+        self.pool: DeviceGraphPool | None = None
+        self.capture_stream: torch.Stream | None = None
         self.sealed: bool = False
 
         if self.real_state_capacity <= 0:
@@ -126,7 +131,7 @@ class MossVocoderCudaGraphRunner:
         )
 
     def enough_free_vram(self) -> tuple[bool, int]:
-        free, _ = torch.cuda.mem_get_info(self.device)
+        free, _ = self.device_module.mem_get_info(self.device)
         return free >= self.min_free_bytes, free
 
     def has_unbounded_attention_context(self) -> bool:
@@ -156,9 +161,14 @@ class MossVocoderCudaGraphRunner:
 
         # Note (Zhang Yiyang): Warm up outside capture so lazy workspaces and the
         # first decoder cache initialization do not become capture failures.
-        stream = torch.cuda.Stream(device=device)
-        stream.wait_stream(torch.cuda.current_stream(device))
-        with torch.cuda.stream(stream):
+        # note (Zhang Yiyang): Shared-pool allocations can be reused only on the same capture stream.
+        if self.capture_stream is None:
+            self.capture_stream = self.device_module.Stream(device=device)
+        else:
+            pass
+        stream = self.capture_stream
+        stream.wait_stream(self.device_module.current_stream(device))
+        with self.device_module.stream(stream):
             for _ in range(self.warmup_iters):
                 self.codec.decode_streaming_tensors(
                     codes,
@@ -166,20 +176,19 @@ class MossVocoderCudaGraphRunner:
                     state_slot_ids,
                     valid_rows,
                 )
-        torch.cuda.current_stream(device).wait_stream(stream)
-        torch.cuda.synchronize(device)
+        self.device_module.current_stream(device).wait_stream(stream)
+        self.device_module.synchronize(device)
         self.codec.reset_decoder_state_slots(state_slot_ids)
 
         if self.pool is None:
-            self.pool = torch.cuda.graph_pool_handle()
+            self.pool = self.graph_backend.graph_pool_handle()
         else:
             pass
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(
-            graph,
+        with self.graph_backend.capture(
             pool=self.pool,
-            capture_error_mode="thread_local",
-        ):
+            stream=stream,
+            thread_local_errors=True,
+        ) as graph:
             static_audio, static_audio_lengths = self.codec.decode_streaming_tensors(
                 codes,
                 lengths,
@@ -205,13 +214,13 @@ class MossVocoderCudaGraphRunner:
         else:
             pass
         self.sealed = True
-        if self.device.type != "cuda" or not torch.cuda.is_available():
+        if self.graph_backend is None:
             return []
         else:
             pass
         if self.has_unbounded_attention_context():
             logger.info(
-                "MOSS-Audio-Tokenizer vocoder CUDA graphs require finite attention context; "
+                "MOSS-Audio-Tokenizer vocoder graphs require finite attention context; "
                 "using eager streaming decode"
             )
             return []
@@ -239,13 +248,13 @@ class MossVocoderCudaGraphRunner:
             ),
             reverse=True,
         )
-        with torch.cuda.device(self.device):
+        with self.device_module.device(self.device):
             for batch_size, frame_size in keys:
                 key = (batch_size, frame_size)
                 enough, free = self.enough_free_vram()
                 if not enough:
                     logger.warning(
-                        f"MOSS-Audio-Tokenizer vocoder CUDA graphs: free VRAM "
+                        f"MOSS-Audio-Tokenizer vocoder graphs: free VRAM "
                         f"{free / 1024**3:.1f}GB < {self.min_free_bytes / 1024**3:.1f}GB; "
                         "skipping remaining captures"
                     )
@@ -271,12 +280,12 @@ class MossVocoderCudaGraphRunner:
                             f"capture failure for (B,T)={key}"
                         )
                     logger.warning(
-                        f"MOSS-Audio-Tokenizer vocoder CUDA graph capture failed for (B,T)={key}; "
+                        f"MOSS-Audio-Tokenizer vocoder graph capture failed for (B,T)={key}; "
                         "using eager",
                         exc_info=True,
                     )
         logger.info(
-            f"MOSS-Audio-Tokenizer vocoder CUDA graphs sealed: "
+            f"MOSS-Audio-Tokenizer vocoder graphs sealed: "
             f"{len(self.graphs)}/{len(keys)} captured {self.capture_sizes}"
         )
         return self.capture_sizes
@@ -292,7 +301,11 @@ class MossVocoderCudaGraphRunner:
         valid_rows: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Replay a captured native decode shape, or return None for eager."""
-        if not codes.is_cuda or torch.cuda.is_current_stream_capturing():
+        if (
+            self.graph_backend is None
+            or codes.device != self.device
+            or self.device_module.is_current_stream_capturing()
+        ):
             return None
         else:
             pass

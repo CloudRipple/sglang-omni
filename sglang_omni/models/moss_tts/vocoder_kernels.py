@@ -5,6 +5,13 @@ from __future__ import annotations
 
 import torch
 
+from sglang_omni.models.moss_tts.ascend_triton_kernels import (
+    exact_interleaved_rope_npu_kernel,
+    reset_streaming_state_npu_kernel,
+    streaming_kv_commit_npu_kernel,
+    streaming_positions_commit_npu_kernel,
+)
+
 try:
     import triton
     import triton.language as tl
@@ -16,6 +23,40 @@ except ImportError:  # pragma: no cover - depends on runtime image
 _EXACT_ROPE_BLOCK_SIZE = 256
 _EXACT_ROPE_NUM_WARPS = 4
 _STREAMING_KV_BLOCK_SIZE = 512
+NPU_STREAMING_KV_BLOCK_SIZE = 4096
+NPU_ROPE_MAX_ELEMENTS_PER_TOKEN = 2048
+NPU_STREAMING_RESET_BLOCK_SIZE = 256
+
+
+def reset_streaming_state_npu_(
+    positions: torch.Tensor,
+    offsets: torch.Tensor,
+    exec_mask: torch.Tensor,
+    slots: torch.Tensor,
+) -> bool:
+    """Reset contiguous Ascend metadata rows with one word-copy kernel."""
+    if (
+        reset_streaming_state_npu_kernel is None
+        or not positions.is_contiguous()
+        or positions.shape[1] == 0
+    ):
+        return False
+    else:
+        pass
+    context = positions.shape[1]
+    block_size = NPU_STREAMING_RESET_BLOCK_SIZE
+    with torch.get_device_module(positions.device).device(positions.device):
+        reset_streaming_state_npu_kernel[
+            (slots.numel(), triton.cdiv(context * 2, block_size))
+        ](
+            positions.view(torch.int32),
+            offsets.view(torch.int32),
+            exec_mask,
+            slots.view(torch.int32),
+            context,
+            block_size,
+        )
+    return True
 
 
 if triton is not None and hasattr(tl, "inline_asm_elementwise"):
@@ -102,12 +143,14 @@ def apply_exact_interleaved_rope_inplace(
     cos_sin_cache: torch.Tensor,
     position_ids: torch.Tensor,
 ) -> bool:
-    """Apply source-equivalent interleaved RoPE in one CUDA kernel if supported."""
+    """Apply source-equivalent interleaved RoPE in one device kernel if supported."""
 
     if (
-        exact_interleaved_rope_kernel is None
+        triton is None
         or torch.version.hip is not None
-        or q.device.type != "cuda"
+        or q.device.type not in ("cuda", "npu")
+        or (q.device.type == "cuda" and exact_interleaved_rope_kernel is None)
+        or (q.device.type == "npu" and exact_interleaved_rope_npu_kernel is None)
         or k.device != q.device
         or cos_sin_cache.device != q.device
         or position_ids.device != q.device
@@ -134,6 +177,36 @@ def apply_exact_interleaved_rope_inplace(
     tokens, num_heads, head_dim = map(int, q.shape)
     if tokens == 0 or num_heads <= 0 or head_dim <= 0 or head_dim % 2 != 0:
         return False
+    else:
+        pass
+    if q.device.type == "npu":
+        if (
+            q.stride(1) != head_dim
+            or k.stride(1) != head_dim
+            or triton.next_power_of_2(head_dim) != head_dim
+            or triton.next_power_of_2(num_heads) * head_dim
+            > NPU_ROPE_MAX_ELEMENTS_PER_TOKEN
+            or cos_sin_cache.shape[0] > torch.iinfo(torch.int32).max
+        ):
+            return False
+        else:
+            pass
+        with torch.get_device_module(q.device).device(q.device):
+            # note (Zhang Yiyang): Disable contraction to retain the source's separate FP32 multiply and add rounding.
+            exact_interleaved_rope_npu_kernel[(tokens,)](
+                q,
+                k,
+                cos_sin_cache,
+                position_ids.view(torch.int32),
+                q.stride(0),
+                k.stride(0),
+                position_ids.element_size() // 4,
+                num_heads,
+                head_dim,
+                triton.next_power_of_2(num_heads),
+                enable_fp_fusion=False,
+            )
+        return True
     else:
         pass
     total_pairs = tokens * num_heads * (head_dim // 2)
@@ -335,7 +408,15 @@ def can_fuse_streaming_kv(
         streaming_kv_gather_kernel is None
         or torch.version.hip is not None
         or torch.is_grad_enabled()
-        or cached_k.device.type != "cuda"
+        or cached_k.device.type not in ("cuda", "npu")
+        or (
+            cached_k.device.type == "npu"
+            and (
+                not cached_k.is_contiguous()
+                or not cached_v.is_contiguous()
+                or cached_k.shape[0] > torch.iinfo(torch.int32).max
+            )
+        )
         or cached_k.dtype not in (torch.float16, torch.bfloat16, torch.float32)
         or cached_v.dtype != cached_k.dtype
         or cached_k.ndim != 4
@@ -372,13 +453,29 @@ def gather_streaming_kv(
     current_v: torch.Tensor,
     query_positions: torch.Tensor,
     slots: torch.Tensor,
+    *,
+    key_positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Gather and append chronological K/V for eligible indexed inference.
 
     The caller checks ``can_fuse_streaming_kv`` first. Current K/V must match
     the cache dtype/head shape; query_positions is contiguous [B, T]. K/V may
-    be strided. The returned tensors own separate contiguous storage.
+    be strided. Ascend can reuse positions prepared once for a Transformer group.
     """
+    if current_k.device.type == "npu":
+        return (
+            torch.cat((cached_k.index_select(0, slots), current_k), dim=2),
+            torch.cat((cached_v.index_select(0, slots), current_v), dim=2),
+            (
+                key_positions
+                if key_positions is not None
+                else torch.cat(
+                    (cached_positions.index_select(0, slots), query_positions), dim=1
+                )
+            ),
+        )
+    else:
+        pass
     batch_size, num_heads, chunk_length, head_dim = current_k.shape
     context = cached_k.shape[2]
     shape = (batch_size, num_heads, context + chunk_length, head_dim)
@@ -439,6 +536,37 @@ def commit_streaming_kv_(
     batch_size, num_heads, length, head_dim = all_k.shape
     context = cached_k.shape[2]
     chunk_length = length - context
+    if all_k.device.type == "npu":
+        block_size = NPU_STREAMING_KV_BLOCK_SIZE
+        with torch.get_device_module(all_k.device).device(all_k.device):
+            streaming_kv_commit_npu_kernel[
+                (batch_size * num_heads * triton.cdiv(context * head_dim, block_size),)
+            ](
+                cached_k,
+                cached_v,
+                all_k,
+                all_v,
+                slots.view(torch.int32),
+                valid_rows,
+                num_heads,
+                context,
+                chunk_length,
+                head_dim,
+                block_size,
+            )
+            streaming_positions_commit_npu_kernel[(batch_size,)](
+                cached_positions.view(torch.int32),
+                offsets.view(torch.int32),
+                key_positions.view(torch.int32),
+                slots.view(torch.int32),
+                valid_rows,
+                context,
+                chunk_length,
+                triton.next_power_of_2(context * 2),
+            )
+        return
+    else:
+        pass
     block_size = _STREAMING_KV_BLOCK_SIZE
     with torch.cuda.device(all_k.device):
         streaming_kv_commit_kernel[
